@@ -1,0 +1,2 @@
+"""FastAPI dashboard package."""
+

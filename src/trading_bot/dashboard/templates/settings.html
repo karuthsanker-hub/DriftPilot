@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Trading Bot LLM Settings</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+      body {
+        margin: 0;
+        background: #f7f7f4;
+        color: #191a1f;
+      }
+      main {
+        width: min(960px, calc(100% - 32px));
+        margin: 32px auto;
+      }
+      h1 {
+        font-size: 28px;
+        margin: 0 0 24px;
+      }
+      section {
+        border: 1px solid #d8d8d2;
+        border-radius: 8px;
+        padding: 20px;
+        margin-bottom: 16px;
+        background: #ffffff;
+      }
+      label {
+        display: grid;
+        gap: 6px;
+        font-size: 13px;
+        font-weight: 650;
+      }
+      input, select, button {
+        border: 1px solid #c9c9c2;
+        border-radius: 6px;
+        font: inherit;
+        min-height: 38px;
+        padding: 0 10px;
+      }
+      .grid {
+        display: grid;
+        gap: 14px;
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      }
+      .actions {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+        margin-top: 16px;
+      }
+      button {
+        cursor: pointer;
+        background: #1f5f55;
+        color: white;
+        border-color: #1f5f55;
+      }
+      button.secondary {
+        background: #ffffff;
+        color: #1f5f55;
+      }
+      pre {
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+        background: #f0f0eb;
+        border-radius: 8px;
+        padding: 14px;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>LLM Provider Settings</h1>
+      <section>
+        <div class="grid">
+          <label>Active provider
+            <select id="active_provider">
+              <option value="openai">OpenAI</option>
+              <option value="claude">Claude</option>
+              <option value="gemini">Gemini</option>
+              <option value="qwen">Qwen</option>
+            </select>
+          </label>
+          <label>OpenAI model<input id="openai_model" /></label>
+          <label>Claude model<input id="claude_model" /></label>
+          <label>Gemini model<input id="gemini_model" /></label>
+          <label>Qwen base URL<input id="qwen_base_url" /></label>
+          <label>Qwen model<input id="qwen_model" /></label>
+        </div>
+      </section>
+      <section>
+        <div class="grid">
+          <label>OpenAI API key<input id="openai_api_key" type="password" placeholder="Leave blank to keep current value" /></label>
+          <label>Anthropic API key<input id="anthropic_api_key" type="password" placeholder="Leave blank to keep current value" /></label>
+          <label>Gemini API key<input id="gemini_api_key" type="password" placeholder="Leave blank to keep current value" /></label>
+          <label>Qwen API key<input id="qwen_api_key" type="password" placeholder="Optional local key" /></label>
+        </div>
+        <div class="actions">
+          <button onclick="saveSettings()">Save settings</button>
+          <button class="secondary" onclick="testActiveProvider()">Test active provider</button>
+        </div>
+      </section>
+      <section>
+        <pre id="status">Loading...</pre>
+      </section>
+    </main>
+    <script>
+      const fields = [
+        "active_provider",
+        "openai_model",
+        "claude_model",
+        "gemini_model",
+        "qwen_base_url",
+        "qwen_model",
+      ];
+
+      async function loadSettings() {
+        const response = await fetch("/settings");
+        const data = await response.json();
+        for (const field of fields) {
+          document.getElementById(field).value = data[field];
+        }
+        status(data);
+      }
+
+      async function saveSettings() {
+        const payload = {};
+        for (const field of fields) {
+          payload[field] = document.getElementById(field).value;
+        }
+        for (const field of ["openai_api_key", "anthropic_api_key", "gemini_api_key", "qwen_api_key"]) {
+          const value = document.getElementById(field).value;
+          if (value) payload[field] = value;
+        }
+        const response = await fetch("/settings", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        status(await response.json());
+      }
+
+      async function testActiveProvider() {
+        const provider = document.getElementById("active_provider").value;
+        const response = await fetch(`/settings/providers/${provider}/health`);
+        status(await response.json());
+      }
+
+      function status(data) {
+        document.getElementById("status").textContent = JSON.stringify(data, null, 2);
+      }
+
+      loadSettings();
+    </script>
+  </body>
+</html>
+
