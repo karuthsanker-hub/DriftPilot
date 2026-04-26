@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Trading Bot Dashboard</title>
+    <style>
+      :root { font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #1b1d22; background: #f6f7f4; }
+      body { margin: 0; }
+      main { width: min(1120px, calc(100% - 32px)); margin: 28px auto; }
+      header { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 20px; }
+      h1 { font-size: 28px; margin: 0; }
+      a { color: #1d6257; text-decoration: none; font-weight: 650; }
+      section { background: white; border: 1px solid #deded8; border-radius: 8px; padding: 18px; margin-bottom: 16px; }
+      button { border: 1px solid #1d6257; background: #1d6257; color: white; border-radius: 6px; min-height: 36px; padding: 0 12px; font: inherit; cursor: pointer; }
+      button.secondary { background: white; color: #1d6257; }
+      table { width: 100%; border-collapse: collapse; font-size: 14px; }
+      th, td { text-align: left; border-bottom: 1px solid #ecece7; padding: 8px; vertical-align: top; }
+      th { font-size: 12px; text-transform: uppercase; color: #5c625f; }
+      pre { background: #f0f1ec; border-radius: 8px; padding: 12px; overflow: auto; }
+      .actions { display: flex; gap: 10px; flex-wrap: wrap; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>Trading Bot Dashboard</h1>
+        <a href="http://127.0.0.1:8000/llm">LLM Settings</a>
+      </header>
+      <section>
+        <div class="actions">
+          <button onclick="setKillSwitch(true)">Trading Active</button>
+          <button class="secondary" onclick="setKillSwitch(false)">Kill Switch</button>
+          <button class="secondary" onclick="loadAll()">Refresh</button>
+        </div>
+      </section>
+      <section>
+        <h2>Strategy Config</h2>
+        <pre id="config">Loading...</pre>
+      </section>
+      <section>
+        <h2>Watchlist</h2>
+        <table>
+          <thead><tr><th>Ticker</th><th>Strategy</th><th>Status</th><th>Surprise</th><th>Reason</th></tr></thead>
+          <tbody id="watchlist"></tbody>
+        </table>
+      </section>
+    </main>
+    <script>
+      const API_BASE = window.location.protocol === "file:" ? "http://127.0.0.1:8000" : "";
+
+      async function apiJson(path, options = {}) {
+        const response = await fetch(`${API_BASE}${path}`, options);
+        if (!response.ok) {
+          const text = await response.text();
+          throw new Error(`${path} returned ${response.status}: ${text}`);
+        }
+        return response.json();
+      }
+
+      async function loadAll() {
+        const config = await apiJson("/api/strategy-config").catch(e => ({ error: String(e) }));
+        document.getElementById("config").textContent = JSON.stringify(config, null, 2);
+        const rows = await apiJson("/api/watchlist").catch(e => [{ ticker: "ERROR", strategy: "", status: "", surprise_pct: "", skip_reason: String(e) }]);
+        if (!Array.isArray(rows) || rows.length === 0) {
+          document.getElementById("watchlist").innerHTML = `<tr><td colspan="5">No watchlist rows yet.</td></tr>`;
+          return;
+        }
+        document.getElementById("watchlist").innerHTML = rows.map(row => `
+          <tr>
+            <td>${row.ticker ?? ""}</td>
+            <td>${row.strategy ?? ""}</td>
+            <td>${row.status ?? ""}</td>
+            <td>${row.surprise_pct ?? ""}</td>
+            <td>${row.skip_reason ?? ""}</td>
+          </tr>
+        `).join("");
+      }
+      async function setKillSwitch(active) {
+        await apiJson(`/api/kill-switch?active=${active}`, { method: "POST" });
+        await loadAll();
+      }
+      loadAll();
+    </script>
+  </body>
+</html>

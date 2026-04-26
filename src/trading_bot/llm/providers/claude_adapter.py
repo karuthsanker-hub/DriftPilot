@@ -16,16 +16,22 @@ from trading_bot.llm.prompts import (
 class ClaudeAdapter(LLMAdapter):
     provider = ProviderName.CLAUDE
 
-    def __init__(self, model: str = "claude-sonnet-4-20250514", api_key: str | None = None) -> None:
+    def __init__(
+        self,
+        model: str = "claude-sonnet-4-20250514",
+        api_key: str | None = None,
+        base_url: str | None = None,
+    ) -> None:
         self.model = model
         self.api_key = api_key or os.getenv("ANTHROPIC_API_KEY", "")
+        self.base_url = (base_url or os.getenv("CLAUDE_BASE_URL", "https://api.anthropic.com")).rstrip("/")
 
     def _client(self):
         if not self.api_key:
             raise LLMConfigurationError("ANTHROPIC_API_KEY is not configured")
         from anthropic import Anthropic
 
-        return Anthropic(api_key=self.api_key)
+        return Anthropic(api_key=self.api_key, base_url=self.base_url)
 
     def generate_daily_config(self, payload: MorningInput) -> DailyConfig:
         raw = self._tool_json(
@@ -51,7 +57,7 @@ class ClaudeAdapter(LLMAdapter):
         try:
             self._client().messages.create(
                 model=self.model,
-                max_tokens=5,
+                max_tokens=16,
                 system="Return only ok.",
                 messages=[{"role": "user", "content": "health check"}],
             )
@@ -78,4 +84,3 @@ class ClaudeAdapter(LLMAdapter):
             if getattr(block, "type", None) == "tool_use" and getattr(block, "name", None) == name:
                 return dict(block.input)
         raise LLMOutputValidationError("Claude response did not include the expected tool payload")
-

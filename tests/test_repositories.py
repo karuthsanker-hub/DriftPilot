@@ -31,6 +31,14 @@ class FakeQuery:
         self.client.filters.append((self.table_name, key, value))
         return self
 
+    def order(self, key, desc=False):
+        self.client.orders.append((self.table_name, key, desc))
+        return self
+
+    def limit(self, value):
+        self.client.limits.append((self.table_name, value))
+        return self
+
     def single(self):
         return self
 
@@ -41,6 +49,11 @@ class FakeQuery:
 
     def upsert(self, payload):
         self.operation = "upsert"
+        self.payload = payload
+        return self
+
+    def update(self, payload):
+        self.operation = "update"
         self.payload = payload
         return self
 
@@ -55,6 +68,8 @@ class FakeSupabase:
     def __init__(self) -> None:
         self.operations = []
         self.filters = []
+        self.orders = []
+        self.limits = []
 
     def table(self, table_name: str):
         return FakeQuery(self, table_name)
@@ -88,4 +103,3 @@ def test_trading_repository_maps_records_to_tables() -> None:
     assert client.operations[0][0] == "trades"
     assert client.operations[1][0] == "watchlist"
     assert client.operations[2][0] == "momentum_scores"
-

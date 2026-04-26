@@ -74,7 +74,7 @@ class OpenAIAdapter(LLMAdapter):
         if not self.api_key:
             return ProviderStatus(provider=self.provider, model=self.model, configured=False, ok=False, message="Missing OPENAI_API_KEY")
         try:
-            self._client().responses.create(model=self.model, input="Return the word ok.", max_output_tokens=5)
+            self._client().responses.create(model=self.model, input="Return the word ok.", max_output_tokens=16)
             return ProviderStatus(provider=self.provider, model=self.model, configured=True, ok=True, message="OpenAI connection OK")
         except Exception as exc:
             return ProviderStatus(provider=self.provider, model=self.model, configured=True, ok=False, message=str(exc))
@@ -98,4 +98,3 @@ def _response_json(response: Any) -> dict[str, Any]:
         return json.loads(output_text)
     except json.JSONDecodeError as exc:
         raise LLMOutputValidationError(f"OpenAI response was not valid JSON: {exc}") from exc
-

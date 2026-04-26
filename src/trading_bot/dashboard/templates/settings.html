@@ -75,40 +75,44 @@
   <body>
     <main>
       <h1>LLM Provider Settings</h1>
-      <section>
-        <div class="grid">
-          <label>Active provider
-            <select id="active_provider">
-              <option value="openai">OpenAI</option>
-              <option value="claude">Claude</option>
-              <option value="gemini">Gemini</option>
-              <option value="qwen">Qwen</option>
-            </select>
-          </label>
-          <label>OpenAI model<input id="openai_model" /></label>
-          <label>Claude model<input id="claude_model" /></label>
-          <label>Gemini model<input id="gemini_model" /></label>
-          <label>Qwen base URL<input id="qwen_base_url" /></label>
-          <label>Qwen model<input id="qwen_model" /></label>
-        </div>
-      </section>
-      <section>
-        <div class="grid">
-          <label>OpenAI API key<input id="openai_api_key" type="password" placeholder="Leave blank to keep current value" /></label>
-          <label>Anthropic API key<input id="anthropic_api_key" type="password" placeholder="Leave blank to keep current value" /></label>
-          <label>Gemini API key<input id="gemini_api_key" type="password" placeholder="Leave blank to keep current value" /></label>
-          <label>Qwen API key<input id="qwen_api_key" type="password" placeholder="Optional local key" /></label>
-        </div>
-        <div class="actions">
-          <button onclick="saveSettings()">Save settings</button>
-          <button class="secondary" onclick="testActiveProvider()">Test active provider</button>
-        </div>
-      </section>
+      <p><a href="http://127.0.0.1:8000/">Dashboard</a></p>
+      <form onsubmit="return false">
+        <section>
+          <div class="grid">
+            <label>Active provider
+              <select id="active_provider">
+                <option value="openai">OpenAI</option>
+                <option value="claude">Claude</option>
+                <option value="gemini">Gemini</option>
+                <option value="qwen">Qwen</option>
+              </select>
+            </label>
+            <label>OpenAI model<input id="openai_model" /></label>
+            <label>Claude model<input id="claude_model" /></label>
+            <label>Gemini model<input id="gemini_model" /></label>
+            <label>Qwen base URL<input id="qwen_base_url" /></label>
+            <label>Qwen model<input id="qwen_model" /></label>
+          </div>
+        </section>
+        <section>
+          <div class="grid">
+            <label>OpenAI API key<input id="openai_api_key" type="password" autocomplete="off" placeholder="Leave blank to keep current value" /></label>
+            <label>Anthropic API key<input id="anthropic_api_key" type="password" autocomplete="off" placeholder="Leave blank to keep current value" /></label>
+            <label>Gemini API key<input id="gemini_api_key" type="password" autocomplete="off" placeholder="Leave blank to keep current value" /></label>
+            <label>Qwen API key<input id="qwen_api_key" type="password" autocomplete="off" placeholder="Optional local key" /></label>
+          </div>
+          <div class="actions">
+            <button type="button" onclick="saveSettings()">Save settings</button>
+            <button type="button" class="secondary" onclick="testActiveProvider()">Test active provider</button>
+          </div>
+        </section>
+      </form>
       <section>
         <pre id="status">Loading...</pre>
       </section>
     </main>
     <script>
+      const API_BASE = window.location.protocol === "file:" ? "http://127.0.0.1:8000" : "";
       const fields = [
         "active_provider",
         "openai_model",
@@ -118,13 +122,25 @@
         "qwen_model",
       ];
 
-      async function loadSettings() {
-        const response = await fetch("/settings");
-        const data = await response.json();
-        for (const field of fields) {
-          document.getElementById(field).value = data[field];
+      async function apiJson(path, options = {}) {
+        const response = await fetch(`${API_BASE}${path}`, options);
+        if (!response.ok) {
+          const text = await response.text();
+          throw new Error(`${path} returned ${response.status}: ${text}`);
         }
-        status(data);
+        return response.json();
+      }
+
+      async function loadSettings() {
+        try {
+          const data = await apiJson("/settings");
+          for (const field of fields) {
+            document.getElementById(field).value = data[field];
+          }
+          status(data);
+        } catch (error) {
+          status({ error: String(error), expected_url: "http://127.0.0.1:8000/llm" });
+        }
       }
 
       async function saveSettings() {
@@ -136,18 +152,21 @@
           const value = document.getElementById(field).value;
           if (value) payload[field] = value;
         }
-        const response = await fetch("/settings", {
+        const data = await apiJson("/settings", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
         });
-        status(await response.json());
+        status(data);
       }
 
       async function testActiveProvider() {
         const provider = document.getElementById("active_provider").value;
-        const response = await fetch(`/settings/providers/${provider}/health`);
-        status(await response.json());
+        try {
+          status(await apiJson(`/settings/providers/${provider}/health`));
+        } catch (error) {
+          status({ error: String(error) });
+        }
       }
 
       function status(data) {
@@ -158,4 +177,3 @@
     </script>
   </body>
 </html>
-

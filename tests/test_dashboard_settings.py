@@ -30,6 +30,23 @@ def test_dashboard_saves_provider_settings_to_env(tmp_path) -> None:
     assert "QWEN_BASE_URL=http://localhost:8001/v1" in text
 
 
+def test_dashboard_root_renders(tmp_path) -> None:
+    client = TestClient(create_app(tmp_path / ".env"))
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert "Trading Bot Dashboard" in response.text
+
+
+def test_dashboard_favicon_is_not_noisy_404(tmp_path) -> None:
+    client = TestClient(create_app(tmp_path / ".env"))
+
+    response = client.get("/favicon.ico")
+
+    assert response.status_code == 204
+
+
 def test_dashboard_reports_missing_provider_key(tmp_path, monkeypatch) -> None:
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     client = TestClient(create_app(tmp_path / ".env"))

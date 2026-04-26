@@ -85,4 +85,3 @@ class EnvConfigStore:
             updates["QWEN_API_KEY"] = qwen_api_key
         self.write_values(updates)
         return self.settings()
-
