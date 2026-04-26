@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>DriftPilot Admin</title>
+    <style>
+      :root {
+        --bg: #f5f3ee;
+        --panel: #fffdf8;
+        --ink: #151713;
+        --muted: #69706a;
+        --line: #ded8cc;
+        --accent: #246b5b;
+        --danger: #9a3a32;
+        --soft: #eef4ef;
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+      * { box-sizing: border-box; }
+      body { margin: 0; background: var(--bg); color: var(--ink); }
+      main { width: min(1180px, calc(100% - 32px)); margin: 24px auto 40px; }
+      header { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 18px; }
+      .brand { display: flex; align-items: center; gap: 12px; }
+      .mark { width: 36px; height: 36px; border-radius: 8px; background: var(--accent); color: white; display: grid; place-items: center; font-weight: 800; }
+      h1 { font-size: 26px; margin: 0; }
+      h2 { font-size: 17px; margin: 0 0 14px; }
+      a { color: var(--accent); text-decoration: none; font-weight: 700; }
+      section { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 18px; margin-bottom: 16px; }
+      label { display: grid; gap: 6px; font-size: 13px; font-weight: 700; color: #2e332f; }
+      input, select, button { border: 1px solid #c8c1b4; border-radius: 6px; min-height: 36px; padding: 0 10px; font: inherit; background: white; color: var(--ink); }
+      button { border-color: var(--accent); background: var(--accent); color: white; cursor: pointer; font-weight: 700; }
+      button.secondary { background: white; color: var(--accent); }
+      button.danger { background: var(--danger); border-color: var(--danger); }
+      table { width: 100%; border-collapse: collapse; font-size: 14px; }
+      th, td { text-align: left; border-bottom: 1px solid #ece7dc; padding: 8px; vertical-align: top; }
+      th { font-size: 12px; text-transform: uppercase; color: var(--muted); }
+      pre { background: #f1eee6; border-radius: 8px; padding: 12px; overflow: auto; max-height: 360px; }
+      .actions { display: flex; gap: 10px; flex-wrap: wrap; }
+      .grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
+      .split { display: grid; gap: 16px; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+      .status-ok { color: var(--accent); font-weight: 800; }
+      .status-bad { color: var(--danger); font-weight: 800; }
+      @media (max-width: 760px) { .split { grid-template-columns: 1fr; } }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <div class="brand">
+          <div class="mark">DP</div>
+          <div>
+            <h1>DriftPilot Admin</h1>
+            <div style="color: var(--muted); font-size: 14px;">Diagnostics, manual scans, scheduler control, and provider checks.</div>
+          </div>
+        </div>
+        <div class="actions">
+          <a href="http://127.0.0.1:8000/">Command Center</a>
+          <a href="http://127.0.0.1:8000/llm">LLM Settings</a>
+        </div>
+      </header>
+
+      <section>
+        <h2>Safety Controls</h2>
+        <div class="actions">
+          <button onclick="setKillSwitch(true)">Trading Active</button>
+          <button class="danger" onclick="setKillSwitch(false)">Kill Switch</button>
+          <button class="secondary" onclick="loadAll()">Refresh</button>
+          <button class="secondary" onclick="runDiagnostics()">Run Diagnostics</button>
+          <button class="secondary" onclick="checkProviders()">Check Providers</button>
+        </div>
+      </section>
+
+      <section>
+        <h2>Scheduler</h2>
+        <div class="actions">
+          <button onclick="startScheduler()">Start Scheduler</button>
+          <button class="secondary" onclick="stopScheduler()">Stop Scheduler</button>
+          <button class="secondary" onclick="loadScheduler()">Refresh Scheduler</button>
+          <button class="secondary" onclick="runSchedulerJob('daily_pead_scan')">Run PEAD Job Now</button>
+          <button class="secondary" onclick="runSchedulerJob('pending_entry_scan')">Run Pending Entries Now</button>
+          <button class="secondary" onclick="runSchedulerJob('weekly_momentum_scan')">Run Momentum Job Now</button>
+        </div>
+        <pre id="scheduler">Loading scheduler...</pre>
+      </section>
+
+      <section>
+        <h2>PEAD Scan Harness</h2>
+        <div class="grid">
+          <label>Tickers
+            <input id="scan_tickers" value="AAPL,MSFT,NVDA" />
+          </label>
+          <label>Start date
+            <input id="scan_start_date" type="date" />
+          </label>
+          <label>End date
+            <input id="scan_end_date" type="date" />
+          </label>
+          <label>Sentiment
+            <select id="scan_sentiment">
+              <option value="keyword">Keyword scorer</option>
+              <option value="finbert">FinBERT</option>
+            </select>
+          </label>
+          <label>Persistence
+            <select id="scan_persist">
+              <option value="false">Dry run only</option>
+              <option value="true">Persist passing signals</option>
+            </select>
+          </label>
+        </div>
+        <div class="actions" style="margin-top: 12px;">
+          <button onclick="scanPead()">Scan date range</button>
+          <button class="secondary" onclick="executePending(false)">Dry-run pending entries</button>
+        </div>
+      </section>
+
+      <div class="split">
+        <section>
+          <h2>Action Result</h2>
+          <pre id="action_result">No action run yet.</pre>
+        </section>
+        <section>
+          <h2>Diagnostics</h2>
+          <pre id="diagnostics">Not checked yet.</pre>
+        </section>
+      </div>
+
+      <section>
+        <h2>Strategy Config</h2>
+        <pre id="config">Loading...</pre>
+      </section>
+
+      <section>
+        <h2>Provider Health</h2>
+        <table>
+          <thead><tr><th>Provider</th><th>Configured</th><th>OK</th><th>Message</th></tr></thead>
+          <tbody id="providers"></tbody>
+        </table>
+      </section>
+
+      <section>
+        <h2>Watchlist</h2>
+        <table>
+          <thead><tr><th>Ticker</th><th>Strategy</th><th>Status</th><th>Surprise</th><th>Reason</th></tr></thead>
+          <tbody id="watchlist"></tbody>
+        </table>
+      </section>
+    </main>
+    <script>
+      const API_BASE = window.location.protocol === "file:" ? "http://127.0.0.1:8000" : "";
+      async function apiJson(path, options = {}) {
+        const response = await fetch(`${API_BASE}${path}`, options);
+        if (!response.ok) throw new Error(`${path} returned ${response.status}: ${await response.text()}`);
+        return response.json();
+      }
+      async function loadAll() {
+        const config = await apiJson("/api/strategy-config").catch(e => ({ error: String(e) }));
+        document.getElementById("config").textContent = JSON.stringify(config, null, 2);
+        await loadWatchlist();
+        await loadScheduler();
+      }
+      async function loadWatchlist() {
+        const rows = await apiJson("/api/watchlist").catch(e => [{ ticker: "ERROR", strategy: "", status: "", surprise_pct: "", skip_reason: String(e) }]);
+        document.getElementById("watchlist").innerHTML = !Array.isArray(rows) || rows.length === 0
+          ? `<tr><td colspan="5">No watchlist rows yet.</td></tr>`
+          : rows.map(row => `<tr><td>${row.ticker ?? ""}</td><td>${row.strategy ?? ""}</td><td>${row.status ?? ""}</td><td>${row.surprise_pct ?? ""}</td><td>${row.skip_reason ?? ""}</td></tr>`).join("");
+      }
+      async function setKillSwitch(active) {
+        await apiJson(`/api/kill-switch?active=${active}`, { method: "POST" });
+        await loadAll();
+      }
+      async function runDiagnostics() {
+        const result = await apiJson("/api/diagnostics").catch(e => [{ name: "diagnostics", ok: false, message: String(e) }]);
+        document.getElementById("diagnostics").textContent = JSON.stringify(result, null, 2);
+      }
+      async function checkProviders() {
+        const rows = await apiJson("/api/providers/health").catch(e => [{ provider: "ERROR", configured: false, ok: false, message: String(e) }]);
+        document.getElementById("providers").innerHTML = rows.map(row => `<tr><td>${row.provider ?? ""}</td><td>${row.configured ? "yes" : "no"}</td><td class="${row.ok ? "status-ok" : "status-bad"}">${row.ok ? "OK" : "FAIL"}</td><td>${row.message ?? ""}</td></tr>`).join("");
+      }
+      async function scanPead() {
+        const payload = {
+          tickers: document.getElementById("scan_tickers").value,
+          start_date: document.getElementById("scan_start_date").value || null,
+          end_date: document.getElementById("scan_end_date").value || null,
+          sentiment: document.getElementById("scan_sentiment").value,
+          persist: document.getElementById("scan_persist").value === "true",
+          persist_skips: false,
+        };
+        const result = await apiJson("/api/scan-pead", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) }).catch(e => ({ error: String(e) }));
+        document.getElementById("action_result").textContent = JSON.stringify(result, null, 2);
+        await loadWatchlist();
+      }
+      async function executePending(submit) {
+        const result = await apiJson("/api/execute-pending", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ submit }) }).catch(e => ({ error: String(e) }));
+        document.getElementById("action_result").textContent = JSON.stringify(result, null, 2);
+        await loadWatchlist();
+      }
+      async function loadScheduler() {
+        const result = await apiJson("/api/scheduler").catch(e => ({ error: String(e) }));
+        document.getElementById("scheduler").textContent = JSON.stringify(result, null, 2);
+      }
+      async function startScheduler() {
+        await apiJson("/api/scheduler/start", { method: "POST" }).catch(e => ({ error: String(e) }));
+        await loadScheduler();
+      }
+      async function stopScheduler() {
+        await apiJson("/api/scheduler/stop", { method: "POST" }).catch(e => ({ error: String(e) }));
+        await loadScheduler();
+      }
+      async function runSchedulerJob(jobId) {
+        const result = await apiJson(`/api/scheduler/run/${jobId}`, { method: "POST" }).catch(e => ({ error: String(e) }));
+        document.getElementById("action_result").textContent = JSON.stringify(result, null, 2);
+        await loadScheduler();
+        await loadWatchlist();
+      }
+      const today = new Date();
+      document.getElementById("scan_start_date").valueAsDate = today;
+      document.getElementById("scan_end_date").valueAsDate = today;
+      loadAll();
+      checkProviders();
+    </script>
+  </body>
+</html>

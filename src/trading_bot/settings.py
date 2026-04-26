@@ -32,6 +32,7 @@ class AppSettings(BaseModel):
     vix_pause_threshold: float = Field(default=25.0, gt=0)
     daily_loss_limit_pct: float = Field(default=-2.0, lt=0)
     spy_premarket_pause_pct: float = Field(default=-1.5, lt=0)
+    pead_scan_tickers: list[str] = Field(default_factory=lambda: ["AAPL", "MSFT", "NVDA"])
 
     @field_validator("alpaca_base_url")
     @classmethod
@@ -62,6 +63,7 @@ def load_settings(env_path: str | Path = ".env") -> AppSettings:
         vix_pause_threshold=float(os.getenv("VIX_PAUSE_THRESHOLD", "25.0")),
         daily_loss_limit_pct=float(os.getenv("DAILY_LOSS_LIMIT_PCT", "-2.0")),
         spy_premarket_pause_pct=float(os.getenv("SPY_PREMARKET_PAUSE_PCT", "-1.5")),
+        pead_scan_tickers=_csv("PEAD_SCAN_TICKERS", "AAPL,MSFT,NVDA"),
     )
 
 
@@ -76,3 +78,7 @@ def _bool(key: str, default: bool) -> bool:
         return default
     return value.lower() in {"1", "true", "yes", "on"}
 
+
+def _csv(key: str, default: str) -> list[str]:
+    value = os.getenv(key, default)
+    return [item.strip().upper() for item in value.split(",") if item.strip()]

@@ -8,3 +8,5 @@ data/
 htmlcov/
 .coverage
 *.egg-info/
+
+.playwright-cli/

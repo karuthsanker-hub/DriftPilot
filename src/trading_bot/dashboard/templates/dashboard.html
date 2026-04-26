@@ -3,84 +3,214 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Trading Bot Dashboard</title>
+    <title>DriftPilot</title>
     <style>
-      :root { font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #1b1d22; background: #f6f7f4; }
-      body { margin: 0; }
-      main { width: min(1120px, calc(100% - 32px)); margin: 28px auto; }
-      header { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 20px; }
-      h1 { font-size: 28px; margin: 0; }
-      a { color: #1d6257; text-decoration: none; font-weight: 650; }
-      section { background: white; border: 1px solid #deded8; border-radius: 8px; padding: 18px; margin-bottom: 16px; }
-      button { border: 1px solid #1d6257; background: #1d6257; color: white; border-radius: 6px; min-height: 36px; padding: 0 12px; font: inherit; cursor: pointer; }
-      button.secondary { background: white; color: #1d6257; }
+      :root {
+        --bg: #f6f4ef;
+        --ink: #111411;
+        --muted: #697169;
+        --panel: #fffdf8;
+        --line: #ded8cc;
+        --accent: #246b5b;
+        --accent-soft: #e8f1ec;
+        --danger: #9a3a32;
+        --gold: #b7862f;
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+      * { box-sizing: border-box; }
+      body { margin: 0; background: var(--bg); color: var(--ink); }
+      main { width: min(1180px, calc(100% - 32px)); margin: 24px auto 44px; }
+      .topbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 24px; }
+      .brand { display: flex; align-items: center; gap: 12px; }
+      .mark { width: 42px; height: 42px; border-radius: 8px; background: var(--accent); color: white; display: grid; place-items: center; font-weight: 900; letter-spacing: 0; }
+      .brand h1 { margin: 0; font-size: 24px; }
+      .brand p { margin: 2px 0 0; color: var(--muted); font-size: 14px; }
+      nav { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
+      a { color: var(--accent); text-decoration: none; font-weight: 750; }
+      button { border: 1px solid var(--accent); border-radius: 6px; min-height: 36px; padding: 0 12px; font: inherit; font-weight: 750; background: var(--accent); color: white; cursor: pointer; }
+      button.secondary { background: white; color: var(--accent); }
+      button.danger { background: var(--danger); border-color: var(--danger); }
+      .hero { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(320px, .65fr); gap: 20px; align-items: stretch; margin-bottom: 18px; }
+      .welcome { min-height: 300px; padding: 28px; border: 1px solid var(--line); border-radius: 8px; background: linear-gradient(135deg, #fffdf8 0%, #edf5ef 100%); display: flex; flex-direction: column; justify-content: space-between; }
+      .eyebrow { color: var(--accent); font-size: 12px; text-transform: uppercase; font-weight: 850; letter-spacing: .08em; }
+      .welcome h2 { font-size: clamp(34px, 5vw, 58px); line-height: 1.02; margin: 10px 0 14px; letter-spacing: 0; }
+      .welcome p { color: #3c433d; font-size: 17px; line-height: 1.55; max-width: 720px; margin: 0; }
+      .hero-actions { margin-top: 24px; display: flex; gap: 10px; flex-wrap: wrap; }
+      .status-panel, .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 18px; }
+      .status-panel { display: grid; gap: 14px; }
+      .status-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; border-bottom: 1px solid #eee7dc; padding-bottom: 12px; }
+      .status-row:last-child { border-bottom: 0; padding-bottom: 0; }
+      .label { color: var(--muted); font-size: 12px; text-transform: uppercase; font-weight: 800; }
+      .value { font-size: 20px; font-weight: 850; }
+      .ok { color: var(--accent); }
+      .bad { color: var(--danger); }
+      .grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; margin: 16px 0; }
+      .panel h3 { margin: 0 0 12px; font-size: 17px; }
+      .metric { font-size: 32px; font-weight: 900; margin: 4px 0; }
+      .muted { color: var(--muted); font-size: 14px; line-height: 1.45; }
       table { width: 100%; border-collapse: collapse; font-size: 14px; }
-      th, td { text-align: left; border-bottom: 1px solid #ecece7; padding: 8px; vertical-align: top; }
-      th { font-size: 12px; text-transform: uppercase; color: #5c625f; }
-      pre { background: #f0f1ec; border-radius: 8px; padding: 12px; overflow: auto; }
-      .actions { display: flex; gap: 10px; flex-wrap: wrap; }
+      th, td { text-align: left; border-bottom: 1px solid #ece7dc; padding: 10px 8px; vertical-align: top; }
+      th { color: var(--muted); font-size: 12px; text-transform: uppercase; }
+      .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 16px; }
+      .badge { display: inline-flex; align-items: center; min-height: 26px; padding: 0 9px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); font-size: 12px; font-weight: 850; }
+      pre { white-space: pre-wrap; background: #f1eee6; border-radius: 8px; padding: 12px; max-height: 260px; overflow: auto; }
+      @media (max-width: 880px) {
+        .hero, .grid, .two-col { grid-template-columns: 1fr; }
+        .welcome h2 { font-size: 38px; }
+      }
     </style>
   </head>
   <body>
     <main>
-      <header>
-        <h1>Trading Bot Dashboard</h1>
-        <a href="http://127.0.0.1:8000/llm">LLM Settings</a>
+      <header class="topbar">
+        <div class="brand">
+          <div class="mark">DP</div>
+          <div>
+            <h1>DriftPilot</h1>
+            <p>Daily-batch PEAD and momentum command center</p>
+          </div>
+        </div>
+        <nav>
+          <a href="http://127.0.0.1:8000/admin">Admin</a>
+          <a href="http://127.0.0.1:8000/llm">LLM Settings</a>
+        </nav>
       </header>
-      <section>
-        <div class="actions">
-          <button onclick="setKillSwitch(true)">Trading Active</button>
-          <button class="secondary" onclick="setKillSwitch(false)">Kill Switch</button>
-          <button class="secondary" onclick="loadAll()">Refresh</button>
+
+      <section class="hero">
+        <div class="welcome">
+          <div>
+            <div class="eyebrow">Paper trading mode</div>
+            <h2>Catch post-earnings drift without intraday noise.</h2>
+            <p>DriftPilot watches the scheduled research loop: PEAD candidates after close, pending entries before open, and momentum review every Monday.</p>
+          </div>
+          <div class="hero-actions">
+            <button onclick="startScheduler()">Start scheduler</button>
+            <button class="secondary" onclick="runPeadNow()">Run PEAD scan now</button>
+            <button class="danger" onclick="setKillSwitch(false)">Kill switch</button>
+          </div>
+        </div>
+        <aside class="status-panel">
+          <div class="status-row">
+            <div>
+              <div class="label">Trading state</div>
+              <div id="trading_state" class="value">Loading</div>
+            </div>
+            <span id="trading_badge" class="badge">Checking</span>
+          </div>
+          <div class="status-row">
+            <div>
+              <div class="label">Scheduler</div>
+              <div id="scheduler_state" class="value">Loading</div>
+            </div>
+            <span id="next_job" class="badge">No run time</span>
+          </div>
+          <div class="status-row">
+            <div>
+              <div class="label">Signal queue</div>
+              <div id="queue_count" class="value">0</div>
+            </div>
+            <span class="badge">Watchlist</span>
+          </div>
+        </aside>
+      </section>
+
+      <section class="grid">
+        <div class="panel">
+          <h3>PEAD candidates</h3>
+          <div id="pead_count" class="metric">0</div>
+          <div class="muted">Pending or skipped earnings-drift signals from Supabase.</div>
+        </div>
+        <div class="panel">
+          <h3>Provider readiness</h3>
+          <div id="provider_count" class="metric">0/4</div>
+          <div class="muted">LLMs are analysis-only; execution stays deterministic.</div>
+        </div>
+        <div class="panel">
+          <h3>Last scheduler run</h3>
+          <div id="last_run" class="metric" style="font-size: 20px;">None</div>
+          <div class="muted">Manual and scheduled job history appears here.</div>
         </div>
       </section>
-      <section>
-        <h2>Strategy Config</h2>
-        <pre id="config">Loading...</pre>
+
+      <section class="two-col">
+        <div class="panel">
+          <h3>Signal queue</h3>
+          <table>
+            <thead><tr><th>Ticker</th><th>Strategy</th><th>Status</th><th>Reason</th></tr></thead>
+            <tbody id="watchlist"></tbody>
+          </table>
+        </div>
+        <div class="panel">
+          <h3>Scheduler plan</h3>
+          <table>
+            <thead><tr><th>Job</th><th>Next run</th></tr></thead>
+            <tbody id="scheduler_jobs"></tbody>
+          </table>
+        </div>
       </section>
-      <section>
-        <h2>Watchlist</h2>
-        <table>
-          <thead><tr><th>Ticker</th><th>Strategy</th><th>Status</th><th>Surprise</th><th>Reason</th></tr></thead>
-          <tbody id="watchlist"></tbody>
-        </table>
+
+      <section class="panel" style="margin-top: 16px;">
+        <h3>Latest action</h3>
+        <pre id="action_result">Ready.</pre>
       </section>
     </main>
+
     <script>
       const API_BASE = window.location.protocol === "file:" ? "http://127.0.0.1:8000" : "";
-
       async function apiJson(path, options = {}) {
         const response = await fetch(`${API_BASE}${path}`, options);
-        if (!response.ok) {
-          const text = await response.text();
-          throw new Error(`${path} returned ${response.status}: ${text}`);
-        }
+        if (!response.ok) throw new Error(`${path} returned ${response.status}: ${await response.text()}`);
         return response.json();
       }
-
-      async function loadAll() {
-        const config = await apiJson("/api/strategy-config").catch(e => ({ error: String(e) }));
-        document.getElementById("config").textContent = JSON.stringify(config, null, 2);
-        const rows = await apiJson("/api/watchlist").catch(e => [{ ticker: "ERROR", strategy: "", status: "", surprise_pct: "", skip_reason: String(e) }]);
-        if (!Array.isArray(rows) || rows.length === 0) {
-          document.getElementById("watchlist").innerHTML = `<tr><td colspan="5">No watchlist rows yet.</td></tr>`;
-          return;
-        }
-        document.getElementById("watchlist").innerHTML = rows.map(row => `
-          <tr>
-            <td>${row.ticker ?? ""}</td>
-            <td>${row.strategy ?? ""}</td>
-            <td>${row.status ?? ""}</td>
-            <td>${row.surprise_pct ?? ""}</td>
-            <td>${row.skip_reason ?? ""}</td>
-          </tr>
-        `).join("");
+      async function loadDashboard() {
+        const [config, watchlist, scheduler, providers] = await Promise.all([
+          apiJson("/api/strategy-config").catch(e => ({ error: String(e) })),
+          apiJson("/api/watchlist").catch(e => []),
+          apiJson("/api/scheduler").catch(e => ({ running: false, jobs: [], last_runs: [], error: String(e) })),
+          apiJson("/api/providers/health").catch(e => [{ ok: false, message: String(e) }]),
+        ]);
+        const active = config.trading_active !== "false";
+        document.getElementById("trading_state").textContent = active ? "Active" : "Paused";
+        document.getElementById("trading_state").className = `value ${active ? "ok" : "bad"}`;
+        document.getElementById("trading_badge").textContent = active ? "Ready" : "Halted";
+        document.getElementById("scheduler_state").textContent = scheduler.running ? "Running" : "Stopped";
+        document.getElementById("scheduler_state").className = `value ${scheduler.running ? "ok" : "bad"}`;
+        const next = (scheduler.jobs || []).find(job => job.next_run_time);
+        document.getElementById("next_job").textContent = next ? next.next_run_time.replace("T", " ").slice(0, 16) : "No run time";
+        document.getElementById("queue_count").textContent = Array.isArray(watchlist) ? watchlist.length : 0;
+        document.getElementById("pead_count").textContent = Array.isArray(watchlist) ? watchlist.length : 0;
+        document.getElementById("provider_count").textContent = `${providers.filter(row => row.ok).length}/4`;
+        const last = scheduler.last_runs && scheduler.last_runs[0];
+        document.getElementById("last_run").textContent = last ? last.job : "None";
+        renderWatchlist(watchlist);
+        renderScheduler(scheduler.jobs || []);
+      }
+      function renderWatchlist(rows) {
+        document.getElementById("watchlist").innerHTML = !Array.isArray(rows) || rows.length === 0
+          ? `<tr><td colspan="4">No PEAD candidates yet. Run a scan from Admin.</td></tr>`
+          : rows.slice(0, 8).map(row => `<tr><td>${row.ticker ?? ""}</td><td>${row.strategy ?? ""}</td><td>${row.status ?? ""}</td><td>${row.skip_reason ?? ""}</td></tr>`).join("");
+      }
+      function renderScheduler(jobs) {
+        document.getElementById("scheduler_jobs").innerHTML = jobs.length === 0
+          ? `<tr><td colspan="2">Scheduler has not been started.</td></tr>`
+          : jobs.map(job => `<tr><td>${job.id}</td><td>${job.next_run_time ?? "Not scheduled"}</td></tr>`).join("");
+      }
+      async function startScheduler() {
+        const result = await apiJson("/api/scheduler/start", { method: "POST" }).catch(e => ({ error: String(e) }));
+        document.getElementById("action_result").textContent = JSON.stringify(result, null, 2);
+        await loadDashboard();
+      }
+      async function runPeadNow() {
+        const result = await apiJson("/api/scheduler/run/daily_pead_scan", { method: "POST" }).catch(e => ({ error: String(e) }));
+        document.getElementById("action_result").textContent = JSON.stringify(result, null, 2);
+        await loadDashboard();
       }
       async function setKillSwitch(active) {
-        await apiJson(`/api/kill-switch?active=${active}`, { method: "POST" });
-        await loadAll();
+        const result = await apiJson(`/api/kill-switch?active=${active}`, { method: "POST" }).catch(e => ({ error: String(e) }));
+        document.getElementById("action_result").textContent = JSON.stringify(result, null, 2);
+        await loadDashboard();
       }
-      loadAll();
+      loadDashboard();
     </script>
   </body>
 </html>
