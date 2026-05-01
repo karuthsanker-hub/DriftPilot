@@ -17,6 +17,8 @@ from datetime import date
 
 from pydantic import BaseModel, SecretStr
 
+from driftpilot.dashboard.view_models import operator_state_payload
+from driftpilot.settings import load_settings as load_driftpilot_settings
 from trading_bot.backtesting import BacktestTrade, run_backtest, run_split_backtest
 from trading_bot.config import EnvConfigStore
 from trading_bot.data.earnings_events import EarningsEventStore
@@ -300,6 +302,13 @@ def create_app(env_path: Path | str = ".env") -> FastAPI:
     def operator_settings():
         settings = load_settings(env_path)
         return _operator_settings_payload(settings)
+
+    @app.get("/api/operator/state")
+    def operator_state():
+        try:
+            return operator_state_payload(load_driftpilot_settings(env_path))
+        except Exception as exc:
+            _raise_api_error(exc, "operator_state")
 
     @app.post("/api/operator/settings")
     def save_operator_settings(update: OperatorSettingsUpdate):

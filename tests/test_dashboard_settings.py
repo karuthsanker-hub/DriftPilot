@@ -41,6 +41,19 @@ def test_dashboard_root_renders(tmp_path) -> None:
 
     assert response.status_code == 200
     assert "DriftPilot" in response.text
+    assert "/api/operator/state" in response.text
+
+
+def test_dashboard_operator_state_endpoint_returns_read_model(tmp_path) -> None:
+    client = TestClient(create_app(tmp_path / ".env"))
+
+    response = client.get("/api/operator/state")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["state"]
+    assert payload["slots"]
+    assert payload["candidate_queue"]
 
 
 def test_dashboard_admin_renders(tmp_path) -> None:
