@@ -96,6 +96,15 @@ def test_entry_order_uses_marketable_limit_from_fresh_quote() -> None:
 
 def test_exit_order_falls_back_to_market_when_quote_stale_and_stop_breached() -> None:
     now = datetime(2026, 4, 30, 14, 0, tzinfo=UTC)
+    repo = DriftPilotRepository.open(":memory:", FixedClock(fixed_now=now))
+    position = repo.positions.create_open(
+        symbol="MSFT",
+        quantity=5,
+        entry_price=96,
+        target_price=97,
+        stop_price=95,
+        opened_at=now,
+    )
     trading_client = FakeTradingClient()
     quote_provider = FakeQuoteProvider(
         MarketQuote(
@@ -110,6 +119,7 @@ def test_exit_order_falls_back_to_market_when_quote_stale_and_stop_breached() ->
         clock=FixedClock(fixed_now=now),
         trading_client=trading_client,
         quote_provider=quote_provider,
+        repository=repo,
     )
     latest_bar = MarketBar(
         symbol="MSFT",
@@ -125,7 +135,7 @@ def test_exit_order_falls_back_to_market_when_quote_stale_and_stop_breached() ->
         broker.submit_exit_order(
             symbol="msft",
             quantity=5,
-            position_id=3,
+            position_id=position.id,
             latest_bar=latest_bar,
             stop_price=95,
         )
@@ -138,6 +148,57 @@ def test_exit_order_falls_back_to_market_when_quote_stale_and_stop_breached() ->
     assert request.symbol == "MSFT"
     assert request.side.value == "sell"
     assert request.type.value == "market"
+    latest = repo.transitions.latest()
+    assert latest is not None
+    assert latest.reason == "emergency_market_exit_stale_quote_stop_breached"
+
+
+def test_quote_unavailable_paths_are_logged(tmp_path) -> None:
+    now = datetime(2026, 4, 30, 14, 0, tzinfo=UTC)
+    repo = DriftPilotRepository.open(tmp_path / "operator.sqlite3", FixedClock(fixed_now=now))
+    repo.slots.upsert(1, status="EMPTY", slot_value=1_000)
+    broker = AlpacaBrokerClient(
+        DriftPilotSettings(),
+        clock=FixedClock(fixed_now=now),
+        trading_client=FakeTradingClient(),
+        quote_provider=FakeQuoteProvider(None),
+        repository=repo,
+    )
+
+    entry = asyncio.run(broker.submit_entry_order(symbol="aapl", quantity=1, slot_id=1))
+    exit_ = asyncio.run(broker.submit_exit_order(symbol="aapl", quantity=1, position_id=None))
+
+    assert entry.reason == "quote_unavailable"
+    assert exit_.reason == "quote_unavailable"
+    assert [order.status for order in repo.orders.list_all()] == [
+        "rejected_quote_unavailable",
+        "rejected_quote_unavailable",
+    ]
+    latest = repo.transitions.latest()
+    assert latest is not None
+    assert latest.reason == "exit_quote_unavailable"
+
+
+def test_live_mode_requires_all_gate_criteria() -> None:
+    now = datetime(2026, 4, 30, 14, 0, tzinfo=UTC)
+    broker = AlpacaBrokerClient(
+        DriftPilotSettings(mode="live", live_ok=True),
+        clock=FixedClock(fixed_now=now),
+        trading_client=FakeTradingClient(),
+        quote_provider=FakeQuoteProvider(
+            MarketQuote(symbol="AAPL", timestamp=now, bid_price=99.95, ask_price=100)
+        ),
+    )
+
+    try:
+        asyncio.run(broker.submit_entry_order(symbol="aapl", quantity=1, slot_id=1))
+    except RuntimeError as exc:
+        message = str(exc)
+        assert "backtest_expectancy" in message
+        assert "paper_trading_60_days" in message
+        assert "equity_floor_buffer" in message
+    else:
+        raise AssertionError("expected live gate failure")
 
 
 def test_exit_order_cancel_replace_then_emergency_market_after_timeouts(tmp_path) -> None:

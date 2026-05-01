@@ -153,9 +153,24 @@ class AlpacaBrokerClient:
         quantity: float,
         slot_id: int | None = None,
     ) -> OrderSubmissionResult:
-        self._ensure_order_submission_allowed()
+        await self._ensure_order_submission_allowed()
         quote = self._latest_quote(symbol)
         if quote is None or self._quote_is_stale(quote):
+            self._record_order(
+                broker_order_id=None,
+                symbol=symbol,
+                side="buy",
+                order_type="none",
+                status="rejected_quote_unavailable",
+                quantity=quantity,
+                slot_id=slot_id,
+                metadata={"reason": "quote_unavailable"},
+            )
+            self._log_transition(
+                "ALLOCATING",
+                "entry_quote_unavailable",
+                {"symbol": symbol.upper(), "slot_id": slot_id},
+            )
             return OrderSubmissionResult(
                 submitted=False,
                 broker_order_id=None,
@@ -234,7 +249,7 @@ class AlpacaBrokerClient:
         latest_bar: MarketBar | None = None,
         stop_price: float | None = None,
     ) -> OrderSubmissionResult:
-        self._ensure_order_submission_allowed()
+        await self._ensure_order_submission_allowed()
         quote = self._latest_quote(symbol)
         stop_breached = (
             latest_bar is not None
@@ -243,6 +258,21 @@ class AlpacaBrokerClient:
         )
         if quote is None or self._quote_is_stale(quote):
             if not stop_breached:
+                self._record_order(
+                    broker_order_id=None,
+                    symbol=symbol,
+                    side="sell",
+                    order_type="none",
+                    status="rejected_quote_unavailable",
+                    quantity=quantity,
+                    position_id=position_id,
+                    metadata={"reason": "quote_unavailable"},
+                )
+                self._log_transition(
+                    "EXITING",
+                    "exit_quote_unavailable",
+                    {"symbol": symbol.upper(), "position_id": position_id},
+                )
                 return OrderSubmissionResult(
                     submitted=False,
                     broker_order_id=None,
@@ -273,6 +303,11 @@ class AlpacaBrokerClient:
                 position_id=position_id,
                 limit_price=None,
                 metadata={"reason": "emergency_market_exit_stale_quote_stop_breached"},
+            )
+            self._log_transition(
+                "EXITING",
+                "emergency_market_exit_stale_quote_stop_breached",
+                {"symbol": symbol.upper(), "broker_order_id": str(_attr(order, "id"))},
             )
             return OrderSubmissionResult(
                 submitted=True,
@@ -416,7 +451,7 @@ class AlpacaBrokerClient:
         await asyncio.to_thread(self.trading_client.cancel_order_by_id, broker_order_id)
 
     async def close_position(self, symbol: str) -> None:
-        self._ensure_order_submission_allowed()
+        await self._ensure_order_submission_allowed()
         await asyncio.to_thread(self.trading_client.close_position, symbol.upper())
 
     async def stream_order_updates(self) -> AsyncIterator[Any]:
@@ -484,10 +519,24 @@ class AlpacaBrokerClient:
             else self.settings.alpaca_paper_base_url
         )
 
-    def _ensure_order_submission_allowed(self) -> None:
-        if self.settings.mode == "live" and not self.settings.live_ok:
+    async def _ensure_order_submission_allowed(self) -> None:
+        if self.settings.mode != "live":
+            return
+        unmet: list[str] = []
+        if not self.settings.backtest_expectancy_passed:
+            unmet.append("backtest_expectancy")
+        if not self.settings.paper_trading_gate_passed:
+            unmet.append("paper_trading_60_days")
+        if not self.settings.live_ok:
+            unmet.append("LIVE_OK")
+        account = await self.get_account()
+        required_equity = self.settings.equity_floor + self.settings.live_equity_buffer
+        if account.equity < required_equity:
+            unmet.append("equity_floor_buffer")
+        if unmet:
             raise RuntimeError(
-                "Live order submission is blocked until live gate passes"
+                "Live order submission is blocked until live gate passes: "
+                + ", ".join(unmet)
             )
 
     def _latest_quote(self, symbol: str) -> MarketQuote | None:
@@ -526,7 +575,7 @@ class AlpacaBrokerClient:
     def _record_order(
         self,
         *,
-        broker_order_id: str,
+        broker_order_id: str | None,
         symbol: str,
         side: str,
         order_type: str,
