@@ -180,6 +180,16 @@ class FillRecord:
     metadata: dict[str, Any] | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class ErrorRecord:
+    id: int
+    severity: str
+    message: str
+    raised_at: datetime
+    resolved_at: datetime | None = None
+    metadata: dict[str, Any] | None = None
+
+
 class StateRepository:
     def __init__(
         self, connection: sqlite3.Connection, clock: DriftPilotClock | None = None
@@ -1100,6 +1110,40 @@ class CandidateQueueRepository:
         return None if row is None else row["blocked_reason"]
 
 
+class ErrorRepository:
+    def __init__(
+        self, connection: sqlite3.Connection, clock: DriftPilotClock | None = None
+    ) -> None:
+        self.connection = connection
+        self.clock = clock or DriftPilotClock()
+
+    def record(
+        self,
+        *,
+        severity: str,
+        message: str,
+        metadata: dict[str, Any] | None = None,
+        raised_at: datetime | None = None,
+    ) -> ErrorRecord:
+        timestamp = raised_at or self.clock.now_utc()
+        cursor = self.connection.execute(
+            """
+            INSERT INTO errors (severity, message, raised_at, metadata_json)
+            VALUES (?, ?, ?, ?)
+            """,
+            (severity, message, datetime_to_storage(timestamp), _json_dumps(metadata)),
+        )
+        error_id = _last_insert_id(cursor)
+        self.connection.commit()
+        return ErrorRecord(
+            id=error_id,
+            severity=severity,
+            message=message,
+            raised_at=timestamp,
+            metadata=metadata or {},
+        )
+
+
 class StreamStateRepository:
     def __init__(
         self, connection: sqlite3.Connection, clock: DriftPilotClock | None = None
@@ -1170,6 +1214,7 @@ class DriftPilotRepository:
         self.allocator_state = AllocatorStateRepository(connection, self.clock)
         self.fills = FillRepository(connection)
         self.candidate_queue = CandidateQueueRepository(connection, self.clock)
+        self.errors = ErrorRepository(connection, self.clock)
 
     @classmethod
     def open(
