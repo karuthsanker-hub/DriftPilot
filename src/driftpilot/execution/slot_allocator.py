@@ -10,7 +10,7 @@ from driftpilot.settings import DriftPilotSettings
 from driftpilot.storage.repositories import DriftPilotRepository, SlotRecord
 
 
-FREE_SLOT_STATUSES = {"EMPTY", "AVAILABLE", "RECYCLING"}
+FREE_SLOT_STATUSES = {"EMPTY", "RECYCLING"}
 ACTIVE_SLOT_STATUSES = {"RESERVED", "ENTERING", "OPEN", "EXITING"}
 DEFAULT_MAX_SLOTS_PER_SECTOR = 3
 
