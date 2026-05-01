@@ -79,7 +79,7 @@ CREATE INDEX IF NOT EXISTS idx_orders_symbol ON orders(symbol);
 
 CREATE TABLE IF NOT EXISTS fills (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    order_id INTEGER NOT NULL,
+    order_id INTEGER,
     broker_fill_id TEXT,
     symbol TEXT NOT NULL,
     side TEXT NOT NULL,
