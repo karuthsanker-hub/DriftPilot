@@ -436,7 +436,7 @@ A symbol enters the queue only if all are true:
 - `price > session_vwap`
 - `15m_return >= 0.5%`
 - `spread <= max(0.02, 0.001 * price)`
-- SPY/QQQ regime filter allows entry
+- SPY regime filter allows entry
 
 ### Ranking
 
@@ -1073,7 +1073,7 @@ Keep old env keys where legacy Admin/LLM screens still need them.
 
 - Implement 1-minute bar feature cache.
 - Implement VWAP, RVOL, 15-minute return, spread check, z-score ranking.
-- Implement SPY/QQQ regime logic.
+- Implement SPY regime logic. QQQ is deferred to v2.
 - Add deterministic synthetic-bar tests.
 
 ### Phase 4: Slot Allocator And Paper Fills
