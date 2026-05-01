@@ -1240,6 +1240,9 @@ Phase 7c acceptance:
 2. Historical bar cache: `data/bars/databento/`, gitignored.
 3. Supabase admin views: hidden after SQLite operator migration.
 4. PEAD workflow: moved to `legacy/`.
+5. RVOL = current 1-minute volume / average volume at the same minute-of-day across the last 20 trading days.
+6. Regime is SPY-only for v1. QQQ is deferred to v2.
+7. VWAP uses typical price `(H + L + C) / 3` weighted by volume.
 
 ## Recommended First Coding Slice After Approval
 
