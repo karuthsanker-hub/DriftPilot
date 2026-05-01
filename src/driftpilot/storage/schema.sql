@@ -173,3 +173,10 @@ CREATE TABLE IF NOT EXISTS sector_map (
     updated_at TEXT NOT NULL,
     FOREIGN KEY (symbol) REFERENCES universe(symbol)
 );
+
+CREATE TABLE IF NOT EXISTS stream_state (
+    name TEXT PRIMARY KEY,
+    shard_cursor INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL,
+    metadata_json TEXT NOT NULL DEFAULT '{}'
+);
