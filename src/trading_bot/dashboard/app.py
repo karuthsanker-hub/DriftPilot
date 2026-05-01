@@ -17,7 +17,7 @@ from datetime import date
 
 from pydantic import BaseModel, SecretStr
 
-from driftpilot.dashboard.view_models import operator_state_payload
+from driftpilot.dashboard.view_models import backtest_report_payload, operator_state_payload
 from driftpilot.settings import load_settings as load_driftpilot_settings
 from trading_bot.backtesting import BacktestTrade, run_backtest, run_split_backtest
 from trading_bot.config import EnvConfigStore
@@ -166,6 +166,10 @@ def create_app(env_path: Path | str = ".env") -> FastAPI:
     def admin(request: Request):
         return templates.TemplateResponse(request, "admin.html")
 
+    @app.get("/backtest", response_class=HTMLResponse)
+    def backtest_page(request: Request):
+        return templates.TemplateResponse(request, "backtest.html")
+
     @app.get("/favicon.ico", include_in_schema=False)
     def favicon():
         return Response(status_code=204)
@@ -309,6 +313,13 @@ def create_app(env_path: Path | str = ".env") -> FastAPI:
             return operator_state_payload(load_driftpilot_settings(env_path))
         except Exception as exc:
             _raise_api_error(exc, "operator_state")
+
+    @app.get("/api/backtest/report")
+    def backtest_report():
+        try:
+            return backtest_report_payload()
+        except Exception as exc:
+            _raise_api_error(exc, "backtest_report")
 
     @app.post("/api/operator/settings")
     def save_operator_settings(update: OperatorSettingsUpdate):

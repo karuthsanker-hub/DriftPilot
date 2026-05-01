@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>DriftPilot Backtest</title>
+    <style>
+      @import url("https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap");
+      :root { --bg:#080c16; --panel:#111722; --panel2:#151c2a; --line:#283249; --text:#e8edf7; --muted:#8792aa; --dim:#59647b; --green:#25d39a; --red:#ff4054; --amber:#ffae2b; --blue:#4da3ff; font-family:"IBM Plex Sans",system-ui,sans-serif; }
+      * { box-sizing:border-box; } body { margin:0; background:var(--bg); color:var(--text); } .mono { font-family:"JetBrains Mono",ui-monospace,monospace; font-variant-numeric:tabular-nums; }
+      .nav { height:48px; display:flex; align-items:center; gap:24px; padding:0 18px; background:var(--panel); border-bottom:1px solid var(--line); }
+      .brand { display:flex; align-items:center; gap:10px; font-weight:700; } .mark { width:28px; height:28px; border-radius:6px; display:grid; place-items:center; background:linear-gradient(135deg,var(--blue),#a371f7); font:700 11px "JetBrains Mono"; }
+      .tabs { display:flex; gap:4px; } .tabs a { color:var(--muted); text-decoration:none; padding:7px 12px; border-radius:6px; } .tabs a.active,.tabs a:hover { color:var(--text); background:var(--panel2); }
+      main { width:min(1180px,calc(100% - 32px)); margin:20px auto 44px; display:grid; gap:20px; }
+      .hero { display:grid; grid-template-columns:280px minmax(0,1fr); gap:20px; }
+      .card { border:1px solid var(--line); border-radius:8px; background:var(--panel); padding:18px; }
+      .label { color:var(--dim); text-transform:uppercase; letter-spacing:.13em; font:700 11px "JetBrains Mono"; } .big { margin-top:10px; font:700 42px "JetBrains Mono"; color:var(--amber); }
+      .grid { display:grid; grid-template-columns:repeat(6,minmax(0,1fr)); gap:12px; } .metric { border:1px solid var(--line); border-radius:8px; padding:16px; background:var(--panel); min-height:120px; } .value { margin-top:10px; font:700 25px "JetBrains Mono"; }
+      .green { color:var(--green); } .red { color:var(--red); } .amber { color:var(--amber); }
+      .gate { display:grid; } .gate-row { display:grid; grid-template-columns:32px 1fr 140px; gap:12px; align-items:center; padding:16px; border-bottom:1px solid var(--line); } .gate-row:last-child { border-bottom:0; }
+      .check { width:18px; height:18px; border-radius:50%; border:2px solid var(--dim); } .check.pass { border-color:var(--green); background:radial-gradient(circle,var(--green) 35%,transparent 40%); }
+      .chart { height:260px; display:flex; gap:3px; align-items:end; padding-top:16px; border-top:1px dashed var(--line); } .bar { flex:1; background:var(--green); opacity:.84; min-width:2px; }
+      .two { display:grid; grid-template-columns:1fr 1fr; gap:20px; } table { width:100%; border-collapse:collapse; } th,td { padding:10px 6px; border-bottom:1px solid #1d2639; text-align:left; } th { color:var(--dim); text-transform:uppercase; font:700 10px "JetBrains Mono"; letter-spacing:.1em; }
+      ul { margin:10px 0 0; padding-left:18px; color:var(--muted); line-height:1.55; } @media(max-width:980px){.hero,.two{grid-template-columns:1fr}.grid{grid-template-columns:repeat(2,1fr)}}
+    </style>
+  </head>
+  <body>
+    <nav class="nav"><div class="brand"><div class="mark">DP</div><span>DriftPilot Operator</span></div><div class="tabs"><a href="/">Operator</a><a href="/admin">Admin</a><a class="active" href="/backtest">Backtest</a><a href="/llm">LLM</a></div></nav>
+    <main>
+      <section class="hero">
+        <div class="card"><div class="label">Live Deploy Gate</div><div id="verdict" class="big">...</div><p id="period" style="color:var(--muted);line-height:1.5"></p></div>
+        <div id="gate" class="card gate"></div>
+      </section>
+      <section class="grid" id="metrics"></section>
+      <section class="two">
+        <div class="card"><div class="label">Equity Curve</div><div id="curve" class="chart"></div></div>
+        <div class="card"><div class="label">Slippage Waterfall</div><table id="waterfall"></table></div>
+      </section>
+      <section class="two">
+        <div class="card"><div class="label">Performance By Regime</div><table id="regimes"></table></div>
+        <div class="card"><div class="label">Caveats</div><ul id="caveats"></ul></div>
+      </section>
+    </main>
+    <script>
+      const fmtPct = v => `${(Number(v || 0) * 100).toFixed(2)}%`;
+      const fmtMoney = v => `$${Number(v || 0).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}`;
+      async function load() {
+        const r = await fetch("/api/backtest/report"); const data = await r.json();
+        document.getElementById("verdict").textContent = data.verdict || "GATED";
+        document.getElementById("period").textContent = `${data.period?.start || "--"} → ${data.period?.end || "--"} · ${data.source || "report"}`;
+        const gate = data.live_gate || {};
+        const rows = [["Backtest expectancy > 0", gate.backtest_expectancy_positive], ["60 paper days, cumulative P&L > 0, Sharpe > 1.0", gate.paper_trading_60_days_positive_pnl_sharpe_gt_1], ["Equity ≥ PDT floor + buffer", gate.equity_floor_buffer], ["LIVE_OK=true", gate.live_ok_env]];
+        document.getElementById("gate").innerHTML = rows.map(([label, ok]) => `<div class="gate-row"><span class="check ${ok ? "pass" : ""}"></span><strong>${label}</strong><span class="mono ${ok ? "green" : "amber"}">${ok ? "PASS" : "PENDING"}</span></div>`).join("");
+        const m = data.metrics || {};
+        const metricRows = [["Total Return", fmtPct(m.total_return_pct), "green"], ["Sharpe", Number(m.sharpe || 0).toFixed(2), "green"], ["Max Drawdown", fmtPct(m.max_drawdown_pct), "red"], ["Win Rate", fmtPct(m.win_rate), ""], ["Trades", m.total_trades || 0, ""], ["Expectancy / $", `$${Number(m.expectancy_per_dollar || 0).toFixed(4)}`, "green"]];
+        document.getElementById("metrics").innerHTML = metricRows.map(([l,v,c]) => `<div class="metric"><div class="label">${l}</div><div class="value ${c}">${v}</div></div>`).join("");
+        const curve = data.equity_curve || []; const min = Math.min(...curve.map(p => p.equity), 10000); const max = Math.max(...curve.map(p => p.equity), 10001);
+        document.getElementById("curve").innerHTML = curve.map(p => `<div class="bar" style="height:${20 + ((p.equity - min) / Math.max(1,max-min)) * 220}px"></div>`).join("");
+        const w = data.slippage_waterfall || {};
+        document.getElementById("waterfall").innerHTML = `<tr><th>Component</th><th>Return</th></tr><tr><td>Gross</td><td class="mono green">${fmtPct(w.gross_return_pct)}</td></tr><tr><td>Slippage</td><td class="mono red">${fmtPct(w.slippage_cost_pct)}</td></tr><tr><td>Net</td><td class="mono green">${fmtPct(w.net_return_pct)}</td></tr>`;
+        const regimes = m.regime_performance || {};
+        document.getElementById("regimes").innerHTML = `<tr><th>Regime</th><th>Trades</th><th>Win</th><th>Expectancy</th></tr>` + Object.entries(regimes).map(([k,v]) => `<tr><td>${k}</td><td class="mono">${v.trades}</td><td class="mono">${fmtPct(v.win_rate)}</td><td class="mono ${v.expectancy_per_trade < 0 ? "red" : "green"}">${fmtMoney(v.expectancy_per_trade)}</td></tr>`).join("");
+        document.getElementById("caveats").innerHTML = (data.caveats || []).concat(data.constituents?.survivorship_bias_note ? [data.constituents.survivorship_bias_note] : []).map(x => `<li>${x}</li>`).join("");
+      }
+      load().catch(error => { document.body.insertAdjacentHTML("afterbegin", `<div style="padding:14px;color:#ff4054">${error}</div>`); });
+    </script>
+  </body>
+</html>

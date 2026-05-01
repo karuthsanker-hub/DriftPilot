@@ -65,6 +65,18 @@ def test_dashboard_admin_renders(tmp_path) -> None:
     assert "DriftPilot Admin" in response.text
 
 
+def test_dashboard_backtest_renders_and_reports(tmp_path) -> None:
+    client = TestClient(create_app(tmp_path / ".env"))
+
+    page = client.get("/backtest")
+    report = client.get("/api/backtest/report")
+
+    assert page.status_code == 200
+    assert "DriftPilot Backtest" in page.text
+    assert report.status_code == 200
+    assert report.json()["verdict"] in {"PASS", "GATED", "FAIL"}
+
+
 def test_dashboard_favicon_is_not_noisy_404(tmp_path) -> None:
     client = TestClient(create_app(tmp_path / ".env"))
 

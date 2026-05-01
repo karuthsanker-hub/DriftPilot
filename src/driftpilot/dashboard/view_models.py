@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from driftpilot.settings import DriftPilotSettings
@@ -20,6 +22,17 @@ def operator_state_payload(settings: DriftPilotSettings) -> dict[str, Any]:
                 "source": "mock_after_error",
             }
     return _mock_payload(settings)
+
+
+def backtest_report_payload(path: str | Path = "expectancy_report.json") -> dict[str, Any]:
+    report_path = Path(path)
+    if report_path.exists():
+        loaded = json.loads(report_path.read_text())
+        if not isinstance(loaded, dict):
+            raise ValueError("expectancy_report.json must contain an object")
+        loaded.setdefault("source", "file")
+        return loaded
+    return _mock_backtest_report()
 
 
 def _payload_from_repo(repo: DriftPilotRepository, settings: DriftPilotSettings) -> dict[str, Any]:
@@ -104,4 +117,59 @@ def _mock_payload(settings: DriftPilotSettings) -> dict[str, Any]:
         ],
         "event_log": [],
         "equity_curve": [{"t": index, "equity": settings.paper_capital + (index * 4.2)} for index in range(24)],
+    }
+
+
+def _mock_backtest_report() -> dict[str, Any]:
+    return {
+        "source": "mock",
+        "schema_version": 1,
+        "period": {"start": "2024-01-01", "end": "2024-12-31"},
+        "verdict": "GATED",
+        "live_gate": {
+            "backtest_expectancy_positive": True,
+            "paper_trading_60_days_positive_pnl_sharpe_gt_1": False,
+            "equity_floor_buffer": False,
+            "live_ok_env": False,
+        },
+        "metrics": {
+            "total_return_pct": 0.1142,
+            "gross_return_pct": 0.1871,
+            "slippage_return_pct": 0.0729,
+            "total_pnl": 1142.0,
+            "gross_pnl": 1871.0,
+            "slippage_cost": 729.0,
+            "total_trades": 1847,
+            "win_rate": 0.537,
+            "average_hold_minutes": 18.4,
+            "expectancy_per_trade": 0.62,
+            "expectancy_per_dollar": 0.00062,
+            "sharpe": 1.34,
+            "max_drawdown_pct": -0.0618,
+            "exit_breakdown": {"TARGET": 673, "STOP": 641, "TIME": 533},
+            "regime_performance": {
+                "GREEN": {"trades": 1243, "win_rate": 0.562, "expectancy_per_trade": 0.78, "pnl": 970.0},
+                "CAUTION": {"trades": 472, "win_rate": 0.518, "expectancy_per_trade": 0.41, "pnl": 194.0},
+                "RED": {"trades": 132, "win_rate": 0.477, "expectancy_per_trade": -0.17, "pnl": -22.0},
+            },
+            "daily_pnl": {f"2024-01-{day:02d}": (day - 10) * 7.5 for day in range(1, 21)},
+        },
+        "slippage_waterfall": {
+            "gross_return_pct": 0.1871,
+            "slippage_cost_pct": -0.0729,
+            "net_return_pct": 0.1142,
+        },
+        "constituents": {
+            "point_in_time": False,
+            "survivorship_bias_note": "Point-in-time constituents were unavailable; results may include survivorship bias.",
+        },
+        "caveats": [
+            "Point-in-time constituents unavailable in this mock report.",
+            "Slippage is modeled, not measured from live fills.",
+            "Outage simulation is not included in Phase 7b.",
+        ],
+        "equity_curve": [
+            {"timestamp": f"2024-01-{day:02d}T16:00:00+00:00", "equity": 10000 + (day * 45)}
+            for day in range(1, 21)
+        ],
     }
