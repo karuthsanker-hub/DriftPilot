@@ -16,6 +16,7 @@ from driftpilot.settings import DriftPilotSettings
 
 
 ALPACA_ALGO_TRADER_PLUS_EQUITIES_SYMBOL_LIMIT: int | None = None
+DISCOVERY_STREAM_STATE_NAME = "alpaca_sip_discovery"
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,6 +157,42 @@ def plan_two_tier_subscriptions(
     )
 
 
+def plan_persisted_two_tier_subscriptions(
+    *,
+    repository: Any,
+    universe_symbols: Iterable[str],
+    open_position_symbols: Iterable[str],
+    ranked_candidate_symbols: Iterable[str],
+    settings: DriftPilotSettings,
+    max_symbols_per_connection: int | None = ALPACA_ALGO_TRADER_PLUS_EQUITIES_SYMBOL_LIMIT,
+) -> SubscriptionPlan:
+    stream_state = getattr(repository, "stream_state", None)
+    if stream_state is None:
+        raise ValueError("repository must expose stream_state for persisted shard cursors")
+    current = stream_state.get(DISCOVERY_STREAM_STATE_NAME)
+    plan = plan_two_tier_subscriptions(
+        universe_symbols=universe_symbols,
+        open_position_symbols=open_position_symbols,
+        ranked_candidate_symbols=ranked_candidate_symbols,
+        settings=settings,
+        shard_cursor=current.shard_cursor,
+        max_symbols_per_connection=max_symbols_per_connection,
+    )
+    next_cursor = current.shard_cursor
+    if plan.universe_partially_streamed and plan.discovery_shards:
+        next_cursor = (current.shard_cursor + 1) % len(plan.discovery_shards)
+    stream_state.set_cursor(
+        DISCOVERY_STREAM_STATE_NAME,
+        next_cursor,
+        metadata={
+            "active_discovery_shard": plan.active_discovery_shard,
+            "shard_count": len(plan.discovery_shards),
+            "universe_partially_streamed": plan.universe_partially_streamed,
+        },
+    )
+    return plan
+
+
 class AlpacaSIPStream:
     def __init__(
         self,
@@ -176,18 +213,15 @@ class AlpacaSIPStream:
     @property
     def stream(self) -> StockStream:
         if self._stream is None:
-            from alpaca.data.enums import DataFeed
-            from alpaca.data.live import StockDataStream
+            from alpaca.data.enums import DataFeed  # type: ignore[import-not-found]
+            from alpaca.data.live import StockDataStream  # type: ignore[import-not-found]
 
-            feed = (
-                DataFeed.SIP
-                if self.settings.alpaca_data_feed.lower() == "sip"
-                else DataFeed.IEX
-            )
+            if self.settings.alpaca_data_feed.lower() != "sip":
+                raise ValueError("DriftPilot autonomous stream requires ALPACA_DATA_FEED=sip")
             self._stream = StockDataStream(
                 self.settings.alpaca_key_id,
                 self.settings.alpaca_secret_key,
-                feed=feed,
+                feed=DataFeed.SIP,
             )
         return self._stream
 

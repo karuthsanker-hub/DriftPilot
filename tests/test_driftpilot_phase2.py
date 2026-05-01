@@ -9,8 +9,10 @@ from typing import Any
 from driftpilot.broker.alpaca_client import AlpacaBrokerClient
 from driftpilot.clock import FixedClock
 from driftpilot.market_data.alpaca_stream import (
+    AlpacaSIPStream,
     MarketBar,
     MarketQuote,
+    plan_persisted_two_tier_subscriptions,
     plan_two_tier_subscriptions,
 )
 from driftpilot.settings import DriftPilotSettings
@@ -29,6 +31,7 @@ class FakeTradingClient:
     def __init__(self) -> None:
         self.submitted_requests: list[Any] = []
         self.positions: list[Any] = []
+        self.order_statuses: list[str] = []
 
     def get_account(self) -> Any:
         return SimpleNamespace(
@@ -44,6 +47,10 @@ class FakeTradingClient:
 
     def get_orders(self, _request: Any) -> list[Any]:
         return []
+
+    def get_order_by_id(self, _order_id: str) -> Any:
+        status = self.order_statuses.pop(0) if self.order_statuses else "filled"
+        return SimpleNamespace(status=status)
 
     def submit_order(self, request: Any) -> Any:
         self.submitted_requests.append(request)
@@ -133,6 +140,56 @@ def test_exit_order_falls_back_to_market_when_quote_stale_and_stop_breached() ->
     assert request.type.value == "market"
 
 
+def test_exit_order_cancel_replace_then_emergency_market_after_timeouts(tmp_path) -> None:
+    now = datetime(2026, 4, 30, 14, 0, tzinfo=UTC)
+    repo = DriftPilotRepository.open(tmp_path / "operator.sqlite3", FixedClock(fixed_now=now))
+    position = repo.positions.create_open(
+        symbol="MSFT",
+        quantity=5,
+        entry_price=96,
+        target_price=97,
+        stop_price=95,
+        opened_at=now,
+    )
+    trading_client = FakeTradingClient()
+    trading_client.order_statuses = ["new", "new"]
+    quote_provider = FakeQuoteProvider(
+        MarketQuote(
+            symbol="MSFT",
+            timestamp=now,
+            bid_price=95.00,
+            ask_price=95.05,
+        )
+    )
+    broker = AlpacaBrokerClient(
+        DriftPilotSettings(exit_limit_timeout_seconds=0),
+        clock=FixedClock(fixed_now=now),
+        trading_client=trading_client,
+        quote_provider=quote_provider,
+        repository=repo,
+    )
+
+    result = asyncio.run(
+        broker.submit_exit_order(symbol="msft", quantity=5, position_id=position.id)
+    )
+
+    assert result.reason == "emergency_market_exit_after_timeout"
+    assert result.order_type == "market"
+    assert [request.type.value for request in trading_client.submitted_requests] == [
+        "limit",
+        "limit",
+        "market",
+    ]
+    assert [order.status for order in repo.orders.list_all()] == [
+        "canceled_exit_timeout",
+        "canceled_exit_replacement_timeout",
+        "submitted",
+    ]
+    latest = repo.transitions.latest()
+    assert latest is not None
+    assert latest.reason == "exit_limit_timeout_emergency_market"
+
+
 def test_boot_reconciliation_uses_broker_truth_when_local_position_mismatches() -> None:
     now = datetime(2026, 4, 30, 13, 30, tzinfo=UTC)
     repo = DriftPilotRepository.open(":memory:", FixedClock(fixed_now=now))
@@ -207,3 +264,42 @@ def test_two_tier_subscription_routing_shards_only_discovery_symbols() -> None:
     assert "TSLA" in first_plan.active_symbols
     assert first_plan.active_symbols == ("SPY", "QQQ", "TSLA", "AAPL", "MSFT", "NVDA")
     assert second_plan.active_symbols == ("SPY", "QQQ", "TSLA", "AAPL", "MSFT", "AMD")
+
+
+def test_subscription_shard_cursor_is_persisted(tmp_path) -> None:
+    now = datetime(2026, 4, 30, 14, 0, tzinfo=UTC)
+    repo = DriftPilotRepository.open(tmp_path / "operator.sqlite3", FixedClock(fixed_now=now))
+    settings = DriftPilotSettings(always_on_candidate_count=1)
+    universe = ["AAPL", "MSFT", "NVDA", "AMD", "TSLA"]
+
+    first = plan_persisted_two_tier_subscriptions(
+        repository=repo,
+        universe_symbols=universe,
+        open_position_symbols=[],
+        ranked_candidate_symbols=["AAPL"],
+        settings=settings,
+        max_symbols_per_connection=4,
+    )
+    second = plan_persisted_two_tier_subscriptions(
+        repository=repo,
+        universe_symbols=universe,
+        open_position_symbols=[],
+        ranked_candidate_symbols=["AAPL"],
+        settings=settings,
+        max_symbols_per_connection=4,
+    )
+
+    assert first.active_discovery_shard == 0
+    assert second.active_discovery_shard == 1
+    assert repo.stream_state.get("alpaca_sip_discovery").shard_cursor == 2
+
+
+def test_autonomous_stream_rejects_non_sip_feed() -> None:
+    stream = AlpacaSIPStream(DriftPilotSettings(alpaca_data_feed="iex"))
+
+    try:
+        _ = stream.stream
+    except ValueError as exc:
+        assert "ALPACA_DATA_FEED=sip" in str(exc)
+    else:
+        raise AssertionError("expected non-SIP feed to be rejected")

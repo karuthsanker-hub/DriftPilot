@@ -72,6 +72,8 @@ class TradingClientProtocol(Protocol):
 
     def submit_order(self, request: Any) -> Any: ...
 
+    def get_order_by_id(self, order_id: str) -> Any: ...
+
     def cancel_order_by_id(self, order_id: str) -> Any: ...
 
     def close_position(self, symbol: str) -> Any: ...
@@ -94,17 +96,19 @@ class AlpacaBrokerClient:
         trading_client: TradingClientProtocol | None = None,
         quote_provider: QuoteProvider | None = None,
         order_update_stream: OrderUpdateStreamProtocol | None = None,
+        repository: DriftPilotRepository | None = None,
     ) -> None:
         self.settings = settings
         self.clock = clock or DriftPilotClock(settings.timezone)
         self._trading_client = trading_client
         self.quote_provider = quote_provider
         self.order_update_stream = order_update_stream
+        self.repository = repository
 
     @property
     def trading_client(self) -> TradingClientProtocol:
         if self._trading_client is None:
-            from alpaca.trading.client import TradingClient
+            from alpaca.trading.client import TradingClient  # type: ignore[import-not-found]
 
             client = cast(
                 TradingClientProtocol,
@@ -133,8 +137,8 @@ class AlpacaBrokerClient:
         return [_broker_position_from_alpaca(position) for position in positions]
 
     async def get_open_orders(self) -> list[BrokerOrder]:
-        from alpaca.trading.enums import QueryOrderStatus
-        from alpaca.trading.requests import GetOrdersRequest
+        from alpaca.trading.enums import QueryOrderStatus  # type: ignore[import-not-found]
+        from alpaca.trading.requests import GetOrdersRequest  # type: ignore[import-not-found]
 
         orders = await asyncio.to_thread(
             self.trading_client.get_orders,
@@ -176,6 +180,40 @@ class AlpacaBrokerClient:
             ),
         )
         order = await asyncio.to_thread(self.trading_client.submit_order, request)
+        local_order_id = self._record_order(
+            broker_order_id=str(_attr(order, "id")),
+            symbol=symbol,
+            side="buy",
+            order_type="limit",
+            status="submitted",
+            quantity=quantity,
+            slot_id=slot_id,
+            limit_price=limit_price,
+            metadata={"reason": "marketable_limit_submitted"},
+        )
+        filled = await self._wait_for_fill(str(_attr(order, "id")), self.settings.entry_limit_timeout_seconds)
+        if filled is False:
+            await self.cancel_order(str(_attr(order, "id")))
+            self._update_order_status(
+                local_order_id,
+                "canceled_entry_timeout",
+                {"fallback": "cancel_and_recycle", "timeout_seconds": self.settings.entry_limit_timeout_seconds},
+            )
+            self._log_transition(
+                "ENTRY_TIMEOUT",
+                "entry_limit_timeout_cancel_recycle",
+                {"symbol": symbol.upper(), "broker_order_id": str(_attr(order, "id"))},
+            )
+            return OrderSubmissionResult(
+                submitted=False,
+                broker_order_id=str(_attr(order, "id")),
+                symbol=symbol.upper(),
+                side="buy",
+                quantity=quantity,
+                order_type="limit",
+                limit_price=limit_price,
+                reason="entry_limit_timeout_cancel_recycle",
+            )
         return OrderSubmissionResult(
             submitted=True,
             broker_order_id=str(_attr(order, "id")),
@@ -225,6 +263,17 @@ class AlpacaBrokerClient:
                 ),
             )
             order = await asyncio.to_thread(self.trading_client.submit_order, request)
+            self._record_order(
+                broker_order_id=str(_attr(order, "id")),
+                symbol=symbol,
+                side="sell",
+                order_type="market",
+                status="submitted",
+                quantity=quantity,
+                position_id=position_id,
+                limit_price=None,
+                metadata={"reason": "emergency_market_exit_stale_quote_stop_breached"},
+            )
             return OrderSubmissionResult(
                 submitted=True,
                 broker_order_id=str(_attr(order, "id")),
@@ -250,6 +299,108 @@ class AlpacaBrokerClient:
             ),
         )
         order = await asyncio.to_thread(self.trading_client.submit_order, request)
+        local_order_id = self._record_order(
+            broker_order_id=str(_attr(order, "id")),
+            symbol=symbol,
+            side="sell",
+            order_type="limit",
+            status="submitted",
+            quantity=quantity,
+            position_id=position_id,
+            limit_price=limit_price,
+            metadata={"reason": "marketable_limit_submitted"},
+        )
+        filled = await self._wait_for_fill(str(_attr(order, "id")), self.settings.exit_limit_timeout_seconds)
+        if filled is False:
+            await self.cancel_order(str(_attr(order, "id")))
+            self._update_order_status(
+                local_order_id,
+                "canceled_exit_timeout",
+                {"fallback": "cancel_replace_once", "timeout_seconds": self.settings.exit_limit_timeout_seconds},
+            )
+            replacement_quote = self._latest_quote(symbol)
+            if replacement_quote is not None and not self._quote_is_stale(replacement_quote):
+                replacement_limit = _round_price(
+                    replacement_quote.bid_price - marketable_limit_offset(replacement_quote.bid_price)
+                )
+                replacement_request = _order_request(
+                    symbol=symbol,
+                    quantity=quantity,
+                    side="sell",
+                    order_type="limit",
+                    limit_price=replacement_limit,
+                    client_order_id=_client_order_id(
+                        "exit-replace", symbol, position_id, self.clock.now_utc()
+                    ),
+                )
+                replacement = await asyncio.to_thread(self.trading_client.submit_order, replacement_request)
+                replacement_local_id = self._record_order(
+                    broker_order_id=str(_attr(replacement, "id")),
+                    symbol=symbol,
+                    side="sell",
+                    order_type="limit",
+                    status="submitted",
+                    quantity=quantity,
+                    position_id=position_id,
+                    limit_price=replacement_limit,
+                    metadata={"reason": "replacement_after_exit_timeout"},
+                )
+                replacement_filled = await self._wait_for_fill(
+                    str(_attr(replacement, "id")), self.settings.exit_limit_timeout_seconds
+                )
+                if replacement_filled is not False:
+                    return OrderSubmissionResult(
+                        submitted=True,
+                        broker_order_id=str(_attr(replacement, "id")),
+                        symbol=symbol.upper(),
+                        side="sell",
+                        quantity=quantity,
+                        order_type="limit",
+                        limit_price=replacement_limit,
+                        reason="replacement_limit_submitted",
+                    )
+                await self.cancel_order(str(_attr(replacement, "id")))
+                self._update_order_status(
+                    replacement_local_id,
+                    "canceled_exit_replacement_timeout",
+                    {"fallback": "emergency_market_exit"},
+                )
+
+            market_request = _order_request(
+                symbol=symbol,
+                quantity=quantity,
+                side="sell",
+                order_type="market",
+                client_order_id=_client_order_id(
+                    "emergency-exit-timeout", symbol, position_id, self.clock.now_utc()
+                ),
+            )
+            market_order = await asyncio.to_thread(self.trading_client.submit_order, market_request)
+            self._record_order(
+                broker_order_id=str(_attr(market_order, "id")),
+                symbol=symbol,
+                side="sell",
+                order_type="market",
+                status="submitted",
+                quantity=quantity,
+                position_id=position_id,
+                metadata={"reason": "emergency_market_exit_after_timeout"},
+            )
+            self._log_transition(
+                "EXIT_TIMEOUT",
+                "exit_limit_timeout_emergency_market",
+                {"symbol": symbol.upper(), "broker_order_id": str(_attr(market_order, "id"))},
+            )
+            return OrderSubmissionResult(
+                submitted=True,
+                broker_order_id=str(_attr(market_order, "id")),
+                symbol=symbol.upper(),
+                side="sell",
+                quantity=quantity,
+                order_type="market",
+                limit_price=None,
+                reason="emergency_market_exit_after_timeout",
+            )
         return OrderSubmissionResult(
             submitted=True,
             broker_order_id=str(_attr(order, "id")),
@@ -270,7 +421,11 @@ class AlpacaBrokerClient:
 
     async def stream_order_updates(self) -> AsyncIterator[Any]:
         if self.order_update_stream is None:
-            raise RuntimeError("order update stream is not configured")
+            self.order_update_stream = _AlpacaTradingUpdateStream(
+                key_id=self.settings.alpaca_key_id,
+                secret_key=self.settings.alpaca_secret_key,
+                paper=self.settings.mode != "live",
+            )
         async for update in self.order_update_stream.updates():
             yield update
 
@@ -345,9 +500,107 @@ class AlpacaBrokerClient:
             self.clock.now_utc() - require_aware(quote.timestamp)
         ).total_seconds() > self.settings.spy_stale_seconds
 
+    async def _wait_for_fill(self, broker_order_id: str, timeout_seconds: int) -> bool | None:
+        if timeout_seconds <= 0:
+            return await self._order_is_filled(broker_order_id)
+        deadline = asyncio.get_running_loop().time() + timeout_seconds
+        while asyncio.get_running_loop().time() <= deadline:
+            filled = await self._order_is_filled(broker_order_id)
+            if filled:
+                return True
+            await asyncio.sleep(min(0.25, max(0.0, deadline - asyncio.get_running_loop().time())))
+        return False
+
+    async def _order_is_filled(self, broker_order_id: str) -> bool | None:
+        get_order = getattr(self.trading_client, "get_order_by_id", None)
+        if get_order is None:
+            return None
+        order = await asyncio.to_thread(get_order, broker_order_id)
+        status = str(_attr(order, "status")).lower()
+        if status in {"filled", "partially_filled"}:
+            return True
+        if status in {"canceled", "expired", "rejected"}:
+            return False
+        return False
+
+    def _record_order(
+        self,
+        *,
+        broker_order_id: str,
+        symbol: str,
+        side: str,
+        order_type: str,
+        status: str,
+        quantity: float,
+        position_id: int | None = None,
+        slot_id: int | None = None,
+        limit_price: float | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> int | None:
+        if self.repository is None:
+            return None
+        order = self.repository.orders.create(
+            broker_order_id=broker_order_id,
+            symbol=symbol,
+            side=side,
+            order_type=order_type,
+            status=status,
+            quantity=quantity,
+            position_id=position_id,
+            slot_id=slot_id,
+            limit_price=limit_price,
+            metadata=metadata,
+        )
+        return order.id
+
+    def _update_order_status(
+        self,
+        local_order_id: int | None,
+        status: str,
+        metadata: dict[str, Any],
+    ) -> None:
+        if self.repository is None or local_order_id is None:
+            return
+        self.repository.orders.update_status(local_order_id, status=status, metadata=metadata)
+
+    def _log_transition(self, from_state: str | None, reason: str, metadata: dict[str, Any]) -> None:
+        if self.repository is None:
+            return
+        self.repository.transitions.append(
+            from_state=from_state,
+            to_state="EXITING" if "exit" in reason else "ALLOCATING",
+            reason=reason,
+            metadata=metadata,
+        )
+
 
 def marketable_limit_offset(price: float) -> float:
     return max(0.02, 0.0005 * price)
+
+
+class _AlpacaTradingUpdateStream:
+    def __init__(self, *, key_id: str, secret_key: str, paper: bool) -> None:
+        self.key_id = key_id
+        self.secret_key = secret_key
+        self.paper = paper
+
+    async def updates(self) -> AsyncIterator[Any]:
+        from alpaca.trading.stream import TradingStream  # type: ignore[import-not-found]
+
+        queue: asyncio.Queue[Any] = asyncio.Queue()
+        stream = TradingStream(self.key_id, self.secret_key, paper=self.paper)
+
+        async def handler(update: Any) -> None:
+            await queue.put(update)
+
+        stream.subscribe_trade_updates(handler)
+        runner = asyncio.create_task(asyncio.to_thread(stream.run))
+        try:
+            while True:
+                yield await queue.get()
+        finally:
+            stream.stop()
+            runner.cancel()
 
 
 def _order_request(
@@ -359,8 +612,8 @@ def _order_request(
     client_order_id: str,
     limit_price: float | None = None,
 ) -> Any:
-    from alpaca.trading.enums import OrderSide, OrderType, TimeInForce
-    from alpaca.trading.requests import LimitOrderRequest, MarketOrderRequest
+    from alpaca.trading.enums import OrderSide, OrderType, TimeInForce  # type: ignore[import-not-found]
+    from alpaca.trading.requests import LimitOrderRequest, MarketOrderRequest  # type: ignore[import-not-found]
 
     order_side = OrderSide.BUY if side == "buy" else OrderSide.SELL
     if order_type == "market":

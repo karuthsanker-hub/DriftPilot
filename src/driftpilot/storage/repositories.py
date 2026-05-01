@@ -134,6 +134,31 @@ class DailyCounterRecord:
     updated_at: datetime
 
 
+@dataclass(frozen=True, slots=True)
+class OrderRecord:
+    id: int
+    symbol: str
+    side: str
+    order_type: str
+    status: str
+    quantity: float
+    submitted_at: datetime
+    updated_at: datetime
+    broker_order_id: str | None = None
+    position_id: int | None = None
+    slot_id: int | None = None
+    limit_price: float | None = None
+    metadata: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class StreamStateRecord:
+    name: str
+    shard_cursor: int
+    updated_at: datetime
+    metadata: dict[str, Any] | None = None
+
+
 class StateRepository:
     def __init__(
         self, connection: sqlite3.Connection, clock: DriftPilotClock | None = None
@@ -743,6 +768,172 @@ class DailyCounterRepository:
         return self.get(counter_name, date_et=counter_date)
 
 
+class OrderRepository:
+    def __init__(
+        self, connection: sqlite3.Connection, clock: DriftPilotClock | None = None
+    ) -> None:
+        self.connection = connection
+        self.clock = clock or DriftPilotClock()
+
+    def create(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        order_type: str,
+        status: str,
+        quantity: float,
+        broker_order_id: str | None = None,
+        position_id: int | None = None,
+        slot_id: int | None = None,
+        limit_price: float | None = None,
+        metadata: dict[str, Any] | None = None,
+        submitted_at: datetime | None = None,
+    ) -> OrderRecord:
+        timestamp = submitted_at or self.clock.now_utc()
+        cursor = self.connection.execute(
+            """
+            INSERT INTO orders (
+                broker_order_id, position_id, slot_id, symbol, side, order_type,
+                status, quantity, limit_price, submitted_at, updated_at, metadata_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                broker_order_id,
+                position_id,
+                slot_id,
+                symbol.upper(),
+                side,
+                order_type,
+                status,
+                quantity,
+                limit_price,
+                datetime_to_storage(timestamp),
+                datetime_to_storage(timestamp),
+                _json_dumps(metadata),
+            ),
+        )
+        order_id = _last_insert_id(cursor)
+        self.connection.commit()
+        return OrderRecord(
+            id=order_id,
+            broker_order_id=broker_order_id,
+            position_id=position_id,
+            slot_id=slot_id,
+            symbol=symbol.upper(),
+            side=side,
+            order_type=order_type,
+            status=status,
+            quantity=quantity,
+            limit_price=limit_price,
+            submitted_at=timestamp,
+            updated_at=timestamp,
+            metadata=metadata or {},
+        )
+
+    def update_status(
+        self,
+        order_id: int,
+        *,
+        status: str,
+        metadata: dict[str, Any] | None = None,
+        updated_at: datetime | None = None,
+    ) -> None:
+        timestamp = updated_at or self.clock.now_utc()
+        self.connection.execute(
+            """
+            UPDATE orders
+            SET status = ?, updated_at = ?, metadata_json = ?
+            WHERE id = ?
+            """,
+            (status, datetime_to_storage(timestamp), _json_dumps(metadata), order_id),
+        )
+        self.connection.commit()
+
+    def list_all(self) -> list[OrderRecord]:
+        rows = self.connection.execute(
+            """
+            SELECT id, broker_order_id, position_id, slot_id, symbol, side, order_type,
+                   status, quantity, limit_price, submitted_at, updated_at, metadata_json
+            FROM orders
+            ORDER BY id
+            """
+        ).fetchall()
+        return [self._from_row(row) for row in rows]
+
+    def _from_row(self, row: sqlite3.Row) -> OrderRecord:
+        return OrderRecord(
+            id=row["id"],
+            broker_order_id=row["broker_order_id"],
+            position_id=row["position_id"],
+            slot_id=row["slot_id"],
+            symbol=row["symbol"],
+            side=row["side"],
+            order_type=row["order_type"],
+            status=row["status"],
+            quantity=row["quantity"],
+            limit_price=row["limit_price"],
+            submitted_at=datetime_from_storage(row["submitted_at"]),
+            updated_at=datetime_from_storage(row["updated_at"]),
+            metadata=_json_loads_object(row["metadata_json"]),
+        )
+
+
+class StreamStateRepository:
+    def __init__(
+        self, connection: sqlite3.Connection, clock: DriftPilotClock | None = None
+    ) -> None:
+        self.connection = connection
+        self.clock = clock or DriftPilotClock()
+
+    def get(self, name: str) -> StreamStateRecord:
+        row = self.connection.execute(
+            """
+            SELECT name, shard_cursor, updated_at, metadata_json
+            FROM stream_state
+            WHERE name = ?
+            """,
+            (name,),
+        ).fetchone()
+        if row is None:
+            return StreamStateRecord(
+                name=name,
+                shard_cursor=0,
+                updated_at=self.clock.now_utc(),
+                metadata={},
+            )
+        return StreamStateRecord(
+            name=row["name"],
+            shard_cursor=row["shard_cursor"],
+            updated_at=datetime_from_storage(row["updated_at"]),
+            metadata=_json_loads_object(row["metadata_json"]),
+        )
+
+    def set_cursor(
+        self,
+        name: str,
+        shard_cursor: int,
+        *,
+        metadata: dict[str, Any] | None = None,
+        updated_at: datetime | None = None,
+    ) -> StreamStateRecord:
+        timestamp = updated_at or self.clock.now_utc()
+        self.connection.execute(
+            """
+            INSERT INTO stream_state (name, shard_cursor, updated_at, metadata_json)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(name) DO UPDATE SET
+                shard_cursor = excluded.shard_cursor,
+                updated_at = excluded.updated_at,
+                metadata_json = excluded.metadata_json
+            """,
+            (name, shard_cursor, datetime_to_storage(timestamp), _json_dumps(metadata)),
+        )
+        self.connection.commit()
+        return StreamStateRecord(name=name, shard_cursor=shard_cursor, updated_at=timestamp, metadata=metadata or {})
+
+
 class DriftPilotRepository:
     def __init__(
         self, connection: sqlite3.Connection, clock: DriftPilotClock | None = None
@@ -754,6 +945,8 @@ class DriftPilotRepository:
         self.slots = SlotRepository(connection, self.clock)
         self.positions = PositionRepository(connection, self.clock)
         self.daily_counters = DailyCounterRepository(connection, self.clock)
+        self.orders = OrderRepository(connection, self.clock)
+        self.stream_state = StreamStateRepository(connection, self.clock)
 
     @classmethod
     def open(
