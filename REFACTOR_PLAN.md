@@ -436,7 +436,7 @@ A symbol enters the queue only if all are true:
 - `price > session_vwap`
 - `15m_return >= 0.5%`
 - `spread <= max(0.02, 0.001 * price)`
-- SPY/QQQ regime filter allows entry
+- SPY regime filter allows entry
 
 ### Ranking
 
@@ -1073,7 +1073,7 @@ Keep old env keys where legacy Admin/LLM screens still need them.
 
 - Implement 1-minute bar feature cache.
 - Implement VWAP, RVOL, 15-minute return, spread check, z-score ranking.
-- Implement SPY/QQQ regime logic.
+- Implement SPY regime logic. QQQ is deferred to v2.
 - Add deterministic synthetic-bar tests.
 
 ### Phase 4: Slot Allocator And Paper Fills
@@ -1240,6 +1240,9 @@ Phase 7c acceptance:
 2. Historical bar cache: `data/bars/databento/`, gitignored.
 3. Supabase admin views: hidden after SQLite operator migration.
 4. PEAD workflow: moved to `legacy/`.
+5. Phase 3 RVOL: current 1-minute volume divided by average volume at the same minute-of-day across the last 20 trading days.
+6. Phase 3 regime: SPY-only for v1; QQQ regime logic is deferred to v2.
+7. Phase 3 VWAP: typical price `(high + low + close) / 3` weighted by volume.
 
 ## Recommended First Coding Slice After Approval
 
