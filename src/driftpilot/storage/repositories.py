@@ -70,6 +70,12 @@ def _optional_dict_str(value: dict[str, Any], key: str) -> str | None:
     return None if raw is None else str(raw)
 
 
+def _last_insert_id(cursor: sqlite3.Cursor) -> int:
+    if cursor.lastrowid is None:
+        raise RuntimeError("SQLite insert did not produce a row id")
+    return cursor.lastrowid
+
+
 @dataclass(frozen=True, slots=True)
 class OperatorStateRecord:
     current_state: str
@@ -229,9 +235,7 @@ class TransitionRepository:
                 _json_dumps(metadata),
             ),
         )
-        if cursor.lastrowid is None:
-            raise RuntimeError("state transition insert did not return an id")
-        transition_id = cursor.lastrowid
+        transition_id = _last_insert_id(cursor)
         self.connection.commit()
         return StateTransitionRecord(
             id=transition_id,
