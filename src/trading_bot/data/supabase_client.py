@@ -10,4 +10,3 @@ def create_supabase_client(settings: AppSettings | None = None):
     from supabase import create_client
 
     return create_client(settings.supabase_url, settings.supabase_key.get_secret_value())
-
