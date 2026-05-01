@@ -73,6 +73,9 @@ class DriftPilotSettings:
     max_trades_per_symbol_per_day: int = 3
     daily_loss_limit_pct: float = 0.03
     equity_floor: float = 26_000.0
+    live_equity_buffer: float = 1_000.0
+    backtest_expectancy_passed: bool = False
+    paper_trading_gate_passed: bool = False
     alpaca_key_id: str = ""
     alpaca_secret_key: str = ""
     alpaca_paper_base_url: str = "https://paper-api.alpaca.markets"
@@ -113,6 +116,9 @@ def load_settings(
         max_trades_per_symbol_per_day=_get_int(values, "MAX_TRADES_PER_SYMBOL_PER_DAY", 3),
         daily_loss_limit_pct=_get_float(values, "DAILY_LOSS_LIMIT_PCT", 0.03),
         equity_floor=_get_float(values, "EQUITY_FLOOR", 26_000.0),
+        live_equity_buffer=_get_float(values, "LIVE_EQUITY_BUFFER", 1_000.0),
+        backtest_expectancy_passed=_get_bool(values, "BACKTEST_EXPECTANCY_PASSED", False),
+        paper_trading_gate_passed=_get_bool(values, "PAPER_TRADING_GATE_PASSED", False),
         alpaca_key_id=_get_str(values, "ALPACA_KEY_ID", ""),
         alpaca_secret_key=_get_str(values, "ALPACA_SECRET_KEY", ""),
         alpaca_paper_base_url=_get_str(
