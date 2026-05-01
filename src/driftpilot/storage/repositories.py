@@ -107,6 +107,27 @@ class DailyCounterRecord:
     updated_at: datetime
 
 
+@dataclass(frozen=True, slots=True)
+class AllocatorStateRecord:
+    status: str
+    updated_at: datetime
+    locked_at: datetime | None = None
+    metadata: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class FillRecord:
+    id: int
+    symbol: str
+    side: str
+    quantity: float
+    price: float
+    filled_at: datetime
+    order_id: int | None = None
+    broker_fill_id: str | None = None
+    metadata: dict[str, Any] | None = None
+
+
 class StateRepository:
     def __init__(self, connection: sqlite3.Connection, clock: DriftPilotClock | None = None) -> None:
         self.connection = connection
@@ -377,6 +398,183 @@ class DailyCounterRepository:
         return self.get(counter_name, date_et=counter_date)
 
 
+class AllocatorStateRepository:
+    def __init__(self, connection: sqlite3.Connection, clock: DriftPilotClock | None = None) -> None:
+        self.connection = connection
+        self.clock = clock or DriftPilotClock()
+
+    def set(
+        self,
+        *,
+        status: str,
+        updated_at: datetime | None = None,
+        locked_at: datetime | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> AllocatorStateRecord:
+        timestamp = updated_at or self.clock.now_utc()
+        self.connection.execute(
+            """
+            INSERT INTO allocator_state (id, status, locked_at, updated_at, metadata_json)
+            VALUES (1, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                status = excluded.status,
+                locked_at = excluded.locked_at,
+                updated_at = excluded.updated_at,
+                metadata_json = excluded.metadata_json
+            """,
+            (
+                status,
+                datetime_to_storage(locked_at) if locked_at is not None else None,
+                datetime_to_storage(timestamp),
+                _json_dumps(metadata),
+            ),
+        )
+        self.connection.commit()
+        return AllocatorStateRecord(status=status, locked_at=locked_at, updated_at=timestamp, metadata=metadata or {})
+
+    def get(self) -> AllocatorStateRecord | None:
+        row = self.connection.execute(
+            """
+            SELECT status, locked_at, updated_at, metadata_json
+            FROM allocator_state
+            WHERE id = 1
+            """
+        ).fetchone()
+        if row is None:
+            return None
+        return AllocatorStateRecord(
+            status=row["status"],
+            locked_at=datetime_from_storage(row["locked_at"]) if row["locked_at"] else None,
+            updated_at=datetime_from_storage(row["updated_at"]),
+            metadata=_json_loads_object(row["metadata_json"]),
+        )
+
+
+class FillRepository:
+    def __init__(self, connection: sqlite3.Connection) -> None:
+        self.connection = connection
+
+    def record(self, fill: Any) -> FillRecord:
+        metadata = dict(getattr(fill, "metadata", {}) or {})
+        cursor = self.connection.execute(
+            """
+            INSERT INTO fills (
+                order_id, broker_fill_id, symbol, side, quantity, price, filled_at, metadata_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                getattr(fill, "order_id", None),
+                getattr(fill, "broker_fill_id", None),
+                str(getattr(fill, "symbol")).upper(),
+                str(getattr(fill, "side")),
+                float(getattr(fill, "quantity")),
+                float(getattr(fill, "price")),
+                datetime_to_storage(getattr(fill, "filled_at")),
+                _json_dumps(metadata),
+            ),
+        )
+        fill_id = _last_insert_id(cursor)
+        self.connection.commit()
+        return FillRecord(
+            id=fill_id,
+            order_id=getattr(fill, "order_id", None),
+            broker_fill_id=getattr(fill, "broker_fill_id", None),
+            symbol=str(getattr(fill, "symbol")).upper(),
+            side=str(getattr(fill, "side")),
+            quantity=float(getattr(fill, "quantity")),
+            price=float(getattr(fill, "price")),
+            filled_at=getattr(fill, "filled_at"),
+            metadata=metadata,
+        )
+
+    def list_all(self) -> list[FillRecord]:
+        rows = self.connection.execute(
+            """
+            SELECT id, order_id, broker_fill_id, symbol, side, quantity, price, filled_at, metadata_json
+            FROM fills
+            ORDER BY id
+            """
+        ).fetchall()
+        return [
+            FillRecord(
+                id=row["id"],
+                order_id=row["order_id"],
+                broker_fill_id=row["broker_fill_id"],
+                symbol=row["symbol"],
+                side=row["side"],
+                quantity=row["quantity"],
+                price=row["price"],
+                filled_at=datetime_from_storage(row["filled_at"]),
+                metadata=_json_loads_object(row["metadata_json"]),
+            )
+            for row in rows
+        ]
+
+
+class CandidateQueueRepository:
+    def __init__(self, connection: sqlite3.Connection, clock: DriftPilotClock | None = None) -> None:
+        self.connection = connection
+        self.clock = clock or DriftPilotClock()
+
+    def mark_blocked(
+        self,
+        symbol: str,
+        *,
+        reason: str,
+        features: dict[str, Any] | None = None,
+        updated_at: datetime | None = None,
+    ) -> None:
+        timestamp = updated_at or self.clock.now_utc()
+        normalized = symbol.upper()
+        existing = self.connection.execute(
+            """
+            SELECT id
+            FROM candidate_queue
+            WHERE symbol = ?
+            ORDER BY updated_at DESC, id DESC
+            LIMIT 1
+            """,
+            (normalized,),
+        ).fetchone()
+        if existing is None:
+            self.connection.execute(
+                """
+                INSERT INTO candidate_queue (
+                    symbol, score, rank, status, blocked_reason, features_json, created_at, updated_at
+                )
+                VALUES (?, 0, 0, 'blocked', ?, ?, ?, ?)
+                """,
+                (normalized, reason, _json_dumps(features), datetime_to_storage(timestamp), datetime_to_storage(timestamp)),
+            )
+        else:
+            self.connection.execute(
+                """
+                UPDATE candidate_queue
+                SET status = 'blocked',
+                    blocked_reason = ?,
+                    features_json = ?,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (reason, _json_dumps(features), datetime_to_storage(timestamp), existing["id"]),
+            )
+        self.connection.commit()
+
+    def blocked_reason(self, symbol: str) -> str | None:
+        row = self.connection.execute(
+            """
+            SELECT blocked_reason
+            FROM candidate_queue
+            WHERE symbol = ?
+            ORDER BY updated_at DESC, id DESC
+            LIMIT 1
+            """,
+            (symbol.upper(),),
+        ).fetchone()
+        return None if row is None else row["blocked_reason"]
+
+
 class DriftPilotRepository:
     def __init__(self, connection: sqlite3.Connection, clock: DriftPilotClock | None = None) -> None:
         self.connection = connection
@@ -385,6 +583,9 @@ class DriftPilotRepository:
         self.transitions = TransitionRepository(connection, self.clock)
         self.slots = SlotRepository(connection, self.clock)
         self.daily_counters = DailyCounterRepository(connection, self.clock)
+        self.allocator_state = AllocatorStateRepository(connection, self.clock)
+        self.fills = FillRepository(connection)
+        self.candidate_queue = CandidateQueueRepository(connection, self.clock)
 
     @classmethod
     def open(cls, path: str | Path, clock: DriftPilotClock | None = None) -> DriftPilotRepository:

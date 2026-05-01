@@ -111,6 +111,12 @@ def test_allocator_rejects_stale_candidates_and_duplicate_symbols(tmp_path) -> N
 
         assert [rejection.reason for rejection in result.rejections] == ["stale_bar", "duplicate_symbol"]
         assert [allocation.symbol for allocation in result.allocations] == ["FRESH"]
+        allocator_state = repo.allocator_state.get()
+        assert allocator_state is not None
+        assert allocator_state.status == "IDLE"
+        assert allocator_state.metadata is not None
+        assert allocator_state.metadata["reasons"]["stale_bar"] == 1
+        assert repo.candidate_queue.blocked_reason("OLD") == "stale_bar"
 
     asyncio.run(run())
 
@@ -143,3 +149,20 @@ def test_paper_fill_slippage_formula_entry_exit_quantity_and_persistence() -> No
         "max(0.02,0.0005*price)",
         "max(0.02,0.0005*price)",
     ]
+
+
+def test_paper_fill_persists_to_sqlite_repository(tmp_path) -> None:
+    repo = _repo(tmp_path)
+    engine = PaperFillEngine(repo, _settings(), clock=FixedClock(fixed_now=NOW))
+
+    async def run() -> None:
+        await engine.apply_entry(symbol="abc", quantity=3, reference_price=20.0)
+        await engine.apply_exit(symbol="abc", quantity=2, reference_price=20.0, current_quantity=3)
+
+    asyncio.run(run())
+
+    fills = repo.fills.list_all()
+    assert [fill.side for fill in fills] == ["buy", "sell"]
+    assert [fill.symbol for fill in fills] == ["ABC", "ABC"]
+    assert all(fill.metadata is not None for fill in fills)
+    assert [fill.metadata["slippage"] for fill in fills if fill.metadata is not None] == [0.02, 0.02]

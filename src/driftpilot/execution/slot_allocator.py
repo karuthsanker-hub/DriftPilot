@@ -109,6 +109,15 @@ class SlotAllocator:
                 symbol = candidate.symbol.upper()
                 stale_seconds = (now - candidate.latest_bar_at.astimezone(now.tzinfo)).total_seconds()
                 if stale_seconds > self.settings.scan_interval_seconds * 2:
+                    self._mark_candidate_blocked(
+                        symbol,
+                        "stale_bar",
+                        {
+                            "age_seconds": stale_seconds,
+                            "latest_bar_at": datetime_to_storage(candidate.latest_bar_at),
+                        },
+                        now,
+                    )
                     rejections.append(
                         AllocationRejection(
                             symbol,
@@ -192,7 +201,27 @@ class SlotAllocator:
         set_state = getattr(allocator_state, "set", None)
         if set_state is None:
             return
-        set_state(status=status, updated_at=timestamp, metadata=metadata)
+        set_state(
+            status=status,
+            locked_at=timestamp if status == "LOCKED" else None,
+            updated_at=timestamp,
+            metadata=metadata,
+        )
+
+    def _mark_candidate_blocked(
+        self,
+        symbol: str,
+        reason: str,
+        detail: dict[str, Any],
+        timestamp: datetime,
+    ) -> None:
+        candidate_queue = getattr(self.repository, "candidate_queue", None)
+        if candidate_queue is None:
+            return
+        mark_blocked = getattr(candidate_queue, "mark_blocked", None)
+        if mark_blocked is None:
+            return
+        mark_blocked(symbol, reason=reason, features=detail, updated_at=timestamp)
 
 
 def _slot_status(slot: SlotRecord) -> str:
