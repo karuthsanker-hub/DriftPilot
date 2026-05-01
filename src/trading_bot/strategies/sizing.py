@@ -39,3 +39,28 @@ def calculate_position_size(
         position_value=max(0, shares) * entry_price,
     )
 
+
+def calculate_short_position_size(
+    portfolio_value: float,
+    entry_price: float,
+    atr_value: float,
+    *,
+    atr_multiplier: float = 2.0,
+    risk_pct: float = 0.01,
+    max_position_pct: float = 0.20,
+) -> PositionSize:
+    size = calculate_position_size(
+        portfolio_value,
+        entry_price,
+        atr_value,
+        atr_multiplier=atr_multiplier,
+        risk_pct=risk_pct,
+        max_position_pct=max_position_pct,
+    )
+    stop_distance = atr_value * atr_multiplier
+    return PositionSize(
+        shares=size.shares,
+        stop_price=entry_price + stop_distance,
+        risk_dollars=size.risk_dollars,
+        position_value=size.position_value,
+    )

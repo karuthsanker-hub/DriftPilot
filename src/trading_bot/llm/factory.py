@@ -36,5 +36,4 @@ def active_adapter(env_path: str | None = None) -> LLMAdapter:
 
 
 def configured_provider_name() -> ProviderName:
-    return ProviderName(os.getenv("ACTIVE_LLM_PROVIDER", ProviderName.OPENAI.value))
-
+    return ProviderName(os.getenv("ACTIVE_LLM_PROVIDER", ProviderName.QWEN.value))

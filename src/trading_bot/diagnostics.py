@@ -26,6 +26,8 @@ def run_env_diagnostics(env_path: str | Path = ".env", *, network: bool = True, 
         _required("SUPABASE_KEY"),
         _required("ALPACA_API_KEY"),
         _required("ALPACA_SECRET_KEY"),
+        _required("FINNHUB_API_KEY"),
+        _required("FMP_API_KEY"),
         _url_value("ALPACA_BASE_URL", required=True, allowed_schemes={"https"}),
         _url_value("QWEN_BASE_URL", required=False, allowed_schemes={"http", "https"}),
         _provider_choice("ACTIVE_LLM_PROVIDER"),
@@ -39,6 +41,9 @@ def run_env_diagnostics(env_path: str | Path = ".env", *, network: bool = True, 
             [
                 check_supabase(timeout=timeout),
                 check_alpaca(timeout=timeout),
+                check_finnhub(timeout=timeout),
+                check_fmp(timeout=timeout),
+                check_polygon(timeout=timeout),
                 check_fred(timeout=timeout),
                 check_qwen(timeout=timeout),
             ]
@@ -103,6 +108,57 @@ def check_fred(*, timeout: float = 10.0) -> CheckResult:
         return CheckResult("fred_connection", False, _clean_error(exc))
 
 
+def check_finnhub(*, timeout: float = 10.0) -> CheckResult:
+    key = os.getenv("FINNHUB_API_KEY", "")
+    if not key:
+        return CheckResult("finnhub_connection", False, "missing FINNHUB_API_KEY")
+    try:
+        response = httpx.get(
+            "https://finnhub.io/api/v1/calendar/earnings",
+            params={"from": "2026-01-01", "to": "2026-01-02", "token": key},
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        return CheckResult("finnhub_connection", True, "connected and earnings calendar is readable")
+    except Exception as exc:
+        return CheckResult("finnhub_connection", False, _clean_error(exc))
+
+
+def check_fmp(*, timeout: float = 10.0) -> CheckResult:
+    key = os.getenv("FMP_API_KEY", "")
+    if not key:
+        return CheckResult("fmp_connection", False, "missing FMP_API_KEY")
+    try:
+        response = httpx.get(
+            "https://financialmodelingprep.com/stable/profile",
+            params={"symbol": "AAPL", "apikey": key},
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        return CheckResult("fmp_connection", True, "connected and company profile is readable")
+    except Exception as exc:
+        return CheckResult("fmp_connection", False, _clean_error(exc))
+
+
+def check_polygon(*, timeout: float = 10.0) -> CheckResult:
+    key = os.getenv("POLYGON_API_KEY", "")
+    if not key:
+        return CheckResult("polygon_connection", True, "optional POLYGON_API_KEY not configured; Alpaca historical bars will be used")
+    try:
+        response = httpx.get(
+            "https://api.polygon.io/v2/aggs/ticker/AAPL/range/1/day/2026-01-02/2026-01-09",
+            params={"adjusted": "true", "sort": "asc", "limit": 5, "apiKey": key},
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        data = response.json()
+        if data.get("status") not in {"OK", "DELAYED"}:
+            return CheckResult("polygon_connection", False, f"unexpected status={data.get('status', 'unknown')}")
+        return CheckResult("polygon_connection", True, "connected and daily aggregates are readable")
+    except Exception as exc:
+        return CheckResult("polygon_connection", False, _clean_error(exc))
+
+
 def check_qwen(*, timeout: float = 10.0) -> CheckResult:
     base_url = os.getenv("QWEN_BASE_URL", "").rstrip("/")
     if not base_url:
@@ -159,7 +215,7 @@ def _number(key: str, *, minimum: float | None = None, maximum: float | None = N
 
 def _clean_error(exc: Exception) -> str:
     text = str(exc)
-    for key in ("SUPABASE_KEY", "ALPACA_API_KEY", "ALPACA_SECRET_KEY", "FRED_API_KEY", "QWEN_API_KEY"):
+    for key in ("SUPABASE_KEY", "ALPACA_API_KEY", "ALPACA_SECRET_KEY", "FRED_API_KEY", "FINNHUB_API_KEY", "FMP_API_KEY", "POLYGON_API_KEY", "QWEN_API_KEY"):
         value = os.getenv(key, "")
         if value:
             text = text.replace(value, "<redacted>")

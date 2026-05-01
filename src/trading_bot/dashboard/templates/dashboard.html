@@ -3,60 +3,199 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>DriftPilot</title>
+    <title>DriftPilot Operator</title>
     <style>
       :root {
-        --bg: #f6f4ef;
-        --ink: #111411;
-        --muted: #697169;
-        --panel: #fffdf8;
-        --line: #ded8cc;
-        --accent: #246b5b;
-        --accent-soft: #e8f1ec;
-        --danger: #9a3a32;
-        --gold: #b7862f;
-        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        --bg: #f5f4ef;
+        --ink: #171914;
+        --muted: #667063;
+        --panel: #fffef9;
+        --line: #d9d2c4;
+        --green: #176954;
+        --green-soft: #e6f1eb;
+        --blue: #195d8f;
+        --blue-soft: #e4eef7;
+        --amber: #8d611a;
+        --amber-soft: #f5ead2;
+        --red: #9b332b;
+        --red-soft: #f6dfdc;
+        --shadow: 0 16px 44px rgba(41, 36, 25, 0.08);
+        font-family: Aptos, "Segoe UI", ui-sans-serif, system-ui, sans-serif;
       }
       * { box-sizing: border-box; }
-      body { margin: 0; background: var(--bg); color: var(--ink); }
-      main { width: min(1180px, calc(100% - 32px)); margin: 24px auto 44px; }
-      .topbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 24px; }
-      .brand { display: flex; align-items: center; gap: 12px; }
-      .mark { width: 42px; height: 42px; border-radius: 8px; background: var(--accent); color: white; display: grid; place-items: center; font-weight: 900; letter-spacing: 0; }
-      .brand h1 { margin: 0; font-size: 24px; }
-      .brand p { margin: 2px 0 0; color: var(--muted); font-size: 14px; }
-      nav { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
-      a { color: var(--accent); text-decoration: none; font-weight: 750; }
-      button { border: 1px solid var(--accent); border-radius: 6px; min-height: 36px; padding: 0 12px; font: inherit; font-weight: 750; background: var(--accent); color: white; cursor: pointer; }
-      button.secondary { background: white; color: var(--accent); }
-      button.danger { background: var(--danger); border-color: var(--danger); }
-      .hero { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(320px, .65fr); gap: 20px; align-items: stretch; margin-bottom: 18px; }
-      .welcome { min-height: 300px; padding: 28px; border: 1px solid var(--line); border-radius: 8px; background: linear-gradient(135deg, #fffdf8 0%, #edf5ef 100%); display: flex; flex-direction: column; justify-content: space-between; }
-      .eyebrow { color: var(--accent); font-size: 12px; text-transform: uppercase; font-weight: 850; letter-spacing: .08em; }
-      .welcome h2 { font-size: clamp(34px, 5vw, 58px); line-height: 1.02; margin: 10px 0 14px; letter-spacing: 0; }
-      .welcome p { color: #3c433d; font-size: 17px; line-height: 1.55; max-width: 720px; margin: 0; }
-      .hero-actions { margin-top: 24px; display: flex; gap: 10px; flex-wrap: wrap; }
-      .status-panel, .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 18px; }
-      .status-panel { display: grid; gap: 14px; }
-      .status-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; border-bottom: 1px solid #eee7dc; padding-bottom: 12px; }
-      .status-row:last-child { border-bottom: 0; padding-bottom: 0; }
-      .label { color: var(--muted); font-size: 12px; text-transform: uppercase; font-weight: 800; }
-      .value { font-size: 20px; font-weight: 850; }
-      .ok { color: var(--accent); }
-      .bad { color: var(--danger); }
-      .grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; margin: 16px 0; }
-      .panel h3 { margin: 0 0 12px; font-size: 17px; }
-      .metric { font-size: 32px; font-weight: 900; margin: 4px 0; }
-      .muted { color: var(--muted); font-size: 14px; line-height: 1.45; }
-      table { width: 100%; border-collapse: collapse; font-size: 14px; }
-      th, td { text-align: left; border-bottom: 1px solid #ece7dc; padding: 10px 8px; vertical-align: top; }
-      th { color: var(--muted); font-size: 12px; text-transform: uppercase; }
-      .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 16px; }
-      .badge { display: inline-flex; align-items: center; min-height: 26px; padding: 0 9px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); font-size: 12px; font-weight: 850; }
-      pre { white-space: pre-wrap; background: #f1eee6; border-radius: 8px; padding: 12px; max-height: 260px; overflow: auto; }
-      @media (max-width: 880px) {
-        .hero, .grid, .two-col { grid-template-columns: 1fr; }
-        .welcome h2 { font-size: 38px; }
+      body {
+        margin: 0;
+        background:
+          linear-gradient(180deg, rgba(255,255,255,.84), rgba(245,244,239,.96)),
+          repeating-linear-gradient(90deg, rgba(23,25,20,.035) 0 1px, transparent 1px 76px),
+          var(--bg);
+        color: var(--ink);
+      }
+      main { width: min(1480px, calc(100% - 28px)); margin: 18px auto 36px; }
+      a { color: var(--green); text-decoration: none; font-weight: 760; }
+      button, input { font: inherit; }
+      input, select {
+        width: 100%;
+        min-height: 36px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        padding: 0 10px;
+        background: white;
+        color: var(--ink);
+      }
+      button {
+        min-height: 36px;
+        border: 1px solid var(--green);
+        border-radius: 6px;
+        padding: 0 12px;
+        background: var(--green);
+        color: white;
+        font-weight: 780;
+        cursor: pointer;
+      }
+      button.secondary { background: white; color: var(--green); }
+      button.danger { background: var(--red); border-color: var(--red); }
+      button:disabled { opacity: .46; cursor: not-allowed; }
+      .spinner {
+        width: 14px; height: 14px; border-radius: 50%;
+        border: 2px solid rgba(255,255,255,.44); border-top-color: white;
+        display: inline-block; vertical-align: -2px; margin-right: 7px;
+        animation: spin .8s linear infinite;
+      }
+      button.secondary .spinner { border-color: rgba(23,105,84,.25); border-top-color: var(--green); }
+      @keyframes spin { to { transform: rotate(360deg); } }
+      .topbar {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 16px;
+        margin-bottom: 14px;
+      }
+      .brand { display: flex; gap: 12px; align-items: center; }
+      .mark {
+        width: 42px; height: 42px; border-radius: 7px;
+        display: grid; place-items: center;
+        background: var(--ink); color: #f7f1e4; font-weight: 900;
+      }
+      h1, h2, h3 { margin: 0; letter-spacing: 0; }
+      .brand h1 { font-size: 22px; }
+      .brand p { margin: 2px 0 0; color: var(--muted); font-size: 13px; }
+      .nav { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
+
+      .hero {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--panel);
+        box-shadow: var(--shadow);
+        padding: 18px;
+        display: grid;
+        grid-template-columns: minmax(0, 1.15fr) minmax(390px, .85fr);
+        gap: 18px;
+      }
+      .hero h2 { font-size: clamp(30px, 4vw, 52px); line-height: 1.02; max-width: 850px; }
+      .hero p { color: #3c433b; line-height: 1.5; max-width: 820px; }
+      .actions { display: flex; gap: 9px; flex-wrap: wrap; align-items: center; }
+      .status-banner {
+        margin-top: 12px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 10px 12px;
+        background: #fbfaf5;
+        color: var(--muted);
+        font-size: 13px;
+        font-weight: 720;
+      }
+      .status-banner.ok { background: var(--green-soft); color: var(--green); border-color: #b8d8cb; }
+      .status-banner.bad { background: var(--red-soft); color: var(--red); border-color: #ddb3ad; }
+      .status-banner.info { background: var(--blue-soft); color: var(--blue); border-color: #b8d0e5; }
+      .confirm-panel {
+        margin-top: 12px;
+        border: 1px solid #d9bd83;
+        border-radius: 8px;
+        background: #fff7e6;
+        padding: 12px;
+        display: none;
+        gap: 10px;
+      }
+      .confirm-panel.show { display: grid; }
+      .confirm-actions { display: flex; gap: 9px; flex-wrap: wrap; }
+      .pill {
+        display: inline-flex; align-items: center; gap: 7px;
+        min-height: 26px; padding: 0 9px; border-radius: 999px;
+        background: #eee9dd; color: var(--ink); font-size: 12px; font-weight: 840;
+      }
+      .pill.ok { background: var(--green-soft); color: var(--green); }
+      .pill.warn { background: var(--amber-soft); color: var(--amber); }
+      .pill.bad { background: var(--red-soft); color: var(--red); }
+      .pill.info { background: var(--blue-soft); color: var(--blue); }
+
+      .capital-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+      .settings-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-top: 14px; }
+      .field { display: grid; gap: 5px; }
+      .field label { color: var(--muted); font-size: 11px; text-transform: uppercase; font-weight: 850; letter-spacing: .06em; }
+      .metric-card {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: #fbfaf5;
+        padding: 13px;
+        min-height: 92px;
+      }
+      .label { color: var(--muted); font-size: 11px; text-transform: uppercase; font-weight: 850; letter-spacing: .08em; }
+      .metric { margin-top: 6px; font-size: 28px; line-height: 1; font-weight: 900; font-variant-numeric: tabular-nums; }
+      .hint { margin-top: 6px; color: var(--muted); font-size: 12px; line-height: 1.35; }
+
+      .operator-grid { display: grid; grid-template-columns: minmax(0, 1fr) 380px; gap: 16px; margin-top: 16px; align-items: start; }
+      .layout { display: grid; gap: 16px; }
+      .panel {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--panel);
+        box-shadow: var(--shadow);
+        padding: 16px;
+      }
+      .panel-head { display: flex; justify-content: space-between; gap: 10px; align-items: center; margin-bottom: 12px; }
+      table { width: 100%; border-collapse: collapse; font-size: 13px; }
+      th, td { text-align: left; border-bottom: 1px solid #e9e3d7; padding: 10px 7px; vertical-align: top; }
+      th { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
+      tr:hover td { background: #fbfaf5; }
+      .num { font-variant-numeric: tabular-nums; }
+      .ticker { font-size: 18px; font-weight: 900; }
+      .reason { color: var(--muted); line-height: 1.35; max-width: 360px; }
+      .empty { color: var(--muted); padding: 18px 7px; }
+      .side { display: grid; gap: 16px; position: sticky; top: 14px; }
+      .projection-list { display: grid; gap: 9px; }
+      .projection-row { display: flex; justify-content: space-between; gap: 12px; border-bottom: 1px solid #eee8dc; padding-bottom: 8px; }
+      .projection-row:last-child { border-bottom: 0; padding-bottom: 0; }
+      .projection-row strong { font-variant-numeric: tabular-nums; }
+      .group-list { display: grid; gap: 8px; }
+      .group-item { border: 1px solid var(--line); border-radius: 7px; padding: 9px; background: #fbfaf5; }
+      .group-item strong { display: flex; justify-content: space-between; gap: 12px; }
+      .table-wrap { overflow: auto; max-height: 680px; border: 1px solid #eee8dc; border-radius: 8px; }
+      .table-wrap table { min-width: 1180px; }
+      .log { display: grid; gap: 8px; max-height: 280px; overflow: auto; }
+      .log-item { border: 1px solid var(--line); border-left: 4px solid var(--blue); border-radius: 6px; padding: 9px; background: #fbfaf5; }
+      .log-item.error { border-left-color: var(--red); }
+      .log-item.ok { border-left-color: var(--green); }
+      pre {
+        margin: 0;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: #f3efe6;
+        padding: 12px;
+        white-space: pre-wrap;
+        max-height: 260px;
+        overflow: auto;
+      }
+      @media (max-width: 1080px) {
+        .hero, .operator-grid { grid-template-columns: 1fr; }
+        .side { position: static; }
+        .settings-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      }
+      @media (max-width: 680px) {
+        main { width: min(100% - 16px, 1480px); }
+        .capital-grid { grid-template-columns: 1fr; }
+        .settings-grid { grid-template-columns: 1fr; }
+        .topbar { align-items: flex-start; flex-direction: column; }
       }
     </style>
   </head>
@@ -66,151 +205,716 @@
         <div class="brand">
           <div class="mark">DP</div>
           <div>
-            <h1>DriftPilot</h1>
-            <p>Daily-batch PEAD and momentum command center</p>
+            <h1>DriftPilot Operator</h1>
+            <p>Top bets, target exits, and paper-trade approval.</p>
           </div>
         </div>
-        <nav>
-          <a href="http://127.0.0.1:8000/admin">Admin</a>
-          <a href="http://127.0.0.1:8000/llm">LLM Settings</a>
+        <nav class="nav">
+          <a href="/">Operator</a>
+          <a href="/admin">Admin</a>
+          <a href="/llm">LLM</a>
+          <span id="mode_badge" class="pill info">Paper mode</span>
         </nav>
       </header>
 
       <section class="hero">
-        <div class="welcome">
-          <div>
-            <div class="eyebrow">Paper trading mode</div>
-            <h2>Catch post-earnings drift without intraday noise.</h2>
-            <p>DriftPilot watches the scheduled research loop: PEAD candidates after close, pending entries before open, and momentum review every Monday.</p>
+        <div>
+          <span id="readiness_badge" class="pill">Loading readiness</span>
+          <h2 style="margin-top: 12px;">Review up to 100 setups, choose your paper trades, then let the bot manage exits.</h2>
+          <p>
+            Submit trades by selecting rows, pressing Confirm paper trades, then choosing Submit paper orders. Auto-entry runs at the scheduled pending-entry scan, and auto-exit runs through position management using the configured target, stop, and time exit.
+          </p>
+          <div class="actions">
+            <button id="refresh_btn" data-label="Refresh candidates" onclick="refreshAll({ manual: true })">Refresh candidates</button>
+            <button id="build_pool_btn" class="secondary" data-label="Build candidate pool" onclick="runCandidateRefresh()">Build candidate pool</button>
+            <button id="check_exits_btn" class="secondary" data-label="Check exits now" onclick="checkExitsNow()">Check exits now</button>
+            <button id="select_all_btn" class="secondary" data-label="Select all" onclick="selectAll()">Select all</button>
+            <button id="submit_btn" class="danger" data-label="Confirm paper trades" onclick="submitSelected()">Confirm paper trades</button>
+            <button id="reset_btn" class="secondary" data-label="Reset paper state" onclick="resetPaperState()">Reset paper state</button>
+            <button id="qwen_btn" class="secondary" data-label="Ask Qwen" onclick="askQwen()">Ask Qwen</button>
           </div>
-          <div class="hero-actions">
-            <button onclick="startScheduler()">Start scheduler</button>
-            <button class="secondary" onclick="runPeadNow()">Run PEAD scan now</button>
-            <button class="danger" onclick="setKillSwitch(false)">Kill switch</button>
+          <div class="settings-grid">
+            <div class="field"><label>Capital</label><input id="setting_capital" type="number" min="1" step="100" /></div>
+            <div class="field"><label>Target %</label><input id="setting_target" type="number" min="0.1" max="25" step="0.1" /></div>
+            <div class="field"><label>Stop %</label><input id="setting_stop" type="number" min="0.1" max="25" step="0.1" /></div>
+            <div class="field"><label>Trade slots</label><input id="setting_slots" type="number" min="1" max="100" step="1" /></div>
+            <div class="field"><label>Show top</label><input id="setting_limit" type="number" min="1" max="100" step="1" /></div>
+            <div class="field"><label>Min pool</label><input id="setting_min_pool" type="number" min="1" max="100" step="1" /></div>
+            <div class="field"><label>Pool min</label><input id="setting_refresh" type="number" min="1" max="60" step="1" /></div>
+            <div class="field"><label>Scan min</label><input id="setting_universe_refresh" type="number" min="1" max="60" step="1" /></div>
+            <div class="field"><label>Monitor min</label><input id="setting_monitor" type="number" min="1" max="60" step="1" /></div>
+            <div class="field"><label>&nbsp;</label><button id="save_settings_btn" data-label="Save setup" onclick="saveOperatorSettings()">Save setup</button></div>
+          </div>
+          <div id="status_banner" class="status-banner info">Ready. Candidate pool refresh runs slowly in the background every few minutes.</div>
+          <div id="confirm_panel" class="confirm-panel">
+            <strong id="confirm_title">Confirm paper trades</strong>
+            <div id="confirm_copy" class="hint">Review the projected scenario before sending paper orders.</div>
+            <div class="confirm-actions">
+              <button id="confirm_submit_btn" class="danger" data-label="Submit paper orders" onclick="confirmPaperTrades()">Submit paper orders</button>
+              <button id="confirm_dry_btn" class="secondary" data-label="Dry run only" onclick="confirmPaperTrades(false)">Dry run only</button>
+              <button class="secondary" onclick="cancelConfirm()">Cancel</button>
+            </div>
           </div>
         </div>
-        <aside class="status-panel">
-          <div class="status-row">
-            <div>
-              <div class="label">Trading state</div>
-              <div id="trading_state" class="value">Loading</div>
-            </div>
-            <span id="trading_badge" class="badge">Checking</span>
+        <div class="capital-grid">
+          <div class="metric-card">
+            <div class="label">Funny-money capital</div>
+            <div id="paper_capital" class="metric">$10,000</div>
+            <div class="hint">Capital pool used for projection only.</div>
           </div>
-          <div class="status-row">
-            <div>
-              <div class="label">Scheduler</div>
-              <div id="scheduler_state" class="value">Loading</div>
-            </div>
-            <span id="next_job" class="badge">No run time</span>
+          <div class="metric-card">
+            <div class="label">Available capital</div>
+            <div id="available_capital" class="metric">$10,000</div>
+            <div class="hint">Capital minus entered paper positions.</div>
           </div>
-          <div class="status-row">
+          <div class="metric-card">
+            <div class="label">Deployed capital</div>
+            <div id="deployed_capital" class="metric">$0</div>
+            <div id="open_positions" class="hint">0 open paper positions.</div>
+          </div>
+          <div class="metric-card">
+            <div class="label">Per bet allocation</div>
+            <div id="per_trade" class="metric">$1,000</div>
+            <div class="hint">Capital divided by trade slots, not by all candidates shown.</div>
+          </div>
+          <div class="metric-card">
+            <div class="label">Target exit</div>
+            <div id="target_pct" class="metric">1.00%</div>
+            <div class="hint">Bot exits when target price is reached.</div>
+          </div>
+          <div class="metric-card">
+            <div class="label">Loss exit</div>
+            <div id="stop_pct" class="metric">1.00%</div>
+            <div class="hint">Bot exits when stop price is reached.</div>
+          </div>
+          <div class="metric-card">
+            <div class="label">Realized P/L</div>
+            <div id="realized_pnl" class="metric">$0.00</div>
+            <div id="realized_note" class="hint">Closed paper trades.</div>
+          </div>
+          <div class="metric-card">
+            <div class="label">Unrealized P/L</div>
+            <div id="unrealized_pnl" class="metric">$0.00</div>
+            <div class="hint">Open positions marked to current price.</div>
+          </div>
+          <div class="metric-card">
+            <div class="label">Total P/L</div>
+            <div id="total_pnl" class="metric">$0.00</div>
+            <div id="total_pnl_pct" class="hint">0.00% of paper capital.</div>
+          </div>
+        </div>
+      </section>
+
+      <section class="operator-grid">
+        <div class="layout">
+        <div class="panel">
+          <div class="panel-head">
             <div>
-              <div class="label">Signal queue</div>
-              <div id="queue_count" class="value">0</div>
+              <h3>Open Positions / Exit Status</h3>
+              <div id="position_note" class="hint">Loading open position status...</div>
             </div>
-            <span class="badge">Watchlist</span>
+            <span id="position_count" class="pill info">0 open</span>
+          </div>
+          <div class="table-wrap"><table>
+            <thead>
+              <tr>
+                <th>Ticker</th>
+                <th>Side</th>
+                <th>Entry</th>
+                <th>Now</th>
+                <th>Target</th>
+                <th>Stop</th>
+                <th>Shares</th>
+                <th>Deployed</th>
+                <th>P/L</th>
+                <th>Decision</th>
+              </tr>
+            </thead>
+            <tbody id="positions"></tbody>
+          </table></div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head">
+            <div>
+              <h3>Made vs Lost</h3>
+              <div id="pnl_note" class="hint">Loading realized and unrealized P/L...</div>
+            </div>
+            <span id="win_rate" class="pill info">0% win rate</span>
+          </div>
+          <div class="projection-list" style="grid-template-columns: repeat(4, minmax(0, 1fr)); margin-bottom: 12px;">
+            <div class="projection-row"><span>Gross made</span><strong id="gross_made">$0.00</strong></div>
+            <div class="projection-row"><span>Gross lost</span><strong id="gross_lost">$0.00</strong></div>
+            <div class="projection-row"><span>Closed wins</span><strong id="closed_wins">0</strong></div>
+            <div class="projection-row"><span>Closed losses</span><strong id="closed_losses">0</strong></div>
+          </div>
+          <div class="table-wrap"><table>
+            <thead>
+              <tr>
+                <th>Closed</th>
+                <th>Ticker</th>
+                <th>Exit</th>
+                <th>Entry</th>
+                <th>Exit Price</th>
+                <th>Shares</th>
+                <th>P/L</th>
+                <th>Reason</th>
+              </tr>
+            </thead>
+            <tbody id="recent_exits"></tbody>
+          </table></div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head">
+            <div>
+              <h3>Today’s Candidate Pool</h3>
+              <div id="candidate_note" class="hint">Loading candidates...</div>
+            </div>
+            <span id="candidate_count" class="pill info">0 loaded</span>
+          </div>
+          <div class="table-wrap"><table>
+            <thead>
+              <tr>
+                <th></th>
+                <th>Rank</th>
+                <th>Ticker</th>
+                <th>Industry</th>
+                <th>Plan</th>
+                <th>Entry</th>
+                <th>Target</th>
+                <th>Stop</th>
+                <th>Shares</th>
+                <th>Profit</th>
+                <th>Loss</th>
+                <th>Why</th>
+              </tr>
+            </thead>
+            <tbody id="bets"></tbody>
+          </table></div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head"><h3>Industry Classification</h3><span id="industry_count" class="pill info">0 groups</span></div>
+          <div id="industry_groups" class="group-list"></div>
+        </div>
+        </div>
+
+        <aside class="side">
+          <div class="panel">
+            <div class="panel-head">
+              <h3>How Trading Works</h3>
+              <span class="pill info">Paper</span>
+            </div>
+            <div class="projection-list">
+              <div class="projection-row"><span>Manual submit</span><strong>Select + Confirm</strong></div>
+              <div class="projection-row"><span>Auto entry</span><strong>9:25 AM ET</strong></div>
+              <div class="projection-row"><span>Live monitor</span><strong id="monitor_label">Every 5 min</strong></div>
+              <div class="projection-row"><span>Pool builder</span><strong id="pool_label">Every 5 min</strong></div>
+              <div class="projection-row"><span>LLM role</span><strong>Qwen reviews only</strong></div>
+            </div>
+            <div class="hint">The bot submits paper orders only after confirmation or scheduled entry. Exits use the saved target/stop prices on each entered watchlist row.</div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-head">
+              <h3>Projected Scenario</h3>
+              <span id="projection_badge" class="pill">No selection</span>
+            </div>
+            <div class="projection-list">
+              <div class="projection-row"><span>Selected bets</span><strong id="selected_count">0</strong></div>
+              <div class="projection-row"><span>Capital used</span><strong id="selected_capital">$0.00</strong></div>
+              <div class="projection-row"><span>If all hit +1%</span><strong id="selected_profit">$0.00</strong></div>
+              <div class="projection-row"><span>If all hit -1%</span><strong id="selected_loss">$0.00</strong></div>
+              <div class="projection-row"><span>Reward/risk</span><strong id="selected_rr">-</strong></div>
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-head">
+              <h3>Bot Exit Loop</h3>
+              <span class="pill ok">Automated</span>
+            </div>
+            <div class="projection-list">
+              <div class="projection-row"><span>Profit scenario</span><strong>Sell at target</strong></div>
+              <div class="projection-row"><span>Loss scenario</span><strong>Sell at stop</strong></div>
+              <div class="projection-row"><span>Recycle</span><strong>Next setup</strong></div>
+              <div class="projection-row"><span>Mode</span><strong>Paper only</strong></div>
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-head"><h3>Action Result</h3><span id="action_badge" class="pill info">Ready</span></div>
+            <pre id="action_result">Ready.</pre>
+          </div>
+
+          <div class="panel">
+            <div class="panel-head"><h3>Event Log</h3><button class="secondary" onclick="clearEvents()">Clear</button></div>
+            <div id="event_log" class="log"></div>
           </div>
         </aside>
-      </section>
-
-      <section class="grid">
-        <div class="panel">
-          <h3>PEAD candidates</h3>
-          <div id="pead_count" class="metric">0</div>
-          <div class="muted">Pending or skipped earnings-drift signals from Supabase.</div>
-        </div>
-        <div class="panel">
-          <h3>Provider readiness</h3>
-          <div id="provider_count" class="metric">0/4</div>
-          <div class="muted">LLMs are analysis-only; execution stays deterministic.</div>
-        </div>
-        <div class="panel">
-          <h3>Last scheduler run</h3>
-          <div id="last_run" class="metric" style="font-size: 20px;">None</div>
-          <div class="muted">Manual and scheduled job history appears here.</div>
-        </div>
-      </section>
-
-      <section class="two-col">
-        <div class="panel">
-          <h3>Signal queue</h3>
-          <table>
-            <thead><tr><th>Ticker</th><th>Strategy</th><th>Status</th><th>Reason</th></tr></thead>
-            <tbody id="watchlist"></tbody>
-          </table>
-        </div>
-        <div class="panel">
-          <h3>Scheduler plan</h3>
-          <table>
-            <thead><tr><th>Job</th><th>Next run</th></tr></thead>
-            <tbody id="scheduler_jobs"></tbody>
-          </table>
-        </div>
-      </section>
-
-      <section class="panel" style="margin-top: 16px;">
-        <h3>Latest action</h3>
-        <pre id="action_result">Ready.</pre>
       </section>
     </main>
 
     <script>
       const API_BASE = window.location.protocol === "file:" ? "http://127.0.0.1:8000" : "";
+      const state = { candidates: [], openPositions: [], selected: new Set(), events: [], busy: false, lastPayload: null, operatorSettings: null };
+
       async function apiJson(path, options = {}) {
-        const response = await fetch(`${API_BASE}${path}`, options);
-        if (!response.ok) throw new Error(`${path} returned ${response.status}: ${await response.text()}`);
-        return response.json();
+        const headers = { ...(options.headers || {}), "x-request-id": crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) };
+        const response = await fetch(`${API_BASE}${path}`, { ...options, headers });
+        const text = await response.text();
+        let payload = null;
+        try { payload = text ? JSON.parse(text) : null; } catch { payload = text; }
+        if (!response.ok) {
+          const message = payload?.detail?.message || payload?.detail || payload?.message || text || response.statusText;
+          throw new Error(typeof message === "string" ? message : JSON.stringify(message));
+        }
+        return payload;
       }
-      async function loadDashboard() {
-        const [config, watchlist, scheduler, providers] = await Promise.all([
-          apiJson("/api/strategy-config").catch(e => ({ error: String(e) })),
-          apiJson("/api/watchlist").catch(e => []),
-          apiJson("/api/scheduler").catch(e => ({ running: false, jobs: [], last_runs: [], error: String(e) })),
-          apiJson("/api/providers/health").catch(e => [{ ok: false, message: String(e) }]),
-        ]);
-        const active = config.trading_active !== "false";
-        document.getElementById("trading_state").textContent = active ? "Active" : "Paused";
-        document.getElementById("trading_state").className = `value ${active ? "ok" : "bad"}`;
-        document.getElementById("trading_badge").textContent = active ? "Ready" : "Halted";
-        document.getElementById("scheduler_state").textContent = scheduler.running ? "Running" : "Stopped";
-        document.getElementById("scheduler_state").className = `value ${scheduler.running ? "ok" : "bad"}`;
-        const next = (scheduler.jobs || []).find(job => job.next_run_time);
-        document.getElementById("next_job").textContent = next ? next.next_run_time.replace("T", " ").slice(0, 16) : "No run time";
-        document.getElementById("queue_count").textContent = Array.isArray(watchlist) ? watchlist.length : 0;
-        document.getElementById("pead_count").textContent = Array.isArray(watchlist) ? watchlist.length : 0;
-        document.getElementById("provider_count").textContent = `${providers.filter(row => row.ok).length}/4`;
-        const last = scheduler.last_runs && scheduler.last_runs[0];
-        document.getElementById("last_run").textContent = last ? last.job : "None";
-        renderWatchlist(watchlist);
-        renderScheduler(scheduler.jobs || []);
+
+      async function refreshAll(options = {}) {
+        const manual = Boolean(options.manual);
+        if (manual) beginButton("refresh_btn", "Refreshing");
+        try {
+          if (manual) showStatus("Refreshing candidates, diagnostics, and bot health.", "info");
+          const [topBets, openPositions, performance, diagnostics, health] = await Promise.all([
+            apiJson("/api/operator/top-bets"),
+            apiJson("/api/operator/open-positions").catch(error => ({ error: error.message, positions: [] })),
+            apiJson("/api/operator/performance").catch(error => ({ error: error.message, recent_exits: [] })),
+            apiJson("/api/diagnostics").catch(() => []),
+            apiJson("/api/health").catch(() => ({ ok: false })),
+          ]);
+          state.lastPayload = topBets;
+          state.candidates = topBets.candidates || [];
+          state.openPositions = openPositions.positions || [];
+          state.selected = new Set([...state.selected].filter(id => state.candidates.some(row => row.id === id)));
+          renderTopBets(topBets);
+          renderOpenPositions(openPositions);
+          renderPerformance(performance);
+          renderOperatorSettings(topBets);
+          renderReadiness(diagnostics, health);
+          renderSelection();
+          log("ok", "Dashboard refreshed", `${state.candidates.length} candidates loaded`);
+          if (manual) showStatus(`Refresh complete. ${state.candidates.length} candidates loaded.`, "ok");
+        } catch (error) {
+          log("error", "Refresh failed", error.message);
+          setAction({ error: error.message }, "bad");
+          showStatus(`Refresh failed: ${error.message}`, "bad");
+        } finally {
+          if (manual) endButton("refresh_btn");
+        }
       }
-      function renderWatchlist(rows) {
-        document.getElementById("watchlist").innerHTML = !Array.isArray(rows) || rows.length === 0
-          ? `<tr><td colspan="4">No PEAD candidates yet. Run a scan from Admin.</td></tr>`
-          : rows.slice(0, 8).map(row => `<tr><td>${row.ticker ?? ""}</td><td>${row.strategy ?? ""}</td><td>${row.status ?? ""}</td><td>${row.skip_reason ?? ""}</td></tr>`).join("");
+
+      function renderTopBets(payload) {
+        document.getElementById("paper_capital").textContent = money(payload.paper_capital);
+        document.getElementById("available_capital").textContent = money(payload.available_capital);
+        document.getElementById("deployed_capital").textContent = money(payload.deployed_capital);
+        document.getElementById("open_positions").textContent = `${payload.open_positions || 0} open paper position${payload.open_positions === 1 ? "" : "s"}.`;
+        document.getElementById("per_trade").textContent = money(payload.projection.per_trade_allocation);
+        document.getElementById("target_pct").textContent = pct(payload.target_pct);
+        document.getElementById("stop_pct").textContent = pct(payload.stop_pct);
+        document.getElementById("candidate_count").textContent = `${state.candidates.length} loaded`;
+        document.getElementById("candidate_note").textContent = state.candidates.length
+          ? `Showing up to ${payload.max_candidates} candidates. Select rows, review the scenario, then confirm paper trades.`
+          : "No pending candidates yet. Build the candidate pool or wait for the background refresh.";
+        renderIndustryGroups(payload.industry_groups || []);
+        document.getElementById("bets").innerHTML = state.candidates.length
+          ? state.candidates.map((row, index) => betRow(row, index)).join("")
+          : `<tr><td class="empty" colspan="12">No tradable candidates yet. The background candidate refresh runs slowly to respect API limits.</td></tr>`;
       }
-      function renderScheduler(jobs) {
-        document.getElementById("scheduler_jobs").innerHTML = jobs.length === 0
-          ? `<tr><td colspan="2">Scheduler has not been started.</td></tr>`
-          : jobs.map(job => `<tr><td>${job.id}</td><td>${job.next_run_time ?? "Not scheduled"}</td></tr>`).join("");
+
+      function renderOpenPositions(payload) {
+        const positions = payload.positions || [];
+        const exitReady = Number(payload.exit_ready || 0);
+        document.getElementById("position_count").textContent = `${positions.length} open`;
+        document.getElementById("position_count").className = `pill ${exitReady ? "warn" : "info"}`;
+        document.getElementById("position_note").textContent = payload.error
+          ? `Could not load exit status: ${payload.error}`
+          : exitReady
+            ? `${exitReady} position${exitReady === 1 ? "" : "s"} ready for profit/loss exit.`
+            : positions.length
+              ? "All open positions are being monitored. No target or stop is hit yet."
+              : "No deployed paper positions.";
+        document.getElementById("positions").innerHTML = positions.length
+          ? positions.map(positionRow).join("")
+          : `<tr><td class="empty" colspan="10">No open paper positions. Deployed capital should be $0 once exited rows are closed.</td></tr>`;
       }
-      async function startScheduler() {
-        const result = await apiJson("/api/scheduler/start", { method: "POST" }).catch(e => ({ error: String(e) }));
-        document.getElementById("action_result").textContent = JSON.stringify(result, null, 2);
-        await loadDashboard();
+
+      function renderPerformance(payload) {
+        const totalTone = Number(payload.total_pnl || 0) >= 0 ? "var(--green)" : "var(--red)";
+        const realizedTone = Number(payload.realized_pnl || 0) >= 0 ? "var(--green)" : "var(--red)";
+        const unrealizedTone = Number(payload.unrealized_pnl || 0) >= 0 ? "var(--green)" : "var(--red)";
+        document.getElementById("realized_pnl").textContent = money(payload.realized_pnl);
+        document.getElementById("realized_pnl").style.color = realizedTone;
+        document.getElementById("unrealized_pnl").textContent = money(payload.unrealized_pnl);
+        document.getElementById("unrealized_pnl").style.color = unrealizedTone;
+        document.getElementById("total_pnl").textContent = money(payload.total_pnl);
+        document.getElementById("total_pnl").style.color = totalTone;
+        document.getElementById("total_pnl_pct").textContent = `${pct(payload.total_pnl_pct)} of paper capital.`;
+        document.getElementById("gross_made").textContent = money(payload.realized_profit);
+        document.getElementById("gross_made").style.color = "var(--green)";
+        document.getElementById("gross_lost").textContent = money(payload.realized_loss);
+        document.getElementById("gross_lost").style.color = "var(--red)";
+        document.getElementById("closed_wins").textContent = payload.win_count || 0;
+        document.getElementById("closed_losses").textContent = payload.loss_count || 0;
+        document.getElementById("win_rate").textContent = `${Number(payload.win_rate || 0).toFixed(1)}% win rate`;
+        document.getElementById("win_rate").className = `pill ${Number(payload.realized_pnl || 0) >= 0 ? "ok" : "bad"}`;
+        document.getElementById("realized_note").textContent = `${payload.closed_trade_count || 0} priced closed trade${payload.closed_trade_count === 1 ? "" : "s"}.`;
+        document.getElementById("pnl_note").textContent = payload.error
+          ? `Could not load P/L: ${payload.error}`
+          : payload.unpriced_exit_count
+            ? `${payload.unpriced_exit_count} older exit${payload.unpriced_exit_count === 1 ? "" : "s"} missing price/P&L; future exits are fully priced.`
+            : "Realized P/L comes from closed paper trades; unrealized P/L comes from open positions.";
+        const exits = payload.recent_exits || [];
+        document.getElementById("recent_exits").innerHTML = exits.length
+          ? exits.map(exitRow).join("")
+          : `<tr><td class="empty" colspan="8">No closed paper trades with P/L yet.</td></tr>`;
       }
-      async function runPeadNow() {
-        const result = await apiJson("/api/scheduler/run/daily_pead_scan", { method: "POST" }).catch(e => ({ error: String(e) }));
-        document.getElementById("action_result").textContent = JSON.stringify(result, null, 2);
-        await loadDashboard();
+
+      function exitRow(row) {
+        const pnlTone = row.pnl == null ? "var(--muted)" : Number(row.pnl) >= 0 ? "var(--green)" : "var(--red)";
+        return `<tr>
+          <td>${escapeHtml(shortDate(row.created_at))}</td>
+          <td><div class="ticker">${escapeHtml(row.ticker || "")}</div><div class="hint">${escapeHtml(row.strategy || "")}</div></td>
+          <td>${escapeHtml(row.side || "")}</td>
+          <td class="num">${row.entry_price == null ? "-" : money(row.entry_price)}</td>
+          <td class="num">${row.exit_price == null ? "-" : money(row.exit_price)}</td>
+          <td class="num">${row.shares || 0}</td>
+          <td class="num" style="color: ${pnlTone}; font-weight: 850;">${row.pnl == null ? "Missing" : money(row.pnl)}<div class="hint">${row.pnl_pct == null ? "" : pct(row.pnl_pct)}</div></td>
+          <td>${escapeHtml(row.exit_reason || "")}</td>
+        </tr>`;
       }
-      async function setKillSwitch(active) {
-        const result = await apiJson(`/api/kill-switch?active=${active}`, { method: "POST" }).catch(e => ({ error: String(e) }));
-        document.getElementById("action_result").textContent = JSON.stringify(result, null, 2);
-        await loadDashboard();
+
+      function positionRow(row) {
+        const tone = row.action === "exit_profit" ? "ok" : row.action === "exit_loss" ? "bad" : row.action === "exit_time" ? "warn" : row.action === "price_unavailable" ? "warn" : "info";
+        const pnlTone = Number(row.unrealized_pnl || 0) >= 0 ? "var(--green)" : "var(--red)";
+        return `<tr>
+          <td><div class="ticker">${escapeHtml(row.ticker)}</div><div class="hint">${escapeHtml(row.strategy)}</div></td>
+          <td><span class="pill ${row.side === "short" ? "warn" : "ok"}">${escapeHtml(row.side)}</span></td>
+          <td class="num">${money(row.entry_price)}</td>
+          <td class="num">${row.current_price == null ? "Waiting" : money(row.current_price)}</td>
+          <td class="num">${money(row.target_price)}</td>
+          <td class="num">${money(row.stop_loss)}</td>
+          <td class="num">${row.shares}</td>
+          <td class="num">${money(row.position_value)}</td>
+          <td class="num" style="color: ${pnlTone}; font-weight: 850;">${row.unrealized_pnl == null ? "-" : money(row.unrealized_pnl)}<div class="hint">${row.unrealized_pnl_pct == null ? "" : pct(row.unrealized_pnl_pct)}</div></td>
+          <td><span class="pill ${tone}">${decisionLabel(row.action)}</span><div class="hint">${escapeHtml(row.message || "")}</div></td>
+        </tr>`;
       }
-      loadDashboard();
+
+      function decisionLabel(action) {
+        return {
+          exit_profit: "Exit profit",
+          exit_loss: "Exit loss",
+          exit_time: "Time exit",
+          price_unavailable: "No price",
+          hold: "Hold",
+        }[action] || "Hold";
+      }
+
+      function renderOperatorSettings(payload) {
+        state.operatorSettings = {
+          paper_capital: payload.paper_capital,
+          target_pct: payload.target_pct,
+          stop_pct: payload.stop_pct,
+          max_candidates: payload.max_candidates,
+          trade_slots: payload.trade_slots || 10,
+          min_candidates: state.operatorSettings?.min_candidates || 5,
+          refresh_interval_minutes: state.operatorSettings?.refresh_interval_minutes || 5,
+          universe_refresh_interval_minutes: state.operatorSettings?.universe_refresh_interval_minutes || 5,
+          monitor_interval_minutes: state.operatorSettings?.monitor_interval_minutes || 5,
+        };
+        apiJson("/api/operator/settings").then(settings => {
+          state.operatorSettings = settings;
+          setSettingsInputs(settings);
+        }).catch(() => setSettingsInputs(state.operatorSettings));
+      }
+
+      function setSettingsInputs(settings) {
+        document.getElementById("setting_capital").value = Number(settings.paper_capital || 10000);
+        document.getElementById("setting_target").value = (Number(settings.target_pct || 0.01) * 100).toFixed(2);
+        document.getElementById("setting_stop").value = (Number(settings.stop_pct || 0.01) * 100).toFixed(2);
+        document.getElementById("setting_slots").value = Number(settings.trade_slots || 10);
+        document.getElementById("setting_limit").value = Number(settings.max_candidates || 100);
+        document.getElementById("setting_min_pool").value = Number(settings.min_candidates || 5);
+        document.getElementById("setting_refresh").value = Number(settings.refresh_interval_minutes || 5);
+        document.getElementById("setting_universe_refresh").value = Number(settings.universe_refresh_interval_minutes || 5);
+        document.getElementById("setting_monitor").value = Number(settings.monitor_interval_minutes || 5);
+        document.getElementById("monitor_label").textContent = `Every ${Number(settings.monitor_interval_minutes || 5)} min`;
+        document.getElementById("pool_label").textContent = `Every ${Number(settings.universe_refresh_interval_minutes || 5)} min`;
+      }
+
+      function renderIndustryGroups(groups) {
+        document.getElementById("industry_count").textContent = `${groups.length} groups`;
+        document.getElementById("industry_groups").innerHTML = groups.length
+          ? groups.map(group => `<div class="group-item"><strong><span>${escapeHtml(group.industry)}</span><span>${group.count}</span></strong><div class="hint">${escapeHtml(group.sector)} · ${escapeHtml((group.tickers || []).slice(0, 8).join(", "))}</div></div>`).join("")
+          : `<div class="empty">No industry groups yet.</div>`;
+      }
+
+      function betRow(row, index) {
+        const checked = state.selected.has(row.id) ? "checked" : "";
+        const directionTone = row.direction === "short" ? "warn" : "ok";
+        return `<tr>
+          <td><input type="checkbox" ${checked} onchange="toggleBet('${escapeAttr(row.id)}', this.checked)" /></td>
+          <td class="num">${index + 1}</td>
+          <td><div class="ticker">${escapeHtml(row.ticker)}</div><span class="pill ${directionTone}">${escapeHtml(row.direction)}</span></td>
+          <td>${escapeHtml(row.industry || "Unclassified")}<div class="hint">${escapeHtml(row.sector || "Unclassified")}</div></td>
+          <td>${escapeHtml(row.strategy)}<div class="hint">${escapeHtml(row.status || "candidate")} · ${money(row.allocation)} allocation</div></td>
+          <td class="num">${money(row.entry_price)}</td>
+          <td class="num">${money(row.target_price)}<div class="hint">+${pct(row.target_pct)}</div></td>
+          <td class="num">${money(row.stop_loss)}<div class="hint">-${pct(row.stop_pct)}</div></td>
+          <td class="num">${row.shares}</td>
+          <td class="num" style="color: var(--green); font-weight: 850;">${money(row.target_profit)}</td>
+          <td class="num" style="color: var(--red); font-weight: 850;">${money(row.max_loss)}</td>
+          <td><div class="reason">${escapeHtml(row.reason)}</div>${row.operator_only ? `<div class="hint" style="color: var(--amber);">Fallback candidate; confirmation will create a managed paper position.</div>` : ""}${riskFlags(row.risk_flags)}</td>
+        </tr>`;
+      }
+
+      function toggleBet(id, checked) {
+        if (checked) state.selected.add(id);
+        else state.selected.delete(id);
+        renderSelection();
+      }
+
+      function selectAll() {
+        if (!state.candidates.length) {
+          showStatus("No candidates are loaded yet. Build the candidate pool first.", "bad");
+          setAction("No candidates are loaded yet.", "bad");
+          return;
+        }
+        state.selected = new Set(state.candidates.map(row => row.id));
+        if (state.lastPayload) renderTopBets(state.lastPayload);
+        renderSelection();
+        showStatus(`Selected ${state.selected.size} candidates. Review the projected scenario before confirming.`, "ok");
+        log("ok", "Selection updated", `${state.selected.size} candidates selected`);
+      }
+
+      function renderSelection() {
+        const rows = state.candidates.filter(row => state.selected.has(row.id));
+        const capital = sum(rows, "capital_used");
+        const profit = sum(rows, "target_profit");
+        const loss = sum(rows, "max_loss");
+        document.getElementById("selected_count").textContent = rows.length;
+        document.getElementById("selected_capital").textContent = money(capital);
+        document.getElementById("selected_profit").textContent = money(profit);
+        document.getElementById("selected_loss").textContent = money(loss);
+        document.getElementById("selected_rr").textContent = loss ? (profit / loss).toFixed(2) : "-";
+        document.getElementById("projection_badge").textContent = rows.length ? "Ready" : "No selection";
+        document.getElementById("projection_badge").className = `pill ${rows.length ? "ok" : "warn"}`;
+      }
+
+      async function runCandidateRefresh() {
+        beginButton("build_pool_btn", "Building");
+        showStatus("Building the candidate pool now. This inserts only a small batch to stay inside API limits.", "info");
+        setAction("Building candidate pool...", "info");
+        const result = await apiJson("/api/scheduler/run/operator_candidate_refresh", { method: "POST" }).catch(error => ({ error: error.message }));
+        setAction(result, result.error ? "bad" : "ok");
+        if (result.error) {
+          showStatus(`Candidate refresh failed: ${result.error}`, "bad");
+          log("error", "Candidate refresh failed", result.error);
+        } else {
+          const inserted = Number(result.inserted_count || 0);
+          showStatus(inserted ? `Candidate pool updated. Inserted ${inserted} new setup(s).` : result.message || "Candidate pool checked. No new setup needed.", "ok");
+          log("ok", "Candidate pool refreshed", inserted ? `${inserted} new setup(s) inserted` : result.status || "completed");
+        }
+        await refreshAll();
+        endButton("build_pool_btn");
+      }
+
+      async function checkExitsNow() {
+        beginButton("check_exits_btn", "Checking");
+        showStatus("Checking open positions against target and stop. This dry run will not send orders.", "info");
+        setAction("Checking exits...", "info");
+        const result = await apiJson("/api/scheduler/run/position_management", { method: "POST" }).catch(error => ({ error: error.message }));
+        setAction(result, result.error ? "bad" : "ok");
+        if (result.error) {
+          showStatus(`Exit check failed: ${result.error}`, "bad");
+          log("error", "Exit check failed", result.error);
+        } else {
+          showStatus(`Exit check complete. ${result.attempted || 0} position(s) are ready to exit. No orders sent.`, "ok");
+          log("ok", "Exit check complete", `${result.attempted || 0} ready, ${result.submitted || 0} submitted`);
+        }
+        await refreshAll();
+        endButton("check_exits_btn");
+      }
+
+      async function resetPaperState() {
+        const ok = window.confirm("Reset all paper trades, watchlist rows, momentum scores, daily summaries, Alpaca paper orders, and Alpaca paper positions?");
+        if (!ok) return;
+        beginButton("reset_btn", "Resetting");
+        showStatus("Resetting paper state and restarting scheduler.", "info");
+        setAction("Resetting paper state...", "info");
+        const result = await apiJson("/api/operator/reset-paper-state", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ reset_broker: true }),
+        }).catch(error => ({ error: error.message }));
+        setAction(result, result.error ? "bad" : "ok");
+        if (result.error) {
+          showStatus(`Reset failed: ${result.error}`, "bad");
+          log("error", "Reset failed", result.error);
+        } else {
+          state.selected.clear();
+          showStatus("Paper state reset to zero. Scheduler restarted and will rebuild candidates gradually.", "ok");
+          log("ok", "Paper state reset", "Trades, watchlist, summaries, and momentum scores cleared");
+          await refreshAll();
+        }
+        endButton("reset_btn");
+      }
+
+      async function saveOperatorSettings() {
+        beginButton("save_settings_btn", "Saving");
+        const payload = {
+          paper_capital: Number(document.getElementById("setting_capital").value),
+          target_pct: Number(document.getElementById("setting_target").value) / 100,
+          stop_pct: Number(document.getElementById("setting_stop").value) / 100,
+          trade_slots: Number(document.getElementById("setting_slots").value),
+          max_candidates: Number(document.getElementById("setting_limit").value),
+          min_candidates: Number(document.getElementById("setting_min_pool").value),
+          refresh_interval_minutes: Number(document.getElementById("setting_refresh").value),
+          universe_refresh_interval_minutes: Number(document.getElementById("setting_universe_refresh").value),
+          monitor_interval_minutes: Number(document.getElementById("setting_monitor").value),
+        };
+        const result = await apiJson("/api/operator/settings", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        }).catch(error => ({ error: error.message }));
+        if (result.error) {
+          showStatus(`Setup save failed: ${result.error}`, "bad");
+          setAction(result, "bad");
+        } else {
+          showStatus("Operator setup saved. Candidate sizing and scheduler refresh were updated.", "ok");
+          setAction(result, "ok");
+          await refreshAll();
+        }
+        endButton("save_settings_btn");
+      }
+
+      async function askQwen() {
+        beginButton("qwen_btn", "Asking Qwen");
+        showStatus("Qwen is reviewing the current candidate pool. It cannot place trades or override risk rules.", "info");
+        const result = await apiJson("/api/operator/qwen-review", { method: "POST" }).catch(error => ({ error: error.message }));
+        setAction(result, result.error ? "bad" : "ok");
+        showStatus(result.error ? `Qwen review failed: ${result.error}` : "Qwen review complete. See Action Result.", result.error ? "bad" : "ok");
+        log(result.error ? "error" : "ok", "Qwen review", result.error || (result.summary || "Review complete"));
+        endButton("qwen_btn");
+      }
+
+      function submitSelected() {
+        const selected = [...state.selected];
+        if (!selected.length) {
+          setAction("Select at least one candidate first.", "bad");
+          showStatus("Select at least one candidate before confirming paper trades.", "bad");
+          return;
+        }
+        document.getElementById("confirm_title").textContent = `Confirm ${selected.length} paper trade${selected.length === 1 ? "" : "s"}`;
+        document.getElementById("confirm_copy").textContent = `This sends paper orders only. The bot will manage exits at the target, stop, or time exit after entry.`;
+        document.getElementById("confirm_panel").classList.add("show");
+        showStatus(`Ready to submit ${selected.length} selected paper trade(s). Confirm below.`, "info");
+      }
+
+      function cancelConfirm() {
+        document.getElementById("confirm_panel").classList.remove("show");
+        showStatus("Paper trade confirmation canceled.", "info");
+      }
+
+      async function confirmPaperTrades(submit = true) {
+        const selected = [...state.selected];
+        if (!selected.length) {
+          cancelConfirm();
+          return;
+        }
+        beginButton(submit ? "confirm_submit_btn" : "confirm_dry_btn", submit ? "Submitting" : "Checking");
+        showStatus(submit ? "Submitting paper orders to the broker." : "Running a paper-trade dry run.", "info");
+        setAction(submit ? "Submitting paper orders..." : "Running dry run...", "info");
+        const result = await apiJson("/api/operator/approve-paper-trades", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ selected_ids: selected, submit }),
+        }).catch(error => ({ error: error.message }));
+        setAction(result, result.error ? "bad" : "ok");
+        if (result.error) {
+          showStatus(`Paper trade failed: ${result.error}`, "bad");
+          log("error", "Paper trade failed", result.error);
+        } else {
+          const submitted = (result.submitted || []).filter(row => row.submitted).length;
+          showStatus(submit ? `Paper trade request complete. ${submitted} order(s) submitted.` : "Dry run complete. No broker orders were sent.", "ok");
+          log("ok", submit ? "Paper orders submitted" : "Dry run complete", `${result.attempted || 0} candidate(s) checked`);
+          if (submit) state.selected.clear();
+        }
+        document.getElementById("confirm_panel").classList.remove("show");
+        await refreshAll();
+        endButton(submit ? "confirm_submit_btn" : "confirm_dry_btn");
+      }
+
+      function renderReadiness(diagnostics, health) {
+        const diag = new Map((diagnostics || []).map(row => [row.name, row]));
+        const qwen = diag.get("qwen_connection")?.ok;
+        const dataOk = ["finnhub_connection", "fmp_connection", "polygon_connection", "alpaca_connection", "fred_connection"].filter(name => diag.get(name)?.ok).length;
+        const ok = health.ok && dataOk >= 4 && qwen;
+        document.getElementById("readiness_badge").textContent = ok ? "Ready for paper decisions" : "Check readiness";
+        document.getElementById("readiness_badge").className = `pill ${ok ? "ok" : "warn"}`;
+      }
+
+      function setAction(value, tone) {
+        document.getElementById("action_badge").className = `pill ${tone === "bad" ? "bad" : tone === "ok" ? "ok" : "info"}`;
+        document.getElementById("action_badge").textContent = tone === "bad" ? "Error" : tone === "ok" ? "Complete" : "Running";
+        document.getElementById("action_result").textContent = typeof value === "string" ? value : JSON.stringify(value, null, 2);
+      }
+
+      function showStatus(message, tone = "info") {
+        const banner = document.getElementById("status_banner");
+        banner.className = `status-banner ${tone === "bad" ? "bad" : tone === "ok" ? "ok" : "info"}`;
+        banner.textContent = message;
+      }
+
+      function beginButton(id, label) {
+        const button = document.getElementById(id);
+        if (!button) return;
+        button.disabled = true;
+        button.innerHTML = `<span class="spinner"></span>${escapeHtml(label)}...`;
+      }
+
+      function endButton(id) {
+        const button = document.getElementById(id);
+        if (!button) return;
+        button.disabled = false;
+        button.textContent = button.dataset.label || "Done";
+      }
+
+      function log(type, title, message) {
+        state.events.unshift({ type, title, message, time: new Date().toLocaleTimeString() });
+        state.events = state.events.slice(0, 25);
+        document.getElementById("event_log").innerHTML = state.events.map(item =>
+          `<div class="log-item ${item.type}"><strong>${escapeHtml(item.title)}</strong><div class="hint">${escapeHtml(item.time)} - ${escapeHtml(item.message)}</div></div>`
+        ).join("");
+      }
+
+      function clearEvents() {
+        state.events = [];
+        document.getElementById("event_log").innerHTML = "";
+      }
+
+      function riskFlags(flags) {
+        return flags && flags.length ? `<div class="hint" style="color: var(--red);">${flags.map(escapeHtml).join(", ")}</div>` : "";
+      }
+      function sum(rows, key) { return rows.reduce((total, row) => total + Number(row[key] || 0), 0); }
+      function money(value) { return `$${Number(value || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`; }
+      function pct(value) { return `${(Number(value || 0) * 100).toFixed(2)}%`; }
+      function shortDate(value) { return value ? new Date(value).toLocaleString() : "-"; }
+      function escapeHtml(value) { return String(value ?? "").replace(/[&<>"']/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;" }[char])); }
+      function escapeAttr(value) { return escapeHtml(value).replace(/`/g, "&#096;"); }
+
+      window.addEventListener("error", event => log("error", "Frontend error", event.message || "Unknown error"));
+      window.addEventListener("unhandledrejection", event => {
+        const message = event.reason?.message || String(event.reason);
+        log("error", "Promise error", message);
+        showStatus(`Unexpected UI error: ${message}`, "bad");
+      });
+      refreshAll();
+      setInterval(refreshAll, 60000);
     </script>
   </body>
 </html>

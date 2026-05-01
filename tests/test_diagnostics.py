@@ -13,6 +13,8 @@ def test_env_diagnostics_validate_formats_without_network(tmp_path) -> None:
                 "SUPABASE_KEY=test-key",
                 "ALPACA_API_KEY=test-key",
                 "ALPACA_SECRET_KEY=test-secret",
+                "FINNHUB_API_KEY=finnhub",
+                "FMP_API_KEY=fmp",
                 "ALPACA_BASE_URL=https://paper-api.alpaca.markets",
                 "QWEN_BASE_URL=http://localhost:8001/v1",
                 "ACTIVE_LLM_PROVIDER=openai",
@@ -39,6 +41,8 @@ def test_env_diagnostics_flags_bad_url_without_network(tmp_path) -> None:
                 "SUPABASE_KEY=test-key",
                 "ALPACA_API_KEY=test-key",
                 "ALPACA_SECRET_KEY=test-secret",
+                "FINNHUB_API_KEY=finnhub",
+                "FMP_API_KEY=fmp",
                 "ALPACA_BASE_URL=https://paper-api.alpaca.markets",
                 "ACTIVE_LLM_PROVIDER=openai",
                 "RISK_PER_TRADE_PCT=0.01",
@@ -52,4 +56,3 @@ def test_env_diagnostics_flags_bad_url_without_network(tmp_path) -> None:
     results = run_env_diagnostics(env_path, network=False)
 
     assert any(result.name == "SUPABASE_URL_format" and not result.ok for result in results)
-

@@ -129,7 +129,7 @@ class EveningInput(BaseModel):
 
 
 class ProviderSettings(BaseModel):
-    active_provider: ProviderName = ProviderName.OPENAI
+    active_provider: ProviderName = ProviderName.QWEN
     openai_model: str = "gpt-4.1"
     claude_model: str = "claude-sonnet-4-20250514"
     gemini_model: str = "gemini-2.5-pro"

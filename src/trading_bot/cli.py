@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 from datetime import date
 
-from trading_bot.data.market_data import YFinanceMarketDataProvider
+from trading_bot.data.provider_factory import create_market_data_provider
 from trading_bot.data.repositories import StrategyConfigRepository, TradingRepository
 from trading_bot.data.supabase_client import create_supabase_client
 from trading_bot.diagnostics import run_env_diagnostics
@@ -54,7 +54,7 @@ def _scan_pead(args) -> int:
     if args.persist:
         repository = TradingRepository(create_supabase_client(settings))
     scorer = FinBERTSentimentScorer() if args.sentiment == "finbert" else KeywordSentimentScorer()
-    scanner = PEADScanner(YFinanceMarketDataProvider(), scorer, repository)
+    scanner = PEADScanner(create_market_data_provider(settings), scorer, repository)
     tickers = [ticker.strip() for ticker in args.tickers.split(",")]
     results = scanner.scan(tickers, date.fromisoformat(args.date), persist_skips=args.persist_skips)
     for result in results:
@@ -80,4 +80,3 @@ def _execute_pending(args) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

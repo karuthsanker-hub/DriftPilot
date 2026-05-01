@@ -78,6 +78,7 @@
           <button class="secondary" onclick="loadScheduler()">Refresh Scheduler</button>
           <button class="secondary" onclick="runSchedulerJob('daily_pead_scan')">Run PEAD Job Now</button>
           <button class="secondary" onclick="runSchedulerJob('pending_entry_scan')">Run Pending Entries Now</button>
+          <button class="secondary" onclick="runSchedulerJob('position_management')">Run Position Management Now</button>
           <button class="secondary" onclick="runSchedulerJob('weekly_momentum_scan')">Run Momentum Job Now</button>
         </div>
         <pre id="scheduler">Loading scheduler...</pre>
@@ -85,9 +86,11 @@
 
       <section>
         <h2>PEAD Scan Harness</h2>
+        <pre id="pead_universe">Loading PEAD universe...</pre>
+        <pre id="earnings_events">Loading earnings events...</pre>
         <div class="grid">
           <label>Tickers
-            <input id="scan_tickers" value="AAPL,MSFT,NVDA" />
+            <input id="scan_tickers" placeholder="Leave blank to scan configured universe" />
           </label>
           <label>Start date
             <input id="scan_start_date" type="date" />
@@ -109,6 +112,7 @@
           </label>
         </div>
         <div class="actions" style="margin-top: 12px;">
+          <button class="secondary" onclick="importEarningsEvents()">Import earnings events</button>
           <button onclick="scanPead()">Scan date range</button>
           <button class="secondary" onclick="executePending(false)">Dry-run pending entries</button>
         </div>
@@ -141,9 +145,36 @@
       <section>
         <h2>Watchlist</h2>
         <table>
-          <thead><tr><th>Ticker</th><th>Strategy</th><th>Status</th><th>Surprise</th><th>Reason</th></tr></thead>
+          <thead><tr><th>Ticker</th><th>Strategy</th><th>Status</th><th>Entry</th><th>Target</th><th>Stop</th><th>Shares</th><th>Reason</th></tr></thead>
           <tbody id="watchlist"></tbody>
         </table>
+      </section>
+
+      <section>
+        <h2>Momentum Scores</h2>
+        <table>
+          <thead><tr><th>Ticker</th><th>Date</th><th>Total</th><th>Price</th><th>Earnings</th><th>Quality</th><th>Entered</th></tr></thead>
+          <tbody id="momentum_scores"></tbody>
+        </table>
+      </section>
+
+      <div class="split">
+        <section>
+          <h2>Recent Trades</h2>
+          <pre id="recent_trades">Loading trades...</pre>
+        </section>
+        <section>
+          <h2>Daily Summaries</h2>
+          <pre id="daily_summaries">Loading daily summaries...</pre>
+        </section>
+      </div>
+
+      <section>
+        <h2>Backtest</h2>
+        <div class="actions">
+          <button class="secondary" onclick="runBacktest()">Run Trade Backtest</button>
+        </div>
+        <pre id="backtest_result">No backtest run yet.</pre>
       </section>
     </main>
     <script>
@@ -156,14 +187,56 @@
       async function loadAll() {
         const config = await apiJson("/api/strategy-config").catch(e => ({ error: String(e) }));
         document.getElementById("config").textContent = JSON.stringify(config, null, 2);
+        await loadPeadUniverse();
+        await loadEarningsEvents();
         await loadWatchlist();
+        await loadMomentumScores();
+        await loadTradesAndSummaries();
         await loadScheduler();
+      }
+      async function loadPeadUniverse() {
+        const result = await apiJson("/api/universe/pead").catch(e => ({ error: String(e), tickers: [] }));
+        document.getElementById("pead_universe").textContent = JSON.stringify(result, null, 2);
+      }
+      async function loadEarningsEvents() {
+        const result = await apiJson("/api/earnings-events").catch(e => ({ error: String(e), events: [] }));
+        document.getElementById("earnings_events").textContent = JSON.stringify(result, null, 2);
+      }
+      async function importEarningsEvents() {
+        const result = await apiJson("/api/earnings-events/import", { method: "POST" }).catch(e => ({ error: String(e) }));
+        document.getElementById("action_result").textContent = JSON.stringify(result, null, 2);
+        await loadEarningsEvents();
       }
       async function loadWatchlist() {
         const rows = await apiJson("/api/watchlist").catch(e => [{ ticker: "ERROR", strategy: "", status: "", surprise_pct: "", skip_reason: String(e) }]);
         document.getElementById("watchlist").innerHTML = !Array.isArray(rows) || rows.length === 0
-          ? `<tr><td colspan="5">No watchlist rows yet.</td></tr>`
-          : rows.map(row => `<tr><td>${row.ticker ?? ""}</td><td>${row.strategy ?? ""}</td><td>${row.status ?? ""}</td><td>${row.surprise_pct ?? ""}</td><td>${row.skip_reason ?? ""}</td></tr>`).join("");
+          ? `<tr><td colspan="8">No watchlist rows yet.</td></tr>`
+          : rows.map(row => `<tr><td>${row.ticker ?? ""}</td><td>${row.strategy ?? ""}</td><td>${row.status ?? ""}</td><td>${fmt(row.entry_price)}</td><td>${fmt(row.target_price)}</td><td>${fmt(row.stop_loss)}</td><td>${row.shares ?? ""}</td><td>${row.skip_reason ?? ""}</td></tr>`).join("");
+      }
+      function fmt(value) {
+        return value === null || value === undefined || value === "" ? "" : Number(value).toFixed(2);
+      }
+      async function loadMomentumScores() {
+        const rows = await apiJson("/api/momentum-scores").catch(e => [{ ticker: "ERROR", scan_date: "", total_score: "", price_momentum: "", earnings_momentum: "", quality_score: "", entered_position: "", error: String(e) }]);
+        document.getElementById("momentum_scores").innerHTML = !Array.isArray(rows) || rows.length === 0
+          ? `<tr><td colspan="7">No momentum scores yet.</td></tr>`
+          : rows.map(row => `<tr><td>${row.ticker ?? ""}</td><td>${row.scan_date ?? ""}</td><td>${row.total_score ?? ""}</td><td>${row.price_momentum ?? ""}</td><td>${row.earnings_momentum ?? ""}</td><td>${row.quality_score ?? ""}</td><td>${row.entered_position ?? ""}</td></tr>`).join("");
+      }
+      async function loadTradesAndSummaries() {
+        const [trades, summaries] = await Promise.all([
+          apiJson("/api/trades").catch(e => ({ error: String(e) })),
+          apiJson("/api/daily-summaries").catch(e => ({ error: String(e) })),
+        ]);
+        document.getElementById("recent_trades").textContent = JSON.stringify(trades, null, 2);
+        document.getElementById("daily_summaries").textContent = JSON.stringify(summaries, null, 2);
+      }
+      async function runBacktest() {
+        const result = await apiJson("/api/backtest/trades", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ starting_equity: 50000, transaction_cost_bps: 5, split: true })
+        }).catch(e => ({ error: String(e) }));
+        document.getElementById("backtest_result").textContent = JSON.stringify(result, null, 2);
       }
       async function setKillSwitch(active) {
         await apiJson(`/api/kill-switch?active=${active}`, { method: "POST" });
@@ -212,6 +285,7 @@
         document.getElementById("action_result").textContent = JSON.stringify(result, null, 2);
         await loadScheduler();
         await loadWatchlist();
+        await loadMomentumScores();
       }
       const today = new Date();
       document.getElementById("scan_start_date").valueAsDate = today;

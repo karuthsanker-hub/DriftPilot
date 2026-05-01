@@ -7,7 +7,16 @@ from typing import Any
 import httpx
 
 from trading_bot.llm.base import LLMAdapter, LLMConfigurationError, LLMOutputValidationError
-from trading_bot.llm.models import DailyConfig, EveningInput, LearningLog, MorningInput, ProviderName, ProviderStatus
+from trading_bot.llm.models import (
+    DailyConfig,
+    EveningInput,
+    LearningLog,
+    MorningInput,
+    ProviderName,
+    ProviderStatus,
+    daily_config_schema,
+    learning_log_schema,
+)
 from trading_bot.llm.prompts import (
     EVENING_SYSTEM_PROMPT,
     MORNING_SYSTEM_PROMPT,
@@ -32,11 +41,11 @@ class QwenAdapter(LLMAdapter):
         self.timeout = timeout
 
     def generate_daily_config(self, payload: MorningInput) -> DailyConfig:
-        raw = self._chat_json(MORNING_SYSTEM_PROMPT, morning_user_prompt(payload))
+        raw = self._chat_json(MORNING_SYSTEM_PROMPT, morning_user_prompt(payload), schema=daily_config_schema())
         return self._validate_daily_config(raw)
 
     def generate_evening_review(self, payload: EveningInput) -> LearningLog:
-        raw = self._chat_json(EVENING_SYSTEM_PROMPT, evening_user_prompt(payload))
+        raw = self._chat_json(EVENING_SYSTEM_PROMPT, evening_user_prompt(payload), schema=learning_log_schema())
         return self._validate_learning_log(raw)
 
     def health_check(self) -> ProviderStatus:
@@ -48,15 +57,21 @@ class QwenAdapter(LLMAdapter):
         except Exception as exc:
             return ProviderStatus(provider=self.provider, model=self.model, configured=True, ok=False, message=str(exc))
 
-    def _chat_json(self, system: str, prompt: str) -> dict[str, Any]:
+    def _chat_json(self, system: str, prompt: str, *, schema: dict[str, Any]) -> dict[str, Any]:
         content = self._chat(
-            system + "\nReturn valid JSON only. Do not wrap the JSON in Markdown.",
-            prompt,
+            system
+            + "\n/no_think"
+            + "\nReturn exactly one JSON object and no prose."
+            + "\nDo not include Markdown fences."
+            + "\nDo not copy the input object."
+            + "\nThe JSON object must satisfy this schema:"
+            + f"\n{json.dumps(schema, sort_keys=True)}",
+            prompt + "\nReturn only the final JSON object.",
             max_tokens=4_000,
             response_format={"type": "json_object"},
         )
         try:
-            return json.loads(content)
+            return _loads_json_object(content)
         except json.JSONDecodeError as exc:
             raise LLMOutputValidationError(f"Qwen response was not valid JSON: {exc}") from exc
 
@@ -85,3 +100,17 @@ class QwenAdapter(LLMAdapter):
         except (KeyError, IndexError, TypeError) as exc:
             raise LLMOutputValidationError("Qwen endpoint returned an unexpected response shape") from exc
 
+
+def _loads_json_object(content: str) -> dict[str, Any]:
+    stripped = content.strip()
+    try:
+        parsed = json.loads(stripped)
+    except json.JSONDecodeError:
+        start = stripped.find("{")
+        end = stripped.rfind("}")
+        if start == -1 or end == -1 or end <= start:
+            raise
+        parsed = json.loads(stripped[start : end + 1])
+    if not isinstance(parsed, dict):
+        raise LLMOutputValidationError("Qwen response JSON was not an object")
+    return parsed

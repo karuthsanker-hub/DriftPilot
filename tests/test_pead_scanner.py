@@ -47,8 +47,16 @@ def test_pead_scanner_persists_passing_signal() -> None:
 
     assert result.signal.action == PEADAction.BUY_NEXT_DAY
     assert result.persisted is True
+    assert result.entry_price == 12
+    assert result.target_price == 12.96
+    assert result.stop_loss == 11.52
+    assert result.shares == 125
     assert repo.records[0].ticker == "ABCD"
     assert repo.records[0].strategy == "PEAD_LONG"
+    assert repo.records[0].entry_price == 12
+    assert repo.records[0].target_price == 12.96
+    assert repo.records[0].stop_loss == 11.52
+    assert repo.records[0].shares == 125
 
 
 def test_pead_scanner_can_persist_skips() -> None:
@@ -64,4 +72,3 @@ def test_pead_scanner_can_persist_skips() -> None:
     assert result.signal.action == PEADAction.SKIP
     assert result.persisted is True
     assert repo.records[0].status == "skipped"
-

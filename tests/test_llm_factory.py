@@ -22,3 +22,8 @@ def test_active_provider_controls_selected_adapter() -> None:
 
     assert isinstance(adapter_from_settings(settings), QwenAdapter)
 
+
+def test_qwen_is_default_provider_for_reviews() -> None:
+    settings = ProviderSettings()
+
+    assert settings.active_provider == ProviderName.QWEN

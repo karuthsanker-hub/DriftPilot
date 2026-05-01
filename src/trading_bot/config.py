@@ -41,7 +41,7 @@ class EnvConfigStore:
         raw = self.read_raw()
         getenv = lambda key, default="": raw.get(key) or os.getenv(key, default)
         return ProviderSettings(
-            active_provider=ProviderName(getenv("ACTIVE_LLM_PROVIDER", ProviderName.OPENAI.value)),
+            active_provider=ProviderName(getenv("ACTIVE_LLM_PROVIDER", ProviderName.QWEN.value)),
             openai_model=getenv("OPENAI_MODEL", "gpt-4.1"),
             claude_model=getenv("CLAUDE_MODEL", "claude-sonnet-4-20250514"),
             gemini_model=getenv("GEMINI_MODEL", "gemini-2.5-pro"),
