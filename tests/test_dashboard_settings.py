@@ -63,6 +63,18 @@ def test_dashboard_admin_renders(tmp_path) -> None:
 
     assert response.status_code == 200
     assert "DriftPilot Admin" in response.text
+    assert "/api/admin/state" in response.text
+
+
+def test_dashboard_admin_state_endpoint_returns_safe_config(tmp_path) -> None:
+    client = TestClient(create_app(tmp_path / ".env"))
+
+    response = client.get("/api/admin/state")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["system_health"]
+    assert "alpaca_secret_key" not in payload["configuration"]
 
 
 def test_dashboard_backtest_renders_and_reports(tmp_path) -> None:

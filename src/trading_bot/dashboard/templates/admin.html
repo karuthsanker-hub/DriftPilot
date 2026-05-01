@@ -5,293 +5,74 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>DriftPilot Admin</title>
     <style>
-      :root {
-        --bg: #f5f3ee;
-        --panel: #fffdf8;
-        --ink: #151713;
-        --muted: #69706a;
-        --line: #ded8cc;
-        --accent: #246b5b;
-        --danger: #9a3a32;
-        --soft: #eef4ef;
-        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      }
-      * { box-sizing: border-box; }
-      body { margin: 0; background: var(--bg); color: var(--ink); }
-      main { width: min(1180px, calc(100% - 32px)); margin: 24px auto 40px; }
-      header { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 18px; }
-      .brand { display: flex; align-items: center; gap: 12px; }
-      .mark { width: 36px; height: 36px; border-radius: 8px; background: var(--accent); color: white; display: grid; place-items: center; font-weight: 800; }
-      h1 { font-size: 26px; margin: 0; }
-      h2 { font-size: 17px; margin: 0 0 14px; }
-      a { color: var(--accent); text-decoration: none; font-weight: 700; }
-      section { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 18px; margin-bottom: 16px; }
-      label { display: grid; gap: 6px; font-size: 13px; font-weight: 700; color: #2e332f; }
-      input, select, button { border: 1px solid #c8c1b4; border-radius: 6px; min-height: 36px; padding: 0 10px; font: inherit; background: white; color: var(--ink); }
-      button { border-color: var(--accent); background: var(--accent); color: white; cursor: pointer; font-weight: 700; }
-      button.secondary { background: white; color: var(--accent); }
-      button.danger { background: var(--danger); border-color: var(--danger); }
-      table { width: 100%; border-collapse: collapse; font-size: 14px; }
-      th, td { text-align: left; border-bottom: 1px solid #ece7dc; padding: 8px; vertical-align: top; }
-      th { font-size: 12px; text-transform: uppercase; color: var(--muted); }
-      pre { background: #f1eee6; border-radius: 8px; padding: 12px; overflow: auto; max-height: 360px; }
-      .actions { display: flex; gap: 10px; flex-wrap: wrap; }
-      .grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
-      .split { display: grid; gap: 16px; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
-      .status-ok { color: var(--accent); font-weight: 800; }
-      .status-bad { color: var(--danger); font-weight: 800; }
-      @media (max-width: 760px) { .split { grid-template-columns: 1fr; } }
+      @import url("https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap");
+      :root { --bg:#080c16; --panel:#111722; --panel2:#151c2a; --line:#283249; --text:#e8edf7; --muted:#8792aa; --dim:#59647b; --green:#25d39a; --red:#ff4054; --amber:#ffae2b; --blue:#4da3ff; font-family:"IBM Plex Sans",system-ui,sans-serif; }
+      *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--text)} .mono{font-family:"JetBrains Mono",ui-monospace,monospace;font-variant-numeric:tabular-nums}
+      .nav{height:48px;display:flex;align-items:center;gap:24px;padding:0 18px;background:var(--panel);border-bottom:1px solid var(--line)} .brand{display:flex;align-items:center;gap:10px;font-weight:700}.mark{width:28px;height:28px;border-radius:6px;display:grid;place-items:center;background:linear-gradient(135deg,var(--blue),#a371f7);font:700 11px "JetBrains Mono"}
+      .tabs{display:flex;gap:4px}.tabs a{color:var(--muted);text-decoration:none;padding:7px 12px;border-radius:6px}.tabs a.active,.tabs a:hover{color:var(--text);background:var(--panel2)}
+      main{width:min(1240px,calc(100% - 32px));margin:20px auto 44px;display:grid;gap:20px}.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}.two{display:grid;grid-template-columns:1fr 1fr;gap:20px}
+      .card{border:1px solid var(--line);border-radius:8px;background:var(--panel);padding:18px}.label{color:var(--dim);text-transform:uppercase;letter-spacing:.13em;font:700 11px "JetBrains Mono"}.value{margin-top:10px;font:700 24px "JetBrains Mono"}
+      button,input,select{font:inherit;border-radius:6px;border:1px solid var(--line);min-height:38px;padding:0 12px;background:var(--panel2);color:var(--text)}button{cursor:pointer;border-color:var(--blue);color:var(--blue)}button.danger{border-color:var(--red);color:var(--red)}button.warn{border-color:var(--amber);color:var(--amber)}
+      .actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:14px} pre{white-space:pre-wrap;overflow:auto;max-height:360px;border:1px solid var(--line);border-radius:8px;background:#090e19;padding:12px;color:var(--muted)} table{width:100%;border-collapse:collapse}td,th{padding:10px 6px;border-bottom:1px solid #1d2639;text-align:left}th{color:var(--dim);text-transform:uppercase;font:700 10px "JetBrains Mono";letter-spacing:.1em}.green{color:var(--green)}.red{color:var(--red)}.amber{color:var(--amber)}
+      @media(max-width:900px){.grid,.two{grid-template-columns:1fr}}
     </style>
   </head>
   <body>
+    <nav class="nav"><div class="brand"><div class="mark">DP</div><span>DriftPilot Operator</span></div><div class="tabs"><a href="/">Operator</a><a class="active" href="/admin">Admin</a><a href="/backtest">Backtest</a><a href="/llm">LLM</a></div></nav>
     <main>
-      <header>
-        <div class="brand">
-          <div class="mark">DP</div>
-          <div>
-            <h1>DriftPilot Admin</h1>
-            <div style="color: var(--muted); font-size: 14px;">Diagnostics, manual scans, scheduler control, and provider checks.</div>
+      <section class="grid" id="health"></section>
+      <section class="two">
+        <div class="card">
+          <div class="label">Manual Override</div>
+          <p style="color:var(--muted)">Emergency controls stay here, outside the autonomous Operator tab.</p>
+          <div class="actions">
+            <button class="warn" onclick="confirmAction('Pause scanning')">Pause scanning</button>
+            <button class="danger" onclick="confirmAction('Flat all positions')">Flat all positions</button>
+            <button onclick="runDiagnostics()">Run diagnostics</button>
+            <button onclick="checkProviders()">Check providers</button>
           </div>
-        </div>
-        <div class="actions">
-          <a href="http://127.0.0.1:8000/">Command Center</a>
-          <a href="http://127.0.0.1:8000/llm">LLM Settings</a>
-        </div>
-      </header>
-
-      <section>
-        <h2>Safety Controls</h2>
-        <div class="actions">
-          <button onclick="setKillSwitch(true)">Trading Active</button>
-          <button class="danger" onclick="setKillSwitch(false)">Kill Switch</button>
-          <button class="secondary" onclick="loadAll()">Refresh</button>
-          <button class="secondary" onclick="runDiagnostics()">Run Diagnostics</button>
-          <button class="secondary" onclick="checkProviders()">Check Providers</button>
-        </div>
-      </section>
-
-      <section>
-        <h2>Scheduler</h2>
-        <div class="actions">
-          <button onclick="startScheduler()">Start Scheduler</button>
-          <button class="secondary" onclick="stopScheduler()">Stop Scheduler</button>
-          <button class="secondary" onclick="loadScheduler()">Refresh Scheduler</button>
-          <button class="secondary" onclick="runSchedulerJob('daily_pead_scan')">Run PEAD Job Now</button>
-          <button class="secondary" onclick="runSchedulerJob('pending_entry_scan')">Run Pending Entries Now</button>
-          <button class="secondary" onclick="runSchedulerJob('position_management')">Run Position Management Now</button>
-          <button class="secondary" onclick="runSchedulerJob('weekly_momentum_scan')">Run Momentum Job Now</button>
-        </div>
-        <pre id="scheduler">Loading scheduler...</pre>
-      </section>
-
-      <section>
-        <h2>PEAD Scan Harness</h2>
-        <pre id="pead_universe">Loading PEAD universe...</pre>
-        <pre id="earnings_events">Loading earnings events...</pre>
-        <div class="grid">
-          <label>Tickers
-            <input id="scan_tickers" placeholder="Leave blank to scan configured universe" />
-          </label>
-          <label>Start date
-            <input id="scan_start_date" type="date" />
-          </label>
-          <label>End date
-            <input id="scan_end_date" type="date" />
-          </label>
-          <label>Sentiment
-            <select id="scan_sentiment">
-              <option value="keyword">Keyword scorer</option>
-              <option value="finbert">FinBERT</option>
-            </select>
-          </label>
-          <label>Persistence
-            <select id="scan_persist">
-              <option value="false">Dry run only</option>
-              <option value="true">Persist passing signals</option>
-            </select>
-          </label>
-        </div>
-        <div class="actions" style="margin-top: 12px;">
-          <button class="secondary" onclick="importEarningsEvents()">Import earnings events</button>
-          <button onclick="scanPead()">Scan date range</button>
-          <button class="secondary" onclick="executePending(false)">Dry-run pending entries</button>
-        </div>
-      </section>
-
-      <div class="split">
-        <section>
-          <h2>Action Result</h2>
           <pre id="action_result">No action run yet.</pre>
-        </section>
-        <section>
-          <h2>Diagnostics</h2>
-          <pre id="diagnostics">Not checked yet.</pre>
-        </section>
-      </div>
-
-      <section>
-        <h2>Strategy Config</h2>
-        <pre id="config">Loading...</pre>
-      </section>
-
-      <section>
-        <h2>Provider Health</h2>
-        <table>
-          <thead><tr><th>Provider</th><th>Configured</th><th>OK</th><th>Message</th></tr></thead>
-          <tbody id="providers"></tbody>
-        </table>
-      </section>
-
-      <section>
-        <h2>Watchlist</h2>
-        <table>
-          <thead><tr><th>Ticker</th><th>Strategy</th><th>Status</th><th>Entry</th><th>Target</th><th>Stop</th><th>Shares</th><th>Reason</th></tr></thead>
-          <tbody id="watchlist"></tbody>
-        </table>
-      </section>
-
-      <section>
-        <h2>Momentum Scores</h2>
-        <table>
-          <thead><tr><th>Ticker</th><th>Date</th><th>Total</th><th>Price</th><th>Earnings</th><th>Quality</th><th>Entered</th></tr></thead>
-          <tbody id="momentum_scores"></tbody>
-        </table>
-      </section>
-
-      <div class="split">
-        <section>
-          <h2>Recent Trades</h2>
-          <pre id="recent_trades">Loading trades...</pre>
-        </section>
-        <section>
-          <h2>Daily Summaries</h2>
-          <pre id="daily_summaries">Loading daily summaries...</pre>
-        </section>
-      </div>
-
-      <section>
-        <h2>Backtest</h2>
-        <div class="actions">
-          <button class="secondary" onclick="runBacktest()">Run Trade Backtest</button>
         </div>
-        <pre id="backtest_result">No backtest run yet.</pre>
+        <div class="card">
+          <div class="label">Broker Reconciliation</div>
+          <pre id="recon">Loading...</pre>
+        </div>
+      </section>
+      <section class="two">
+        <div class="card"><div class="label">State Machine Event Log</div><table><thead><tr><th>Time</th><th>State</th><th>Reason</th></tr></thead><tbody id="events"></tbody></table></div>
+        <div class="card"><div class="label">Configuration Editor</div><pre id="config">Loading safe config...</pre></div>
+      </section>
+      <section class="card">
+        <div class="label">Legacy Harness</div>
+        <p style="color:var(--muted)">PEAD scans, scheduler jobs, provider checks, and diagnostics remain accessible through existing APIs while the autonomous operator migrates.</p>
+        <div class="actions">
+          <button onclick="runSchedulerJob('operator_candidate_refresh')">Refresh candidate pool</button>
+          <button onclick="runSchedulerJob('position_management')">Run position management</button>
+          <button onclick="loadScheduler()">Scheduler status</button>
+        </div>
+        <pre id="legacy_result">No legacy action run yet.</pre>
       </section>
     </main>
     <script>
-      const API_BASE = window.location.protocol === "file:" ? "http://127.0.0.1:8000" : "";
-      async function apiJson(path, options = {}) {
-        const response = await fetch(`${API_BASE}${path}`, options);
-        if (!response.ok) throw new Error(`${path} returned ${response.status}: ${await response.text()}`);
-        return response.json();
+      const fmt = data => JSON.stringify(data, null, 2);
+      async function apiJson(path, options={}) { const r = await fetch(path, options); if (!r.ok) throw new Error(`${path} ${r.status}: ${await r.text()}`); return r.json(); }
+      async function loadAdmin() {
+        const data = await apiJson("/api/admin/state");
+        const h = data.system_health || {};
+        document.getElementById("health").innerHTML = Object.entries(h).map(([k,v]) => `<div class="card"><div class="label">${k.replaceAll("_"," ")}</div><div class="value mono">${v}</div></div>`).join("");
+        document.getElementById("recon").textContent = fmt(data.broker_reconciliation || {});
+        document.getElementById("config").textContent = fmt(data.configuration || {});
+        document.getElementById("events").innerHTML = (data.event_log || []).map(e => `<tr><td class="mono">${new Date(e.time).toLocaleTimeString()}</td><td class="mono">${e.state}</td><td>${e.reason}</td></tr>`).join("") || `<tr><td colspan="3" style="color:var(--muted)">No events yet.</td></tr>`;
       }
-      async function loadAll() {
-        const config = await apiJson("/api/strategy-config").catch(e => ({ error: String(e) }));
-        document.getElementById("config").textContent = JSON.stringify(config, null, 2);
-        await loadPeadUniverse();
-        await loadEarningsEvents();
-        await loadWatchlist();
-        await loadMomentumScores();
-        await loadTradesAndSummaries();
-        await loadScheduler();
+      function confirmAction(label) {
+        if (!confirm(`${label}? This is an emergency override and should write an operator event.`)) return;
+        document.getElementById("action_result").textContent = `${label} requested. Backend override wiring lands with Phase 8 acceptance flows.`;
       }
-      async function loadPeadUniverse() {
-        const result = await apiJson("/api/universe/pead").catch(e => ({ error: String(e), tickers: [] }));
-        document.getElementById("pead_universe").textContent = JSON.stringify(result, null, 2);
-      }
-      async function loadEarningsEvents() {
-        const result = await apiJson("/api/earnings-events").catch(e => ({ error: String(e), events: [] }));
-        document.getElementById("earnings_events").textContent = JSON.stringify(result, null, 2);
-      }
-      async function importEarningsEvents() {
-        const result = await apiJson("/api/earnings-events/import", { method: "POST" }).catch(e => ({ error: String(e) }));
-        document.getElementById("action_result").textContent = JSON.stringify(result, null, 2);
-        await loadEarningsEvents();
-      }
-      async function loadWatchlist() {
-        const rows = await apiJson("/api/watchlist").catch(e => [{ ticker: "ERROR", strategy: "", status: "", surprise_pct: "", skip_reason: String(e) }]);
-        document.getElementById("watchlist").innerHTML = !Array.isArray(rows) || rows.length === 0
-          ? `<tr><td colspan="8">No watchlist rows yet.</td></tr>`
-          : rows.map(row => `<tr><td>${row.ticker ?? ""}</td><td>${row.strategy ?? ""}</td><td>${row.status ?? ""}</td><td>${fmt(row.entry_price)}</td><td>${fmt(row.target_price)}</td><td>${fmt(row.stop_loss)}</td><td>${row.shares ?? ""}</td><td>${row.skip_reason ?? ""}</td></tr>`).join("");
-      }
-      function fmt(value) {
-        return value === null || value === undefined || value === "" ? "" : Number(value).toFixed(2);
-      }
-      async function loadMomentumScores() {
-        const rows = await apiJson("/api/momentum-scores").catch(e => [{ ticker: "ERROR", scan_date: "", total_score: "", price_momentum: "", earnings_momentum: "", quality_score: "", entered_position: "", error: String(e) }]);
-        document.getElementById("momentum_scores").innerHTML = !Array.isArray(rows) || rows.length === 0
-          ? `<tr><td colspan="7">No momentum scores yet.</td></tr>`
-          : rows.map(row => `<tr><td>${row.ticker ?? ""}</td><td>${row.scan_date ?? ""}</td><td>${row.total_score ?? ""}</td><td>${row.price_momentum ?? ""}</td><td>${row.earnings_momentum ?? ""}</td><td>${row.quality_score ?? ""}</td><td>${row.entered_position ?? ""}</td></tr>`).join("");
-      }
-      async function loadTradesAndSummaries() {
-        const [trades, summaries] = await Promise.all([
-          apiJson("/api/trades").catch(e => ({ error: String(e) })),
-          apiJson("/api/daily-summaries").catch(e => ({ error: String(e) })),
-        ]);
-        document.getElementById("recent_trades").textContent = JSON.stringify(trades, null, 2);
-        document.getElementById("daily_summaries").textContent = JSON.stringify(summaries, null, 2);
-      }
-      async function runBacktest() {
-        const result = await apiJson("/api/backtest/trades", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ starting_equity: 50000, transaction_cost_bps: 5, split: true })
-        }).catch(e => ({ error: String(e) }));
-        document.getElementById("backtest_result").textContent = JSON.stringify(result, null, 2);
-      }
-      async function setKillSwitch(active) {
-        await apiJson(`/api/kill-switch?active=${active}`, { method: "POST" });
-        await loadAll();
-      }
-      async function runDiagnostics() {
-        const result = await apiJson("/api/diagnostics").catch(e => [{ name: "diagnostics", ok: false, message: String(e) }]);
-        document.getElementById("diagnostics").textContent = JSON.stringify(result, null, 2);
-      }
-      async function checkProviders() {
-        const rows = await apiJson("/api/providers/health").catch(e => [{ provider: "ERROR", configured: false, ok: false, message: String(e) }]);
-        document.getElementById("providers").innerHTML = rows.map(row => `<tr><td>${row.provider ?? ""}</td><td>${row.configured ? "yes" : "no"}</td><td class="${row.ok ? "status-ok" : "status-bad"}">${row.ok ? "OK" : "FAIL"}</td><td>${row.message ?? ""}</td></tr>`).join("");
-      }
-      async function scanPead() {
-        const payload = {
-          tickers: document.getElementById("scan_tickers").value,
-          start_date: document.getElementById("scan_start_date").value || null,
-          end_date: document.getElementById("scan_end_date").value || null,
-          sentiment: document.getElementById("scan_sentiment").value,
-          persist: document.getElementById("scan_persist").value === "true",
-          persist_skips: false,
-        };
-        const result = await apiJson("/api/scan-pead", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) }).catch(e => ({ error: String(e) }));
-        document.getElementById("action_result").textContent = JSON.stringify(result, null, 2);
-        await loadWatchlist();
-      }
-      async function executePending(submit) {
-        const result = await apiJson("/api/execute-pending", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ submit }) }).catch(e => ({ error: String(e) }));
-        document.getElementById("action_result").textContent = JSON.stringify(result, null, 2);
-        await loadWatchlist();
-      }
-      async function loadScheduler() {
-        const result = await apiJson("/api/scheduler").catch(e => ({ error: String(e) }));
-        document.getElementById("scheduler").textContent = JSON.stringify(result, null, 2);
-      }
-      async function startScheduler() {
-        await apiJson("/api/scheduler/start", { method: "POST" }).catch(e => ({ error: String(e) }));
-        await loadScheduler();
-      }
-      async function stopScheduler() {
-        await apiJson("/api/scheduler/stop", { method: "POST" }).catch(e => ({ error: String(e) }));
-        await loadScheduler();
-      }
-      async function runSchedulerJob(jobId) {
-        const result = await apiJson(`/api/scheduler/run/${jobId}`, { method: "POST" }).catch(e => ({ error: String(e) }));
-        document.getElementById("action_result").textContent = JSON.stringify(result, null, 2);
-        await loadScheduler();
-        await loadWatchlist();
-        await loadMomentumScores();
-      }
-      const today = new Date();
-      document.getElementById("scan_start_date").valueAsDate = today;
-      document.getElementById("scan_end_date").valueAsDate = today;
-      loadAll();
-      checkProviders();
+      async function runDiagnostics() { document.getElementById("action_result").textContent = fmt(await apiJson("/api/diagnostics").catch(e => ({error:String(e)}))); }
+      async function checkProviders() { document.getElementById("action_result").textContent = fmt(await apiJson("/api/providers/health").catch(e => ({error:String(e)}))); }
+      async function loadScheduler() { document.getElementById("legacy_result").textContent = fmt(await apiJson("/api/scheduler").catch(e => ({error:String(e)}))); }
+      async function runSchedulerJob(job) { document.getElementById("legacy_result").textContent = fmt(await apiJson(`/api/scheduler/jobs/${job}/run`, {method:"POST"}).catch(e => ({error:String(e)}))); }
+      loadAdmin().catch(error => { document.getElementById("health").innerHTML = `<div class="card"><div class="label">Admin Error</div><div class="value red">${error}</div></div>`; });
     </script>
   </body>
 </html>

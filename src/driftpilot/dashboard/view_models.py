@@ -35,6 +35,48 @@ def backtest_report_payload(path: str | Path = "expectancy_report.json") -> dict
     return _mock_backtest_report()
 
 
+def admin_state_payload(settings: DriftPilotSettings) -> dict[str, Any]:
+    db_path = settings.sqlite_path_obj
+    sqlite_exists = db_path.exists()
+    state = None
+    latest = None
+    if sqlite_exists:
+        try:
+            repo = DriftPilotRepository.open(db_path)
+            state = repo.state.get()
+            latest = repo.transitions.latest()
+        except Exception as exc:
+            return {
+                "system_health": {"state_db": "ERROR", "message": str(exc)},
+                "manual_override": _manual_override_payload(),
+                "broker_reconciliation": {"status": "unknown", "mismatches": []},
+                "event_log": [],
+                "configuration": _safe_config(settings),
+            }
+    return {
+        "system_health": {
+            "state_db": "OK" if sqlite_exists else "MISSING",
+            "operator_state": state.current_state if state else "BOOT",
+            "mode": settings.mode.upper(),
+            "sip_feed": settings.alpaca_data_feed,
+        },
+        "manual_override": _manual_override_payload(),
+        "broker_reconciliation": {
+            "status": "matched" if latest else "not_run",
+            "last_reason": latest.reason if latest else "No reconciliation event yet",
+            "mismatches": [],
+        },
+        "event_log": [
+            {
+                "time": latest.timestamp.isoformat(),
+                "state": latest.to_state,
+                "reason": latest.reason,
+            }
+        ] if latest else [],
+        "configuration": _safe_config(settings),
+    }
+
+
 def _payload_from_repo(repo: DriftPilotRepository, settings: DriftPilotSettings) -> dict[str, Any]:
     current = repo.state.get()
     slots = repo.slots.list_all()
@@ -172,4 +214,30 @@ def _mock_backtest_report() -> dict[str, Any]:
             {"timestamp": f"2024-01-{day:02d}T16:00:00+00:00", "equity": 10000 + (day * 45)}
             for day in range(1, 21)
         ],
+    }
+
+
+def _manual_override_payload() -> dict[str, Any]:
+    return {
+        "pause_scanning_enabled": True,
+        "flat_all_positions_enabled": True,
+        "requires_confirmation": True,
+        "note": "Manual overrides are emergency-only and write state-machine events.",
+    }
+
+
+def _safe_config(settings: DriftPilotSettings) -> dict[str, Any]:
+    return {
+        "mode": settings.mode,
+        "paper_capital": settings.paper_capital,
+        "trade_slots": settings.trade_slots,
+        "slot_value": settings.slot_value,
+        "target_pct": settings.target_pct,
+        "stop_pct": settings.stop_pct,
+        "max_hold_minutes": settings.max_hold_minutes,
+        "scan_interval_seconds": settings.scan_interval_seconds,
+        "max_trades_per_day": settings.max_trades_per_day,
+        "daily_loss_limit_pct": settings.daily_loss_limit_pct,
+        "equity_floor": settings.equity_floor,
+        "alpaca_data_feed": settings.alpaca_data_feed,
     }
