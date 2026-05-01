@@ -65,6 +65,8 @@ class DriftPilotSettings:
     stop_pct: float = 0.01
     max_hold_minutes: int = 45
     scan_interval_seconds: int = 30
+    entry_limit_timeout_seconds: int = 30
+    exit_limit_timeout_seconds: int = 15
     spy_stale_seconds: int = 60
     always_on_candidate_count: int = 50
     max_trades_per_day: int = 50
@@ -103,6 +105,8 @@ def load_settings(
         stop_pct=_get_float(values, "OPERATOR_STOP_PCT", 0.01),
         max_hold_minutes=_get_int(values, "MAX_HOLD_MINUTES", 45),
         scan_interval_seconds=_get_int(values, "SCAN_INTERVAL_SECONDS", 30),
+        entry_limit_timeout_seconds=_get_int(values, "ENTRY_LIMIT_TIMEOUT_SECONDS", 30),
+        exit_limit_timeout_seconds=_get_int(values, "EXIT_LIMIT_TIMEOUT_SECONDS", 15),
         spy_stale_seconds=_get_int(values, "SPY_STALE_SECONDS", 60),
         always_on_candidate_count=_get_int(values, "ALWAYS_ON_CANDIDATE_COUNT", 50),
         max_trades_per_day=_get_int(values, "MAX_TRADES_PER_DAY", 50),
