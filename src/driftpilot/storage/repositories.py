@@ -61,6 +61,12 @@ def _date_to_storage(value: date) -> str:
     return value.isoformat()
 
 
+def _last_insert_id(cursor: sqlite3.Cursor) -> int:
+    if cursor.lastrowid is None:
+        raise RuntimeError("SQLite insert did not produce a row id")
+    return cursor.lastrowid
+
+
 @dataclass(frozen=True, slots=True)
 class OperatorStateRecord:
     current_state: str
@@ -192,7 +198,7 @@ class TransitionRepository:
             """,
             (from_state, to_state, reason, datetime_to_storage(happened_at), _json_dumps(metadata)),
         )
-        transition_id = int(cursor.lastrowid)
+        transition_id = _last_insert_id(cursor)
         self.connection.commit()
         return StateTransitionRecord(
             id=transition_id,
