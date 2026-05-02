@@ -1,7 +1,7 @@
 [project]
 name = "trading-bot"
 version = "0.1.0"
-description = "Paper trading bot with provider-neutral LLM strategy adapters."
+description = "Autonomous intraday paper-trading operator with signal registry, backtesting, and safety-gated live deployment."
 requires-python = ">=3.11"
 dependencies = [
     "alpaca-py>=0.35.0",
