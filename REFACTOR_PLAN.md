@@ -1071,6 +1071,18 @@ Alpaca SIP stream -> bar/quote cache -> scanner -> allocator -> entry order/pape
 -> position monitor -> target/stop/time exit -> recycler -> SQLite -> dashboard
 ```
 
+### Revised Next Sequence
+
+Before building more runtime infrastructure, validate the strategy against real historical data:
+
+1. Verify the full suite and the eight acceptance tests pass with no skips.
+2. Run Phase 12 next: pull/cache Databento data, run the 12-month replay, and generate a real `expectancy_report.json`.
+3. Inspect the slippage waterfall and after-cost expectancy.
+4. If the report verdict is `GATED`, meaning backtest expectancy is positive but paper-trading/live gates remain pending, continue with Phase 9, then Phase 10, then Phase 11.
+5. If the report verdict is `FAIL`, stop runtime buildout and revisit the signal layer before investing in more infrastructure.
+
+Rationale: do not build production infrastructure around a strategy that does not survive realistic execution costs.
+
 ### Phase 0: Safety Freeze
 
 - Add a branch and commit current state before refactor.
@@ -1213,6 +1225,8 @@ Phase 7c acceptance:
 
 ### Phase 9: Real Runtime Wiring
 
+Prerequisite: Phase 12 must produce `verdict = GATED` or better. If Phase 12 produces `FAIL`, Phase 9 is blocked.
+
 Goal: turn the implemented parts into one runnable autonomous paper process.
 
 - Add `src/driftpilot/operator.py` or equivalent `python -m driftpilot.operator` command.
@@ -1244,6 +1258,8 @@ Phase 9 acceptance:
 
 ### Phase 10: Scanner Service And Candidate Queue Persistence
 
+Prerequisite: Phase 9 runtime command exists and Phase 12 did not fail.
+
 Goal: make the ranked queue real and continuously refreshed.
 
 - Implement scanner service that consumes the WebSocket-backed `BarFeatureCache`.
@@ -1269,6 +1285,8 @@ Phase 10 acceptance:
 - Candidate queue API/dashboard can distinguish loading, empty, stale, and error states.
 
 ### Phase 11: Entry, Exit, And Recycling Services
+
+Prerequisite: Phase 9 runtime and Phase 10 scanner persistence are working against synthetic or real stream input.
 
 Goal: complete the capital loop.
 
@@ -1302,7 +1320,7 @@ Phase 11 acceptance:
 
 ### Phase 12: Real Backtest Data And First Expectancy Report
 
-Goal: replace mock Backtest tab data with a real report.
+Goal: replace mock Backtest tab data with a real report and make the go/no-go decision before runtime buildout.
 
 - Add Databento pull/cache command for 1-minute bars.
 - Store cache under `data/bars/databento/` as gitignored Parquet.
@@ -1311,6 +1329,9 @@ Goal: replace mock Backtest tab data with a real report.
 - Generate `expectancy_report.json`.
 - Confirm Backtest tab renders the real report without component changes.
 - If point-in-time constituents are unavailable, keep survivorship-bias caveat in the report.
+- Treat the report as the strategy-validation gate:
+  - `GATED`: positive after-cost expectancy; continue to Phase 9.
+  - `FAIL`: negative after-cost expectancy; stop and revisit signals.
 
 Phase 12 acceptance:
 
