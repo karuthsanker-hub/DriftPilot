@@ -1046,6 +1046,31 @@ Keep old env keys where legacy Admin/LLM screens still need them.
 
 ## Implementation Phases
 
+### Current Implementation Snapshot
+
+Status as of the latest refactor pass:
+
+- Phase 0 complete: plan, agent instructions, and resolved signal decisions are in the repo.
+- Phase 1 complete: `src/driftpilot/settings.py`, `clock.py`, SQLite schema, repositories, daily counters, and foundation tests exist.
+- Phase 2 complete: Alpaca broker client, SIP stream adapter, two-tier subscription model, order fallback rules, boot reconciliation, and live-gate blocking exist.
+- Phase 3 complete: shared signal layer exists with typical-price VWAP, same-minute RVOL, SPY-only v1 regime, and z-score ranking.
+- Phase 4 complete: slot allocator, sector cap, duplicate/stale guards, paper fill slippage, and fill persistence exist.
+- Phase 5 complete as a harness: backtest replay, metrics, report writer, and CLI exist. Real Databento/Parquet data is still needed to produce the first real `expectancy_report.json`.
+- Phase 6 complete as a runtime skeleton: async state machine, transition logging, market-clock handling, retry metadata, and SPY stale-bar guard exist. It is not yet wired to a real continuous Alpaca stream/process.
+- Phase 7a complete: Operator tab is now a read-only operator-console shell backed by `/api/operator/state`, with mock fallback and SQLite read model support.
+- Phase 7b complete: Backtest tab and `/api/backtest/report` exist, reading `expectancy_report.json` when present and mock-shaped data otherwise.
+- Phase 7c complete: Admin tab and `/api/admin/state` exist with system health, broker reconciliation status, event log, safe config, and manual override shell.
+- Phase 8 complete: README, MIGRATION notes, and acceptance coverage exist.
+
+Important remaining gap:
+
+The components are built, but the production paper operator is not yet one real running loop. The next work must connect:
+
+```text
+Alpaca SIP stream -> bar/quote cache -> scanner -> allocator -> entry order/paper fill
+-> position monitor -> target/stop/time exit -> recycler -> SQLite -> dashboard
+```
+
 ### Phase 0: Safety Freeze
 
 - Add a branch and commit current state before refactor.
@@ -1185,6 +1210,180 @@ Phase 7c acceptance:
   - How live deploy works
 - Add `MIGRATION.md`.
 - Remove or archive obsolete operator manual paths only after tests pass.
+
+### Phase 9: Real Runtime Wiring
+
+Goal: turn the implemented parts into one runnable autonomous paper process.
+
+- Add `src/driftpilot/operator.py` or equivalent `python -m driftpilot.operator` command.
+- Instantiate settings, clock, SQLite repository, Alpaca stream, broker client, scanner service, allocator, paper fill engine, and position monitor.
+- Drive everything through `DriftPilotStateMachine`; scanner, allocator, monitor, and exit handler must not run independent loops.
+- On boot:
+  - evaluate live gate
+  - initialize 10 slots
+  - reconcile against Alpaca open positions
+  - subscribe to the always-on stream tier
+- During market hours:
+  - maintain WebSocket bar/quote cache
+  - run scanner on `SCAN_INTERVAL_SECONDS`
+  - allocate free slots from ranked candidates
+  - submit entry orders or paper fills depending on mode
+  - persist every state/position/order/fill transition
+- Outside market hours:
+  - transition to `MARKET_CLOSED`
+  - show next-open countdown in dashboard state
+- Add a small CLI smoke test mode that runs one deterministic cycle without hitting Alpaca.
+
+Phase 9 acceptance:
+
+- `python -m driftpilot.operator --once --mock-stream` writes SQLite state visible in `/api/operator/state`.
+- With no candidates, dashboard shows a clear non-trading reason, not mock data.
+- With injected candidates, allocator reserves slots and dashboard shows those slots.
+- Boot reconciliation event appears in Admin event log.
+- No Supabase access is required for the DriftPilot operator path.
+
+### Phase 10: Scanner Service And Candidate Queue Persistence
+
+Goal: make the ranked queue real and continuously refreshed.
+
+- Implement scanner service that consumes the WebSocket-backed `BarFeatureCache`.
+- Persist top candidates to `candidate_queue` every scanner cycle.
+- Persist blocked candidates with reason:
+  - `stale_bar`
+  - `spread_too_wide`
+  - `below_rvol`
+  - `below_vwap`
+  - `below_15m_return`
+  - `regime_rejected`
+  - `sector_cap_reached`
+  - `duplicate_symbol`
+- Add industry/sector classification from checked-in CSV or `sector_map`.
+- Keep queue size configurable; default dashboard shows top 20, backend may persist top 100.
+- Add data freshness status for SPY and each candidate.
+
+Phase 10 acceptance:
+
+- Synthetic bar stream produces deterministic ranked queue rows in SQLite.
+- RED regime only persists relative-strength survivors as allocatable.
+- Sector-cap-blocked candidates remain visible with `sector_cap_reached`.
+- Candidate queue API/dashboard can distinguish loading, empty, stale, and error states.
+
+### Phase 11: Entry, Exit, And Recycling Services
+
+Goal: complete the capital loop.
+
+- Convert slot reservations into entry orders/fills.
+- Create/update positions, orders, and fills from entry results.
+- Monitor open positions only when driven by the state machine.
+- Exit branches:
+  - `TARGET` at `+target_pct`
+  - `STOP` at `-stop_pct`
+  - `TIME` at `MAX_HOLD_MINUTES`
+- If an exit order is already in flight, do not fire duplicate time-stop/target/stop exits.
+- On exit fill:
+  - update realized P&L
+  - mark slot `RECYCLING`
+  - write recycle event
+  - return slot to `EMPTY`
+  - allow allocator to refill on next cycle
+- Persist daily counters:
+  - `MAX_TRADES_PER_DAY`
+  - `MAX_TRADES_PER_SYMBOL_PER_DAY`
+  - daily loss limit
+
+Phase 11 acceptance:
+
+- A synthetic position exits on target and recycles its slot.
+- A synthetic position exits on stop and recycles its slot.
+- A flat synthetic position exits exactly at `MAX_HOLD_MINUTES`.
+- Capital deployed never exceeds configured paper capital.
+- Duplicate opposite-side orders are not submitted when an exit is already open.
+- Daily counters survive process restart and reset only on ET date change.
+
+### Phase 12: Real Backtest Data And First Expectancy Report
+
+Goal: replace mock Backtest tab data with a real report.
+
+- Add Databento pull/cache command for 1-minute bars.
+- Store cache under `data/bars/databento/` as gitignored Parquet.
+- Document required Databento dataset/symbol universe.
+- Run first 12-month replay.
+- Generate `expectancy_report.json`.
+- Confirm Backtest tab renders the real report without component changes.
+- If point-in-time constituents are unavailable, keep survivorship-bias caveat in the report.
+
+Phase 12 acceptance:
+
+- `python -m driftpilot.backtest --start 2024-01-01 --end 2024-12-31` runs against real cached bars.
+- `expectancy_report.json` includes trades, daily P&L, Sharpe, max drawdown, expectancy, slippage waterfall, regime performance, and caveats.
+- Live gate reads the real backtest criterion from this report.
+- If expectancy is negative after costs, verdict is `FAIL`, not `PASS`.
+
+### Phase 13: Admin Override Actions
+
+Goal: make Admin controls real and auditable.
+
+- Implement backend endpoints for:
+  - pause scanning
+  - resume scanning
+  - flat all positions
+  - force broker reconciliation
+  - reset paper state
+- Every override writes a state-machine transition/event.
+- Destructive actions require confirmation in UI and server-side idempotency token.
+- Flat-all uses broker/paper execution path, not direct DB mutation.
+- Configuration editor remains safe: never render raw secrets.
+
+Phase 13 acceptance:
+
+- Pause scanning blocks new entries but allows exits.
+- Resume scanning restarts candidate allocation.
+- Flat all positions submits/records exits and transitions to safe state.
+- Admin event log shows who/what/when/reason for every override.
+
+### Phase 14: Full Paper Soak Test
+
+Goal: prove the autonomous loop works through a realistic session before any live discussion.
+
+- Run one full market session in paper mode.
+- Track:
+  - number of scan cycles
+  - candidates scanned
+  - entries submitted
+  - exits submitted
+  - recycle events
+  - realized/unrealized P&L
+  - API errors/retries
+  - stale feed events
+- Verify dashboard explains all idle/halt/error periods.
+- Export a daily operator report from SQLite.
+
+Phase 14 acceptance:
+
+- No capital over-deployment.
+- No duplicate symbol allocations.
+- No sector cap violations.
+- No untimed positions.
+- No silent errors.
+- Dashboard state stays fresh for the entire session.
+- End-of-day report reconciles SQLite positions/orders/fills with Alpaca paper account.
+
+### Phase 15: Legacy Path Retirement
+
+Goal: simplify after the new operator proves itself.
+
+- Move old manual PEAD operator pages/actions to `legacy/` or keep them Admin-only.
+- Remove Supabase from the autonomous operator path.
+- Remove APScheduler from the DriftPilot operator runtime.
+- Keep LLM tab/settings only for future research/review workflows.
+- Update README and MIGRATION with final runbooks.
+
+Phase 15 acceptance:
+
+- Operator tab has no manual-confirm workflow.
+- DriftPilot runtime starts without Supabase credentials.
+- Legacy tests are either moved to legacy scope or replaced with DriftPilot runtime tests.
+- README describes the new architecture as the default path.
 
 ## Acceptance Test Mapping
 
