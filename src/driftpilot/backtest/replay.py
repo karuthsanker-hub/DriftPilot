@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 import numpy as np
 import pandas as pd  # type: ignore[import-untyped]
@@ -58,6 +58,7 @@ class _OpenPosition:
     target_price: float
     stop_price: float
     regime: str
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 def load_parquet_bars(
@@ -95,7 +96,19 @@ def replay_parquet_cache(
 ) -> ReplayResult:
     settings = settings or DriftPilotSettings()
     signal = get_signal(signal_name or settings.active_signal)
-    _require_vectorized_signal(signal.name)
+    if signal.name != DEFAULT_SIGNAL:
+        # Non-intraday signals route through the generic per-symbol streaming
+        # path. The vectorized path below is a special-case optimization for
+        # intraday_momentum_v1 only.
+        return replay_parquet_cache_generic(
+            root,
+            start=start,
+            end=end,
+            settings=settings,
+            rvol_lookback=rvol_lookback,
+            point_in_time_constituents=point_in_time_constituents,
+            signal_name=signal.name,
+        )
     root_path = Path(root)
     files = sorted(root_path.glob("**/*.parquet"))
     if not files:
@@ -456,6 +469,7 @@ def replay_bars(
             latest_by_symbol,
             current_time=current_time,
             settings=settings,
+            signal=signal,
         )
         for position, exit_bar, exit_reason in exits:
             positions.remove(position)
@@ -524,6 +538,72 @@ def _require_vectorized_signal(signal_name: str) -> None:
         raise NotImplementedError(
             f"vectorized parquet replay currently supports {DEFAULT_SIGNAL}; got {signal_name}"
         )
+
+
+def replay_parquet_cache_generic(
+    root: str | Path,
+    *,
+    start: date,
+    end: date,
+    settings: DriftPilotSettings | None = None,
+    rvol_lookback: int = 20,
+    point_in_time_constituents: bool = False,
+    signal_name: str | None = None,
+) -> ReplayResult:
+    """Per-symbol streaming Databento replay for any registered signal.
+
+    This is the harness path for the four locked v1 signals (stationary_ghost,
+    whale_tail, rs_drift, apex_hunter). It loads SPY first (every locked spec
+    that needs SPY context — RS-Drift's relative strength, Apex's relative
+    alpha, Whale-Tail/Stationary Ghost regime classification — relies on SPY
+    being available before the universe loop). Then it streams symbol parquet
+    files into one DataFrame and dispatches to `replay_bars`, which calls
+    `signal.scan(...)` and `signal.evaluate_exit(...)` per the signal contract.
+
+    intraday_momentum_v1 keeps using the special-cased vectorized path in
+    `replay_parquet_cache` for performance. New signals trade some throughput
+    for the ability to run their own logic.
+    """
+    settings = settings or DriftPilotSettings()
+    root_path = Path(root)
+    if not root_path.exists():
+        raise FileNotFoundError(f"parquet bar root does not exist: {root_path}")
+
+    spy_file = root_path / "SPY" / f"{start.year}.parquet"
+    if not spy_file.exists():
+        raise FileNotFoundError(
+            f"SPY bar file is required (every locked v1 signal needs SPY context): {spy_file}"
+        )
+
+    files = sorted(root_path.glob("**/*.parquet"))
+    if not files:
+        raise FileNotFoundError(f"no parquet bar files found under {root_path}")
+
+    frames: list[pd.DataFrame] = [_read_symbol_cache(spy_file, start=start, end=end)]
+    for file in files:
+        if file.parent.name.upper() == "SPY":
+            continue
+        frame = _read_symbol_cache(file, start=start, end=end)
+        if not frame.empty:
+            frames.append(frame)
+
+    if not frames:
+        return ReplayResult(
+            trades=[],
+            equity_curve=[],
+            starting_capital=settings.paper_capital,
+            ending_capital=settings.paper_capital,
+            caveats=["No bars were available for the requested period."],
+        )
+
+    bars = pd.concat(frames, ignore_index=True)
+    return replay_bars(
+        bars,
+        settings=settings,
+        rvol_lookback=rvol_lookback,
+        point_in_time_constituents=point_in_time_constituents,
+        signal_name=signal_name or settings.active_signal,
+    )
 
 
 def _normalize_bars(bars: pd.DataFrame) -> pd.DataFrame:
@@ -620,13 +700,32 @@ def _evaluate_exits(
     *,
     current_time: datetime,
     settings: DriftPilotSettings,
+    signal: Any | None = None,
 ) -> list[tuple[_OpenPosition, MinuteBar, str]]:
+    """Evaluate every open position against its latest bar.
+
+    A signal that implements `evaluate_exit(position, latest_bar, settings)`
+    gets first say. If the signal returns `should_exit=True`, that reason
+    wins. If `should_exit=False`, fall back to the default TARGET/STOP/TIME
+    rules. Signals without `evaluate_exit` go straight to the defaults.
+
+    The signal may also mutate `position.metadata` to track per-position
+    state across bars (peak unrealized P&L, ratchet stage, break-even
+    triggered, etc.) — that's what the `metadata` field exists for.
+    """
     exits: list[tuple[_OpenPosition, MinuteBar, str]] = []
     max_hold = timedelta(minutes=settings.max_hold_minutes)
+    custom_exit = getattr(signal, "evaluate_exit", None) if signal is not None else None
     for position in positions:
         latest = latest_by_symbol.get(position.symbol)
         if latest is None:
             continue
+        if custom_exit is not None:
+            decision = custom_exit(position, latest, settings)
+            if getattr(decision, "should_exit", False):
+                reason = getattr(decision, "exit_reason", None) or "CUSTOM"
+                exits.append((position, latest, reason))
+                continue
         if latest.close >= position.target_price:
             exits.append((position, latest, "TARGET"))
         elif latest.close <= position.stop_price:
