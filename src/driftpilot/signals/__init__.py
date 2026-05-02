@@ -4,7 +4,13 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from driftpilot.signals.base import SignalProtocol
+from driftpilot.signals.base import (
+    BlockedReason,
+    Candidate,
+    ExitDecision,
+    SignalProtocol,
+    no_exit_decision,
+)
 from driftpilot.signals.features import BarFeatureCache, MinuteBar, Quote, SignalFeatures
 from driftpilot.signals.intraday_momentum_v1 import (
     SIGNAL_NAME as INTRADAY_MOMENTUM_V1_NAME,
@@ -49,8 +55,11 @@ register_signal(DEFAULT_SIGNAL, lambda: IntradayMomentumV1Signal())
 
 __all__ = [
     "BarFeatureCache",
+    "BlockedReason",
+    "Candidate",
     "CandidateDecision",
     "DEFAULT_SIGNAL",
+    "ExitDecision",
     "MinuteBar",
     "Quote",
     "Regime",
@@ -62,6 +71,7 @@ __all__ = [
     "compute_market_regime",
     "get_signal",
     "list_signals",
+    "no_exit_decision",
     "register_signal",
     "score_candidates",
 ]
