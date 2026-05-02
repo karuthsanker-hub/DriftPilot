@@ -59,6 +59,31 @@ def test_load_symbols_includes_spy_and_sector_map_symbols(tmp_path) -> None:
     assert databento_pull.load_symbols(["aapl, msft"], symbols_file) == ["AAPL", "MSFT", "NVDA", "SPY"]
 
 
+def test_databento_cost_estimate_batches_before_pull() -> None:
+    class Metadata:
+        def __init__(self) -> None:
+            self.calls: list[list[str]] = []
+
+        def get_cost(self, *, symbols: list[str], **_: object) -> float:
+            self.calls.append(symbols)
+            return 1.25
+
+    class Client:
+        def __init__(self) -> None:
+            self.metadata = Metadata()
+
+    client = Client()
+    config = databento_pull.PullConfig(
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 31),
+        symbols=("AAPL", "MSFT", "NVDA"),
+        batch_size=2,
+    )
+
+    assert databento_pull.estimate_databento_cost(client, config) == pytest.approx(2.5)
+    assert client.metadata.calls == [["AAPL", "MSFT"], ["NVDA"]]
+
+
 def test_phase12_report_shape_renders_from_file(tmp_path) -> None:
     settings = DriftPilotSettings()
     trade = BacktestTrade(
@@ -102,7 +127,7 @@ def test_phase12_report_shape_renders_from_file(tmp_path) -> None:
 
     assert payload["source"] == "file"
     assert payload["monthly_returns"]
-    assert payload["survivorship_bias_note"] is not None
+    assert payload["survivorship_bias_note"] is True
     assert payload["headline_metrics"]["expectancy_per_dollar"] > 0
     assert payload["performance_by_regime"]["GREEN"]["trades"] == 1
 

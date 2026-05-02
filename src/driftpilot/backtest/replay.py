@@ -5,6 +5,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Iterable
 
+import numpy as np
 import pandas as pd  # type: ignore[import-untyped]
 
 from driftpilot.clock import require_aware
@@ -12,9 +13,11 @@ from driftpilot.execution.paper_fills import entry_fill, exit_fill
 from driftpilot.settings import DriftPilotSettings
 from driftpilot.signals.features import MinuteBar, Quote
 from driftpilot.signals.intraday_momentum import scan_intraday_momentum
+from driftpilot.signals.regime import CAUTION_5M_RETURN_FLOOR, GREEN_5M_RETURN_FLOOR, VWAP_ATR_BREAK_MULTIPLE
 
 
 REQUIRED_BAR_COLUMNS = {"timestamp", "symbol", "open", "high", "low", "close", "volume"}
+LARGE_REPLAY_ROW_THRESHOLD = 1_000_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,8 +71,7 @@ def load_parquet_bars(
     if not files:
         raise FileNotFoundError(f"no parquet bar files found under {root_path}")
 
-    frames = [pd.read_parquet(file) for file in files]
-    bars = pd.concat(frames, ignore_index=True)
+    bars = _read_bar_dataset(root_path, files)
     missing = REQUIRED_BAR_COLUMNS.difference(bars.columns)
     if missing:
         raise ValueError(f"bar cache missing required columns: {sorted(missing)}")
@@ -79,6 +81,324 @@ def load_parquet_bars(
     bars = bars[(dates >= start) & (dates <= end)].copy()
     bars["symbol"] = bars["symbol"].astype(str).str.upper()
     return bars.sort_values(["timestamp", "symbol"]).reset_index(drop=True)
+
+
+def replay_parquet_cache(
+    root: str | Path,
+    *,
+    start: date,
+    end: date,
+    settings: DriftPilotSettings | None = None,
+    rvol_lookback: int = 20,
+    point_in_time_constituents: bool = False,
+) -> ReplayResult:
+    settings = settings or DriftPilotSettings()
+    root_path = Path(root)
+    files = sorted(root_path.glob("**/*.parquet"))
+    if not files:
+        raise FileNotFoundError(f"no parquet bar files found under {root_path}")
+
+    spy_file = root_path / "SPY" / f"{start.year}.parquet"
+    if not spy_file.exists():
+        raise FileNotFoundError(f"SPY bar file is required for regime replay: {spy_file}")
+
+    spy_bars = _read_symbol_cache(spy_file, start=start, end=end)
+    regime_by_timestamp = _vectorized_spy_regime(spy_bars)
+    candidate_frames: list[pd.DataFrame] = []
+    for file in files:
+        if file.parent.name.upper() == "SPY":
+            continue
+        frame = _read_symbol_cache(file, start=start, end=end)
+        if frame.empty:
+            continue
+        candidates = _vectorized_symbol_candidates(
+            frame,
+            regime_by_timestamp,
+            rvol_lookback=rvol_lookback,
+        )
+        if not candidates.empty:
+            candidate_frames.append(candidates)
+
+    caveats = []
+    if not point_in_time_constituents:
+        caveats.append(
+            "Point-in-time index constituents were unavailable; report may include survivorship bias."
+        )
+    caveats.append("Bid/ask quotes were unavailable in the bar cache; replay modeled spread from close price.")
+    if not candidate_frames:
+        return ReplayResult(
+            trades=[],
+            equity_curve=[],
+            starting_capital=settings.paper_capital,
+            ending_capital=settings.paper_capital,
+            caveats=[*caveats, "No candidates passed the intraday momentum filters."],
+        )
+
+    candidates = pd.concat(candidate_frames, ignore_index=True)
+    candidates = _score_candidate_frame(candidates)
+    candidates = candidates.sort_values(["timestamp", "score", "symbol"], ascending=[True, False, True])
+    return _replay_candidate_events(
+        candidates,
+        root_path=root_path,
+        start=start,
+        end=end,
+        settings=settings,
+        caveats=caveats,
+    )
+
+
+def _read_bar_dataset(root_path: Path, files: list[Path]) -> pd.DataFrame:
+    try:
+        import pyarrow.dataset as ds  # type: ignore[import-not-found]
+    except ImportError:
+        frames = [pd.read_parquet(file, columns=list(REQUIRED_BAR_COLUMNS)) for file in files]
+        return pd.concat(frames, ignore_index=True)
+
+    dataset = ds.dataset(str(root_path), format="parquet")
+    table = dataset.to_table(columns=list(REQUIRED_BAR_COLUMNS))
+    return table.to_pandas()
+
+
+def _read_symbol_cache(path: Path, *, start: date, end: date) -> pd.DataFrame:
+    frame = pd.read_parquet(path, columns=list(REQUIRED_BAR_COLUMNS))
+    frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True)
+    dates = frame["timestamp"].dt.date
+    frame = frame[(dates >= start) & (dates <= end)].copy()
+    if frame.empty:
+        return frame
+    frame["symbol"] = frame["symbol"].astype(str).str.upper()
+    for column in ("open", "high", "low", "close", "volume"):
+        frame[column] = pd.to_numeric(frame[column])
+    return frame.sort_values("timestamp").reset_index(drop=True)
+
+
+def _vectorized_spy_regime(spy_bars: pd.DataFrame) -> pd.DataFrame:
+    frame = spy_bars.copy()
+    if frame.empty:
+        raise ValueError("SPY bars are required for regime replay")
+    session = frame["timestamp"].dt.date
+    typical = (frame["high"] + frame["low"] + frame["close"]) / 3.0
+    frame["_tpv"] = typical * frame["volume"]
+    frame["_session"] = session
+    frame["session_vwap"] = frame.groupby("_session")["_tpv"].cumsum() / frame.groupby("_session")[
+        "volume"
+    ].cumsum()
+    frame["return_5m"] = frame.groupby("_session")["close"].pct_change(5).fillna(0.0)
+    frame["benchmark_return_15m"] = frame.groupby("_session")["close"].pct_change(15).fillna(0.0)
+    previous_close = frame.groupby("_session")["close"].shift(1)
+    true_range = pd.concat(
+        [
+            frame["high"] - frame["low"],
+            (frame["high"] - previous_close).abs(),
+            (frame["low"] - previous_close).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
+    frame["atr"] = true_range.groupby(frame["_session"]).rolling(14, min_periods=1).mean().reset_index(level=0, drop=True)
+    atr_distance = (frame["session_vwap"] - frame["close"]) / frame["atr"].replace(0.0, np.nan)
+    broken_below_atr = (frame["close"] < frame["session_vwap"]) & (atr_distance > VWAP_ATR_BREAK_MULTIPLE)
+    frame["regime"] = np.select(
+        [
+            frame["return_5m"] < CAUTION_5M_RETURN_FLOOR,
+            broken_below_atr,
+            (frame["close"] > frame["session_vwap"]) & (frame["return_5m"] > GREEN_5M_RETURN_FLOOR),
+            (frame["close"] < frame["session_vwap"]) & (frame["return_5m"] > CAUTION_5M_RETURN_FLOOR),
+        ],
+        ["RED", "RED", "GREEN", "CAUTION"],
+        default="RED",
+    )
+    return frame.loc[:, ["timestamp", "regime", "benchmark_return_15m"]]
+
+
+def _vectorized_symbol_candidates(
+    frame: pd.DataFrame,
+    regime_by_timestamp: pd.DataFrame,
+    *,
+    rvol_lookback: int,
+) -> pd.DataFrame:
+    symbol = str(frame["symbol"].iloc[0]).upper()
+    working = frame.copy()
+    working["_session"] = working["timestamp"].dt.date
+    working["_minute"] = working["timestamp"].dt.strftime("%H:%M")
+    typical = (working["high"] + working["low"] + working["close"]) / 3.0
+    working["_tpv"] = typical * working["volume"]
+    working["session_vwap"] = working.groupby("_session")["_tpv"].cumsum() / working.groupby("_session")[
+        "volume"
+    ].cumsum()
+    working["return_15m"] = working.groupby("_session")["close"].pct_change(15)
+    prior_same_minute_volume = (
+        working.groupby("_minute")["volume"]
+        .transform(lambda series: series.shift(1).rolling(rvol_lookback, min_periods=rvol_lookback).mean())
+    )
+    working["rvol"] = working["volume"] / prior_same_minute_volume
+    working["distance_above_vwap_pct"] = working["close"] / working["session_vwap"] - 1.0
+    base = working[
+        (working["rvol"] >= 2.0)
+        & (working["close"] > working["session_vwap"])
+        & (working["return_15m"] >= 0.005)
+    ].copy()
+    if base.empty:
+        return pd.DataFrame()
+    base = base.merge(regime_by_timestamp, on="timestamp", how="inner")
+    if base.empty:
+        return pd.DataFrame()
+    relative_strength = base["return_15m"] - base["benchmark_return_15m"]
+    allowed = (
+        (base["regime"] == "GREEN")
+        | ((base["regime"] == "CAUTION") & (relative_strength > 0.005))
+        | ((base["regime"] == "RED") & (relative_strength > 0.010) & (base["return_15m"] > 0))
+    )
+    base = base[allowed].copy()
+    if base.empty:
+        return pd.DataFrame()
+    base["symbol"] = symbol
+    base["relative_strength"] = relative_strength.loc[base.index]
+    return base.loc[
+        :,
+        [
+            "timestamp",
+            "symbol",
+            "close",
+            "rvol",
+            "return_15m",
+            "distance_above_vwap_pct",
+            "relative_strength",
+            "regime",
+        ],
+    ]
+
+
+def _score_candidate_frame(candidates: pd.DataFrame) -> pd.DataFrame:
+    scored = candidates.copy()
+    for source, target in (
+        ("rvol", "rvol_zscore"),
+        ("return_15m", "return_15m_zscore"),
+        ("distance_above_vwap_pct", "distance_above_vwap_zscore"),
+    ):
+        mean = scored.groupby("timestamp")[source].transform("mean")
+        std = scored.groupby("timestamp")[source].transform("std").replace(0.0, np.nan)
+        scored[target] = ((scored[source] - mean) / std).fillna(0.0)
+    scored["score"] = (
+        0.4 * scored["rvol_zscore"]
+        + 0.3 * scored["return_15m_zscore"]
+        + 0.3 * scored["distance_above_vwap_zscore"]
+    )
+    return scored
+
+
+def _replay_candidate_events(
+    candidates: pd.DataFrame,
+    *,
+    root_path: Path,
+    start: date,
+    end: date,
+    settings: DriftPilotSettings,
+    caveats: list[str],
+) -> ReplayResult:
+    price_cache: dict[str, pd.DataFrame] = {}
+    positions: list[tuple[_OpenPosition, BacktestTrade]] = []
+    trades: list[BacktestTrade] = []
+    equity = settings.paper_capital
+    equity_curve: list[tuple[datetime, float]] = []
+
+    for timestamp, rows in candidates.groupby("timestamp", sort=True):
+        current_time = _as_aware_datetime(timestamp)
+        for position, planned_trade in list(positions):
+            if planned_trade.exit_at <= current_time:
+                positions.remove((position, planned_trade))
+                trades.append(planned_trade)
+                equity += planned_trade.net_pnl
+
+        open_symbols = {position.symbol for position, _ in positions}
+        free_slots = settings.trade_slots - len(positions)
+        if free_slots <= 0:
+            equity_curve.append((current_time, equity))
+            continue
+
+        for row in rows.sort_values(["score", "symbol"], ascending=[False, True]).to_dict("records"):
+            if free_slots <= 0:
+                break
+            symbol = str(row["symbol"])
+            if symbol in open_symbols:
+                continue
+            symbol_bars = _cached_symbol_bars(price_cache, root_path, symbol, start=start, end=end)
+            entry_bar = _bar_at(symbol_bars, current_time)
+            if entry_bar is None:
+                continue
+            new_position = _open_position(
+                symbol,
+                entry_bar,
+                current_time=current_time,
+                settings=settings,
+                regime=str(row["regime"]),
+            )
+            if new_position is None:
+                continue
+            planned_trade = _plan_exit_trade(new_position, symbol_bars, settings=settings)
+            positions.append((new_position, planned_trade))
+            open_symbols.add(symbol)
+            free_slots -= 1
+        equity_curve.append((current_time, equity))
+
+    for _, planned_trade in sorted(positions, key=lambda item: item[1].exit_at):
+        trades.append(planned_trade)
+        equity += planned_trade.net_pnl
+
+    return ReplayResult(
+        trades=sorted(trades, key=lambda trade: trade.exit_at),
+        equity_curve=equity_curve,
+        starting_capital=settings.paper_capital,
+        ending_capital=equity,
+        caveats=caveats,
+    )
+
+
+def _cached_symbol_bars(
+    cache: dict[str, pd.DataFrame],
+    root_path: Path,
+    symbol: str,
+    *,
+    start: date,
+    end: date,
+) -> pd.DataFrame:
+    normalized = symbol.upper()
+    if normalized not in cache:
+        path = root_path / normalized / f"{start.year}.parquet"
+        cache[normalized] = _read_symbol_cache(path, start=start, end=end)
+    return cache[normalized]
+
+
+def _bar_at(frame: pd.DataFrame, timestamp: datetime) -> MinuteBar | None:
+    matches = frame[frame["timestamp"] == pd.Timestamp(timestamp)]
+    if matches.empty:
+        return None
+    return _row_to_bar(matches.iloc[0].to_dict())
+
+
+def _plan_exit_trade(
+    position: _OpenPosition,
+    symbol_bars: pd.DataFrame,
+    *,
+    settings: DriftPilotSettings,
+) -> BacktestTrade:
+    entry_timestamp = pd.Timestamp(position.entry_at)
+    deadline = entry_timestamp + pd.Timedelta(minutes=settings.max_hold_minutes)
+    future = symbol_bars[
+        (symbol_bars["timestamp"] > entry_timestamp) & (symbol_bars["timestamp"] <= deadline)
+    ].copy()
+    if future.empty:
+        entry_bar = _bar_at(symbol_bars, position.entry_at)
+        if entry_bar is None:
+            raise ValueError(f"missing entry bar for {position.symbol} at {position.entry_at.isoformat()}")
+        return _close_position(position, entry_bar, "TIME")
+    target_or_stop = future[(future["close"] >= position.target_price) | (future["close"] <= position.stop_price)]
+    if target_or_stop.empty:
+        exit_row = future.iloc[-1]
+        exit_reason = "TIME"
+    else:
+        exit_row = target_or_stop.iloc[0]
+        exit_reason = "TARGET" if float(exit_row["close"]) >= position.target_price else "STOP"
+    return _close_position(position, _row_to_bar(exit_row.to_dict()), exit_reason)
 
 
 def replay_bars(

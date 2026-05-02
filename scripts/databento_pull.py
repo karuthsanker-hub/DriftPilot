@@ -9,12 +9,13 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd  # type: ignore[import-untyped]
+from dotenv import dotenv_values
 
 
 DEFAULT_DATASET = "EQUS.MINI"
 DEFAULT_SCHEMA = "ohlcv-1m"
 DEFAULT_ROOT = Path("data/bars/databento")
-DEFAULT_SYMBOLS_FILE = Path("config/sector_map.csv")
+DEFAULT_SYMBOLS_FILE = Path("config/universe.csv")
 REQUIRED_COLUMNS = ("timestamp", "symbol", "open", "high", "low", "close", "volume")
 
 
@@ -30,11 +31,14 @@ class PullConfig:
     batch_size: int = 50
     api_key: str = ""
     dry_run: bool = False
+    max_cost: float | None = None
+    skip_cost_check: bool = False
 
 
 def main() -> None:
     args = _parse_args()
     symbols = load_symbols(args.symbols, args.symbols_file)
+    api_key = args.api_key or _load_api_key(args.env_file)
     config = PullConfig(
         start=args.start,
         end=args.end,
@@ -44,8 +48,10 @@ def main() -> None:
         stype_in=args.stype_in,
         root=args.root,
         batch_size=args.batch_size,
-        api_key=args.api_key or os.environ.get("DATABENTO_API_KEY", ""),
+        api_key=api_key,
         dry_run=args.dry_run,
+        max_cost=args.max_cost,
+        skip_cost_check=args.skip_cost_check,
     )
     written = pull_databento_bars(config)
     for path in written:
@@ -73,8 +79,6 @@ def pull_databento_bars(config: PullConfig) -> list[Path]:
         raise ValueError("at least one symbol is required")
     if config.batch_size <= 0:
         raise ValueError("batch_size must be positive")
-    if config.dry_run:
-        return []
     if not config.api_key:
         raise RuntimeError("DATABENTO_API_KEY is required to pull historical bars")
 
@@ -84,6 +88,16 @@ def pull_databento_bars(config: PullConfig) -> list[Path]:
         raise RuntimeError("Install the databento package to pull historical bars") from exc
 
     client = db.Historical(config.api_key)
+    if not config.skip_cost_check:
+        estimated_cost = estimate_databento_cost(client, config)
+        print(f"Databento estimated cost: ${estimated_cost:.2f}")
+        if config.max_cost is not None and estimated_cost > config.max_cost:
+            raise RuntimeError(
+                f"Databento estimated cost ${estimated_cost:.2f} exceeds --max-cost ${config.max_cost:.2f}"
+            )
+    if config.dry_run:
+        return []
+
     written: list[Path] = []
     for symbols in _chunks(config.symbols, config.batch_size):
         data = client.timeseries.get_range(
@@ -97,6 +111,21 @@ def pull_databento_bars(config: PullConfig) -> list[Path]:
         frame = normalize_databento_frame(data.to_df())
         written.extend(write_symbol_year_cache(frame, config.root))
     return sorted(set(written))
+
+
+def estimate_databento_cost(client: Any, config: PullConfig) -> float:
+    total = 0.0
+    for symbols in _chunks(config.symbols, config.batch_size):
+        cost = client.metadata.get_cost(
+            dataset=config.dataset,
+            schema=config.schema,
+            symbols=list(symbols),
+            stype_in=config.stype_in,
+            start=config.start.isoformat(),
+            end=_exclusive_end(config.end),
+        )
+        total += _cost_to_float(cost)
+    return total
 
 
 def normalize_databento_frame(frame: pd.DataFrame) -> pd.DataFrame:
@@ -165,8 +194,38 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     parser.add_argument("--batch-size", type=int, default=50)
     parser.add_argument("--api-key", default="")
+    parser.add_argument("--env-file", type=Path, default=Path(".env"))
+    parser.add_argument("--max-cost", type=float, default=None)
+    parser.add_argument("--skip-cost-check", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
+
+
+def _load_api_key(env_file: Path) -> str:
+    if "DATABENTO_API_KEY" in os.environ:
+        return os.environ["DATABENTO_API_KEY"]
+    if env_file.exists():
+        values = dotenv_values(env_file)
+        value = values.get("DATABENTO_API_KEY")
+        if value:
+            return value
+    return ""
+
+
+def _cost_to_float(cost: object) -> float:
+    if isinstance(cost, int | float):
+        return float(cost)
+    if isinstance(cost, str):
+        return float(cost.replace("$", "").replace(",", ""))
+    for attr in ("cost", "amount", "total"):
+        value = getattr(cost, attr, None)
+        if value is not None:
+            return _cost_to_float(value)
+    if isinstance(cost, dict):
+        for key in ("cost", "amount", "total"):
+            if key in cost:
+                return _cost_to_float(cost[key])
+    raise TypeError(f"unsupported Databento cost response: {cost!r}")
 
 
 def _split_symbols(raw: str) -> set[str]:

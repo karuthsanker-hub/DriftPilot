@@ -20,10 +20,11 @@ def build_expectancy_report(
     point_in_time_constituents: bool,
 ) -> dict[str, Any]:
     metrics = compute_metrics(replay.trades, starting_capital=replay.starting_capital)
-    survivorship_bias_note = None
+    survivorship_bias_note = not point_in_time_constituents
+    survivorship_bias_text = None
     if not point_in_time_constituents:
-        survivorship_bias_note = (
-            "Point-in-time constituents were unavailable; results may include survivorship bias."
+        survivorship_bias_text = (
+            "Point-in-time index constituents were unavailable; report may include survivorship bias."
         )
     live_gate = {
         "backtest_expectancy_positive": metrics.expectancy_per_dollar > 0,
@@ -59,8 +60,10 @@ def build_expectancy_report(
         "constituents": {
             "point_in_time": point_in_time_constituents,
             "survivorship_bias_note": survivorship_bias_note,
+            "survivorship_bias_text": survivorship_bias_text,
         },
         "survivorship_bias_note": survivorship_bias_note,
+        "survivorship_bias_text": survivorship_bias_text,
         "metrics": _metrics_dict(metrics),
         "headline_metrics": _metrics_dict(metrics),
         "slippage_waterfall": {
@@ -81,7 +84,7 @@ def build_expectancy_report(
             {"timestamp": timestamp.isoformat(), "equity": equity}
             for timestamp, equity in replay.equity_curve
         ],
-        "caveats": _dedupe([*replay.caveats, *([survivorship_bias_note] if survivorship_bias_note else [])]),
+        "caveats": _dedupe([*replay.caveats, *([survivorship_bias_text] if survivorship_bias_text else [])]),
     }
 
 
