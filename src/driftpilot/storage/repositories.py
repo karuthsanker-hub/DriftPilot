@@ -181,6 +181,30 @@ class FillRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class CandidateRow:
+    symbol: str
+    score: float
+    rvol: float
+    vwap_distance_pct: float
+    return_15m_pct: float
+    sector: str
+    blocked_reason: str | None
+    queue_status: str
+    cycle_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class RecycleEvent:
+    id: int
+    slot_id: int
+    freed_symbol: str
+    exit_reason: str
+    exit_pnl_pct: float
+    replacement_symbol: str | None
+    at: datetime
+
+
+@dataclass(frozen=True, slots=True)
 class ErrorRecord:
     id: int
     severity: str
@@ -1223,3 +1247,248 @@ class DriftPilotRepository:
         connection = connect(path)
         initialize_schema(connection)
         return cls(connection, clock)
+
+    def upsert_candidate_queue_row(
+        self,
+        *,
+        symbol: str,
+        score: float,
+        rvol: float,
+        vwap_distance_pct: float,
+        return_15m_pct: float,
+        sector: str,
+        blocked_reason: str | None,
+        queue_status: str,
+        cycle_at: datetime,
+    ) -> None:
+        normalized = symbol.upper()
+        features = {
+            "rvol": rvol,
+            "vwap_distance_pct": vwap_distance_pct,
+            "return_15m_pct": return_15m_pct,
+            "sector": sector,
+            "cycle_at": datetime_to_storage(cycle_at),
+        }
+        existing = self.connection.execute(
+            """
+            SELECT id
+            FROM candidate_queue
+            WHERE symbol = ?
+            ORDER BY updated_at DESC, id DESC
+            LIMIT 1
+            """,
+            (normalized,),
+        ).fetchone()
+        rank = self._next_candidate_rank(cycle_at) if existing is None else None
+        if existing is None:
+            self.connection.execute(
+                """
+                INSERT INTO candidate_queue (
+                    symbol, score, rank, status, blocked_reason, features_json, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    normalized,
+                    score,
+                    rank,
+                    queue_status,
+                    blocked_reason,
+                    _json_dumps(features),
+                    datetime_to_storage(cycle_at),
+                    datetime_to_storage(cycle_at),
+                ),
+            )
+        else:
+            self.connection.execute(
+                """
+                UPDATE candidate_queue
+                SET score = ?,
+                    status = ?,
+                    blocked_reason = ?,
+                    features_json = ?,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    score,
+                    queue_status,
+                    blocked_reason,
+                    _json_dumps(features),
+                    datetime_to_storage(cycle_at),
+                    existing["id"],
+                ),
+            )
+        self.connection.commit()
+
+    def clear_candidate_queue(self, *, before: datetime) -> None:
+        self.connection.execute(
+            "DELETE FROM candidate_queue WHERE updated_at < ?",
+            (datetime_to_storage(before),),
+        )
+        self.connection.commit()
+
+    def list_candidates(self, *, limit: int = 20) -> list[CandidateRow]:
+        rows = self.connection.execute(
+            """
+            SELECT symbol, score, status, blocked_reason, features_json, updated_at
+            FROM candidate_queue
+            ORDER BY score DESC, symbol
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        candidates: list[CandidateRow] = []
+        for row in rows:
+            features = _json_loads_object(row["features_json"])
+            candidates.append(
+                CandidateRow(
+                    symbol=row["symbol"],
+                    score=row["score"],
+                    rvol=float(features.get("rvol", 0.0)),
+                    vwap_distance_pct=float(features.get("vwap_distance_pct", 0.0)),
+                    return_15m_pct=float(features.get("return_15m_pct", 0.0)),
+                    sector=str(features.get("sector", "")),
+                    blocked_reason=row["blocked_reason"],
+                    queue_status=row["status"],
+                    cycle_at=datetime_from_storage(row["updated_at"]),
+                )
+            )
+        return candidates
+
+    def increment_daily_counter(
+        self, *, date_et: date, counter_name: str, delta: int = 1
+    ) -> int:
+        if delta < 1:
+            raise ValueError("delta must be positive")
+        return self.daily_counters.increment(
+            counter_name,
+            amount=delta,
+            date_et=date_et,
+        ).counter_value
+
+    def get_daily_counter(self, *, date_et: date, counter_name: str) -> int:
+        return self.daily_counters.get(counter_name, date_et=date_et).counter_value
+
+    def record_recycle_event(
+        self,
+        *,
+        slot_id: int,
+        freed_symbol: str,
+        exit_reason: str,
+        exit_pnl_pct: float,
+        replacement_symbol: str | None,
+        at: datetime,
+    ) -> None:
+        self.connection.execute(
+            """
+            INSERT INTO recycle_events (slot_id, reason, timestamp, metadata_json)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                slot_id,
+                exit_reason,
+                datetime_to_storage(at),
+                _json_dumps(
+                    {
+                        "freed_symbol": freed_symbol.upper(),
+                        "exit_pnl_pct": exit_pnl_pct,
+                        "replacement_symbol": replacement_symbol.upper()
+                        if replacement_symbol
+                        else None,
+                    }
+                ),
+            ),
+        )
+        self.connection.commit()
+
+    def list_recycle_events(self, *, limit: int = 20) -> list[RecycleEvent]:
+        rows = self.connection.execute(
+            """
+            SELECT id, slot_id, reason, timestamp, metadata_json
+            FROM recycle_events
+            ORDER BY timestamp DESC, id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        events: list[RecycleEvent] = []
+        for row in rows:
+            metadata = _json_loads_object(row["metadata_json"])
+            replacement = metadata.get("replacement_symbol")
+            events.append(
+                RecycleEvent(
+                    id=row["id"],
+                    slot_id=row["slot_id"],
+                    freed_symbol=str(metadata.get("freed_symbol", "")),
+                    exit_reason=row["reason"],
+                    exit_pnl_pct=float(metadata.get("exit_pnl_pct", 0.0)),
+                    replacement_symbol=str(replacement) if replacement else None,
+                    at=datetime_from_storage(row["timestamp"]),
+                )
+            )
+        return events
+
+    def update_position_state(
+        self, *, position_id: int, state: str, metadata: dict | None = None
+    ) -> None:
+        existing = self.positions.get(position_id)
+        if existing is None:
+            raise ValueError(f"position {position_id} does not exist")
+        merged_metadata = {**(existing.metadata or {}), **(metadata or {})}
+        self.connection.execute(
+            """
+            UPDATE positions
+            SET status = ?, metadata_json = ?
+            WHERE id = ?
+            """,
+            (state, _json_dumps(merged_metadata), position_id),
+        )
+        self.connection.commit()
+
+    def record_fill(
+        self,
+        *,
+        order_id: int,
+        symbol: str,
+        side: str,
+        qty: int,
+        reference_price: float,
+        slippage_applied: float,
+        fill_price: float,
+        at: datetime,
+    ) -> None:
+        self.connection.execute(
+            """
+            INSERT INTO fills (
+                order_id, symbol, side, quantity, price, filled_at, metadata_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                order_id,
+                symbol.upper(),
+                side,
+                qty,
+                fill_price,
+                datetime_to_storage(at),
+                _json_dumps(
+                    {
+                        "reference_price": reference_price,
+                        "slippage_applied": slippage_applied,
+                    }
+                ),
+            ),
+        )
+        self.connection.commit()
+
+    def _next_candidate_rank(self, cycle_at: datetime) -> int:
+        row = self.connection.execute(
+            """
+            SELECT COALESCE(MAX(rank), 0) AS max_rank
+            FROM candidate_queue
+            WHERE updated_at = ?
+            """,
+            (datetime_to_storage(cycle_at),),
+        ).fetchone()
+        return int(row["max_rank"]) + 1
