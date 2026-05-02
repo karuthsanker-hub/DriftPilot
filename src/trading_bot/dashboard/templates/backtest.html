@@ -47,20 +47,31 @@
       async function load() {
         const r = await fetch("/api/backtest/report"); const data = await r.json();
         document.getElementById("verdict").textContent = data.verdict || "GATED";
-        document.getElementById("period").textContent = `${data.period?.start || "--"} → ${data.period?.end || "--"} · ${data.source || "report"}`;
+        const signal = data.signal?.name ? `${data.signal.name} v${data.signal.version || "?"}` : "unknown signal";
+        document.getElementById("period").textContent = `${data.period?.start || "--"} → ${data.period?.end || "--"} · ${signal} · ${data.source || "report"}`;
         const gate = data.live_gate || {};
-        const rows = [["Backtest expectancy > 0", gate.backtest_expectancy_positive], ["60 paper days, cumulative P&L > 0, Sharpe > 1.0", gate.paper_trading_60_days_positive_pnl_sharpe_gt_1], ["Equity ≥ PDT floor + buffer", gate.equity_floor_buffer], ["LIVE_OK=true", gate.live_ok_env]];
-        document.getElementById("gate").innerHTML = rows.map(([label, ok]) => `<div class="gate-row"><span class="check ${ok ? "pass" : ""}"></span><strong>${label}</strong><span class="mono ${ok ? "green" : "amber"}">${ok ? "PASS" : "PENDING"}</span></div>`).join("");
+        const rows = [
+          ["Backtest expectancy > 0", gate.backtest_expectancy_positive, "FAIL"],
+          ["60 paper days, cumulative P&L > 0, Sharpe > 1.0", gate.paper_trading_60_days_positive_pnl_sharpe_gt_1, "PENDING"],
+          ["Equity ≥ PDT floor + buffer", gate.equity_floor_buffer, "PENDING"],
+          ["LIVE_OK=true", gate.live_ok_env, "PENDING"],
+        ];
+        document.getElementById("gate").innerHTML = rows.map(([label, ok, failLabel]) => `<div class="gate-row"><span class="check ${ok ? "pass" : ""}"></span><strong>${label}</strong><span class="mono ${ok ? "green" : failLabel === "FAIL" ? "red" : "amber"}">${ok ? "PASS" : failLabel}</span></div>`).join("");
         const m = data.metrics || {};
-        const metricRows = [["Total Return", fmtPct(m.total_return_pct), "green"], ["Sharpe", Number(m.sharpe || 0).toFixed(2), "green"], ["Max Drawdown", fmtPct(m.max_drawdown_pct), "red"], ["Win Rate", fmtPct(m.win_rate), ""], ["Trades", m.total_trades || 0, ""], ["Expectancy / $", `$${Number(m.expectancy_per_dollar || 0).toFixed(4)}`, "green"]];
+        const metricRows = [["Total Return", fmtPct(m.total_return_pct), Number(m.total_return_pct) < 0 ? "red" : "green"], ["Sharpe", Number(m.sharpe || 0).toFixed(2), Number(m.sharpe) < 0 ? "red" : "green"], ["Max Drawdown", fmtPct(m.max_drawdown_pct), "red"], ["Win Rate", fmtPct(m.win_rate), ""], ["Trades", m.total_trades || 0, ""], ["Expectancy / $", `$${Number(m.expectancy_per_dollar || 0).toFixed(4)}`, Number(m.expectancy_per_dollar) < 0 ? "red" : "green"]];
         document.getElementById("metrics").innerHTML = metricRows.map(([l,v,c]) => `<div class="metric"><div class="label">${l}</div><div class="value ${c}">${v}</div></div>`).join("");
-        const curve = data.equity_curve || []; const min = Math.min(...curve.map(p => p.equity), 10000); const max = Math.max(...curve.map(p => p.equity), 10001);
+        const rawCurve = data.equity_curve || [];
+        const step = Math.max(1, Math.ceil(rawCurve.length / 240));
+        const curve = rawCurve.filter((_, index) => index % step === 0).slice(-240);
+        const min = Math.min(...curve.map(p => p.equity), 10000); const max = Math.max(...curve.map(p => p.equity), 10001);
         document.getElementById("curve").innerHTML = curve.map(p => `<div class="bar" style="height:${20 + ((p.equity - min) / Math.max(1,max-min)) * 220}px"></div>`).join("");
         const w = data.slippage_waterfall || {};
-        document.getElementById("waterfall").innerHTML = `<tr><th>Component</th><th>Return</th></tr><tr><td>Gross</td><td class="mono green">${fmtPct(w.gross_return_pct)}</td></tr><tr><td>Slippage</td><td class="mono red">${fmtPct(w.slippage_cost_pct)}</td></tr><tr><td>Net</td><td class="mono green">${fmtPct(w.net_return_pct)}</td></tr>`;
+        document.getElementById("waterfall").innerHTML = `<tr><th>Component</th><th>Return</th></tr><tr><td>Gross</td><td class="mono ${Number(w.gross_return_pct) < 0 ? "red" : "green"}">${fmtPct(w.gross_return_pct)}</td></tr><tr><td>Slippage</td><td class="mono red">${fmtPct(w.slippage_cost_pct)}</td></tr><tr><td>Net</td><td class="mono ${Number(w.net_return_pct) < 0 ? "red" : "green"}">${fmtPct(w.net_return_pct)}</td></tr>`;
         const regimes = m.regime_performance || {};
         document.getElementById("regimes").innerHTML = `<tr><th>Regime</th><th>Trades</th><th>Win</th><th>Expectancy</th></tr>` + Object.entries(regimes).map(([k,v]) => `<tr><td>${k}</td><td class="mono">${v.trades}</td><td class="mono">${fmtPct(v.win_rate)}</td><td class="mono ${v.expectancy_per_trade < 0 ? "red" : "green"}">${fmtMoney(v.expectancy_per_trade)}</td></tr>`).join("");
-        document.getElementById("caveats").innerHTML = (data.caveats || []).concat(data.constituents?.survivorship_bias_note ? [data.constituents.survivorship_bias_note] : []).map(x => `<li>${x}</li>`).join("");
+        const caveats = [...(data.caveats || [])];
+        if (data.constituents?.survivorship_bias_text) caveats.push(data.constituents.survivorship_bias_text);
+        document.getElementById("caveats").innerHTML = [...new Set(caveats)].map(x => `<li>${x}</li>`).join("");
       }
       load().catch(error => { document.body.insertAdjacentHTML("afterbegin", `<div style="padding:14px;color:#ff4054">${error}</div>`); });
     </script>

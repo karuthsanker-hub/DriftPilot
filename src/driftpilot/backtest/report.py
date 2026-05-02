@@ -9,6 +9,7 @@ from typing import Any
 from driftpilot.backtest.metrics import BacktestMetrics, compute_metrics
 from driftpilot.backtest.replay import ReplayResult
 from driftpilot.settings import DriftPilotSettings
+from driftpilot.signals import get_signal
 
 
 def build_expectancy_report(
@@ -18,8 +19,10 @@ def build_expectancy_report(
     end: date,
     settings: DriftPilotSettings,
     point_in_time_constituents: bool,
+    signal_name: str | None = None,
 ) -> dict[str, Any]:
     metrics = compute_metrics(replay.trades, starting_capital=replay.starting_capital)
+    signal = get_signal(signal_name or settings.active_signal)
     survivorship_bias_note = not point_in_time_constituents
     survivorship_bias_text = None
     if not point_in_time_constituents:
@@ -39,12 +42,18 @@ def build_expectancy_report(
     return {
         "schema_version": 1,
         "generated_at": datetime.now(UTC).isoformat(),
+        "signal": {
+            "name": signal.name,
+            "version": signal.version,
+        },
         "period": {"start": start.isoformat(), "end": end.isoformat()},
         "run_config": {
             "bar_source": "databento_parquet",
             "start": start.isoformat(),
             "end": end.isoformat(),
             "point_in_time_constituents": point_in_time_constituents,
+            "signal": signal.name,
+            "signal_version": signal.version,
         },
         "verdict": verdict,
         "live_gate": live_gate,
@@ -93,6 +102,14 @@ def write_expectancy_report(report: dict[str, Any], path: str | Path) -> Path:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(report, indent=2, sort_keys=True, default=str) + "\n")
     return output_path
+
+
+def default_report_path(report: dict[str, Any], *, generated_at: datetime | None = None) -> Path:
+    signal_name = str(report.get("signal", {}).get("name") or "unknown_signal")
+    verdict = str(report.get("verdict") or "UNKNOWN").lower()
+    timestamp = generated_at or datetime.now(UTC)
+    filename = f"{timestamp.strftime('%Y%m%dT%H%M%SZ')}_{verdict}.json"
+    return Path("reports") / signal_name / filename
 
 
 def _metrics_dict(metrics: BacktestMetrics) -> dict[str, Any]:

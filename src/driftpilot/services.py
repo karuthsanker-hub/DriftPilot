@@ -25,6 +25,8 @@ class MockBrokerReconciler:
         self.settings = settings
 
     async def reconcile_open_positions(self) -> str:
+        if self.settings.mode == "paper" and self.repository.positions.list_open():
+            return "mock_paper_local_state_preserved"
         return self.repository.positions.reconcile_broker_open_positions(
             broker_positions=[],
             slot_value=self.settings.slot_value,

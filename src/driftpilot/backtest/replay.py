@@ -12,7 +12,7 @@ from driftpilot.clock import require_aware
 from driftpilot.execution.paper_fills import entry_fill, exit_fill
 from driftpilot.settings import DriftPilotSettings
 from driftpilot.signals.features import MinuteBar, Quote
-from driftpilot.signals.intraday_momentum import scan_intraday_momentum
+from driftpilot.signals import DEFAULT_SIGNAL, get_signal
 from driftpilot.signals.regime import CAUTION_5M_RETURN_FLOOR, GREEN_5M_RETURN_FLOOR, VWAP_ATR_BREAK_MULTIPLE
 
 
@@ -91,8 +91,11 @@ def replay_parquet_cache(
     settings: DriftPilotSettings | None = None,
     rvol_lookback: int = 20,
     point_in_time_constituents: bool = False,
+    signal_name: str | None = None,
 ) -> ReplayResult:
     settings = settings or DriftPilotSettings()
+    signal = get_signal(signal_name or settings.active_signal)
+    _require_vectorized_signal(signal.name)
     root_path = Path(root)
     files = sorted(root_path.glob("**/*.parquet"))
     if not files:
@@ -407,8 +410,10 @@ def replay_bars(
     settings: DriftPilotSettings | None = None,
     rvol_lookback: int = 20,
     point_in_time_constituents: bool = False,
+    signal_name: str | None = None,
 ) -> ReplayResult:
     settings = settings or DriftPilotSettings()
+    signal = get_signal(signal_name or settings.active_signal)
     if bars.empty:
         return ReplayResult(
             trades=[],
@@ -466,7 +471,7 @@ def replay_bars(
                 if symbol != "SPY" and symbol in latest_by_symbol
             }
             try:
-                regime, queue = scan_intraday_momentum(
+                regime, queue = signal.scan(
                     universe_history,
                     quotes,
                     history["SPY"],
@@ -512,6 +517,13 @@ def replay_bars(
         ending_capital=equity,
         caveats=caveats,
     )
+
+
+def _require_vectorized_signal(signal_name: str) -> None:
+    if signal_name != DEFAULT_SIGNAL:
+        raise NotImplementedError(
+            f"vectorized parquet replay currently supports {DEFAULT_SIGNAL}; got {signal_name}"
+        )
 
 
 def _normalize_bars(bars: pd.DataFrame) -> pd.DataFrame:

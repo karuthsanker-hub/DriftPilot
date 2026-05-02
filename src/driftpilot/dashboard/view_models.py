@@ -90,6 +90,7 @@ def _payload_from_repo(repo: DriftPilotRepository, settings: DriftPilotSettings)
     candidates = repo.list_candidates(limit=20)
     recycle_events = repo.list_recycle_events(limit=20)
     transitions = repo.transitions.list_latest(limit=20)
+    regime_label = _latest_regime_label(current.metadata if current else None, transitions)
     report = backtest_report_payload()
     backtest_failed = report.get("verdict") == "FAIL"
     payload = _mock_payload(settings)
@@ -97,8 +98,8 @@ def _payload_from_repo(repo: DriftPilotRepository, settings: DriftPilotSettings)
     payload["state"] = current.current_state if current else "BOOT"
     payload["halt_banner"] = _halt_banner(current.current_state if current else "BOOT", latest.reason if latest else None, backtest_failed)
     payload["regime"] = {
-        "label": (current.metadata or {}).get("regime", "UNKNOWN") if current else "UNKNOWN",
-        "detail": "Research mode: latest backtest verdict is FAIL" if backtest_failed else "Runtime state from SQLite",
+        "label": regime_label,
+        "detail": "Paper trading allowed; live trading remains gated" if backtest_failed else "Runtime state from SQLite",
     }
     payload["heartbeat"] = {"label": "synthetic feed", "age_seconds": 0, "stale": False}
     payload["session"] = {
@@ -159,6 +160,16 @@ def _payload_from_repo(repo: DriftPilotRepository, settings: DriftPilotSettings)
     return payload
 
 
+def _latest_regime_label(current_metadata: dict[str, Any] | None, transitions: list[Any]) -> str:
+    if current_metadata and current_metadata.get("regime"):
+        return str(current_metadata["regime"])
+    for transition in transitions:
+        metadata = transition.metadata or {}
+        if metadata.get("regime"):
+            return str(metadata["regime"])
+    return "UNKNOWN"
+
+
 def _slot_payload(slot: Any, positions: dict[int, Any]) -> dict[str, Any]:
     metadata = slot.metadata or {}
     position = positions.get(slot.position_id or -1)
@@ -196,7 +207,7 @@ def _candidate_status(status: str, blocked_reason: str | None) -> str:
 
 
 def _halt_banner(state: str, reason: str | None, backtest_failed: bool) -> str:
-    prefix = "BACKTEST FAIL: current algorithm loses after costs. " if backtest_failed else ""
+    prefix = "WARNING: current algorithm failed backtest after costs; paper trading allowed. " if backtest_failed else ""
     if state == "MARKET_CLOSED":
         return f"{prefix}Market closed - {reason or 'waiting for next open'}"
     if state == "ERROR":
@@ -283,6 +294,7 @@ def _mock_backtest_report() -> dict[str, Any]:
     return {
         "source": "mock",
         "schema_version": 1,
+        "signal": {"name": "intraday_momentum_v1", "version": "1"},
         "period": {"start": "2024-01-01", "end": "2024-12-31"},
         "verdict": "GATED",
         "live_gate": {
@@ -357,4 +369,5 @@ def _safe_config(settings: DriftPilotSettings) -> dict[str, Any]:
         "daily_loss_limit_pct": settings.daily_loss_limit_pct,
         "equity_floor": settings.equity_floor,
         "alpaca_data_feed": settings.alpaca_data_feed,
+        "active_signal": settings.active_signal,
     }

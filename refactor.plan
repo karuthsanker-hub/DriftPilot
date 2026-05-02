@@ -1,0 +1,220 @@
+# DriftPilot Algorithm Refactor Plan
+
+## Goal
+
+Make DriftPilot strategy-agnostic so we can swap, compare, backtest, and paper-trade multiple algorithms without changing the operator, broker, allocator, storage, or dashboard code.
+
+The current intraday momentum algorithm failed the after-cost backtest. That should not block paper trading. It should be treated as one strategy implementation with a warning label. The system must make it easy to add the next algorithm, run the exact same backtest harness, and promote the best paper-tested candidate later.
+
+## Design Pattern
+
+Use a Strategy pattern with a small plugin registry.
+
+- `Algorithm` is the stable interface.
+- Each algorithm owns only signal generation and ranking.
+- The operator owns state-machine flow.
+- The allocator owns slots, sector caps, duplicate guards, and capital limits.
+- The broker/paper engine owns fills.
+- The backtest harness calls the same `Algorithm` interface as the live operator.
+
+This keeps strategy experimentation isolated from execution safety.
+
+## Proposed Module Layout
+
+```text
+src/driftpilot/algorithms/
+  __init__.py
+  base.py                 # Algorithm protocol and data contracts
+  registry.py             # name -> AlgorithmFactory
+  intraday_momentum.py    # current algorithm, marked experimental/failed
+  pead_momentum.py        # future earnings/post-earnings drift algorithm
+  mean_reversion.py       # future candidate
+  breakout_vwap.py        # future candidate
+
+src/driftpilot/backtest/
+  runner.py               # accepts --algorithm <name>
+  compare.py              # compare multiple reports
+
+config/algorithms/
+  intraday_momentum.yaml
+  pead_momentum.yaml
+```
+
+## Core Interface
+
+```python
+class Algorithm(Protocol):
+    name: str
+    version: str
+    risk_profile: str
+
+    def warmup_requirements(self) -> WarmupSpec: ...
+    def universe_filter(self, assets: list[Asset]) -> list[Asset]: ...
+    def on_bar_batch(self, context: AlgorithmContext, bars: BarBatch) -> CandidateSet: ...
+    def explain_candidate(self, symbol: str) -> CandidateExplanation: ...
+```
+
+All candidates returned by any algorithm must use the same internal shape:
+
+```text
+symbol
+score
+rank
+sector
+latest_bar_at
+reference_price
+features_json
+blocked_reason
+algorithm_name
+algorithm_version
+```
+
+## Non-Negotiable Boundaries
+
+- Algorithms cannot place orders.
+- Algorithms cannot bypass target, stop, time stop, sector cap, PDT guard, daily loss limit, or kill switch.
+- Algorithms cannot mutate slots or positions directly.
+- Algorithms cannot own time logic; all time comes from `driftpilot.clock`.
+- Backtest and paper/live must use the same algorithm implementation.
+- A failed algorithm may paper trade with a warning, but cannot pass the live gate.
+
+## Configuration
+
+Add:
+
+```env
+ACTIVE_ALGORITHM=intraday_momentum
+ALGORITHM_CONFIG=config/algorithms/intraday_momentum.yaml
+```
+
+Algorithm config contains tunable parameters only:
+
+```yaml
+name: intraday_momentum
+version: 1
+params:
+  min_rvol: 2.0
+  min_15m_return: 0.005
+  target_pct: 0.01
+  stop_pct: 0.01
+  max_hold_minutes: 45
+```
+
+Execution limits remain in global settings, not per algorithm.
+
+## Backtest Workflow
+
+Add support for:
+
+```bash
+python -m driftpilot.backtest --algorithm intraday_momentum --start 2024-01-01 --end 2024-12-31
+python -m driftpilot.backtest --algorithm pead_momentum --start 2024-01-01 --end 2024-12-31
+python -m driftpilot.backtest.compare reports/*.json
+```
+
+Each report must include:
+
+- algorithm name/version/config hash
+- after-cost expectancy
+- slippage waterfall
+- monthly returns
+- regime performance
+- exit breakdown
+- best/worst symbols
+- survivorship/data caveats
+- live-gate eligibility
+
+## Dashboard Changes
+
+Operator tab:
+
+- show active algorithm name/version
+- show warning when active algorithm has failed backtest
+- continue paper trading despite failed algorithm
+- show algorithm-specific candidate features in the queue
+
+Backtest tab:
+
+- add algorithm selector
+- add compare-runs mode
+- show current production/paper algorithm
+- show verdict per algorithm: `LIVE_ELIGIBLE`, `PAPER_ONLY_WARNING`, `RESEARCH_ONLY`
+
+Admin tab:
+
+- algorithm configuration editor
+- activate algorithm for paper mode
+- lock live mode to algorithms that pass the live gate
+
+## Phased Implementation
+
+### Phase A: Contract Extraction
+
+- Move current signal/ranking code behind `Algorithm`.
+- Add registry and `ACTIVE_ALGORITHM` setting.
+- Add `algorithm_name` and `algorithm_version` to candidate queue and backtest reports.
+- Keep current behavior unchanged.
+
+Acceptance:
+
+- Current algorithm runs through the registry.
+- Existing tests pass.
+- Operator payload includes active algorithm metadata.
+
+### Phase B: Backtest Parameterization
+
+- Add `--algorithm` to backtest CLI.
+- Store report under `reports/backtests/{algorithm}/{timestamp}.json`.
+- Add compare command for multiple reports.
+
+Acceptance:
+
+- Same cached bars can replay two algorithms without code edits.
+- Reports include config hash and algorithm version.
+
+### Phase C: Dashboard Algorithm Awareness
+
+- Operator shows active algorithm and warning state.
+- Backtest tab can load latest report per algorithm.
+- Admin can switch active paper algorithm.
+
+Acceptance:
+
+- Switching algorithm changes future scans only.
+- Existing open positions keep the algorithm metadata they were opened with.
+
+### Phase D: Add Candidate Algorithms
+
+Implement at least three isolated strategies:
+
+- `intraday_momentum_v2`
+- `opening_range_breakout`
+- `vwap_reclaim`
+
+Optional later:
+
+- `pead_momentum`
+- `relative_strength_red_regime`
+- `mean_reversion_extreme_move`
+
+Acceptance:
+
+- Every algorithm has deterministic unit tests.
+- Every algorithm can produce a 12-month report.
+- Compare-runs identifies best after-cost expectancy and drawdown profile.
+
+### Phase E: Promotion Rules
+
+Only promote an algorithm from research to live-eligible if:
+
+- after-cost expectancy > 0
+- Sharpe > 1.0
+- max drawdown within configured threshold
+- 60 paper-trading days cumulative P&L > 0
+- live gate passes
+
+Paper mode may run failed algorithms with a warning. Live mode may not.
+
+## First Next Step
+
+Start with Phase A. It gives us the leverage: one stable algorithm contract, one registry, one backtest harness, many replaceable strategies.

@@ -23,7 +23,7 @@ PYTHONPATH=src uv run python -m driftpilot.operator --mock-stream
 
 The autonomous runtime code lives under `src/driftpilot/`. The legacy manual PEAD workflow remains available from Admin while the migration finishes.
 
-The current `expectancy_report.json` verdict is `FAIL`, so the dashboard runs in paper/research mode and shows a failed-backtest warning. This is intentional while the signal layer is being revised.
+The current `expectancy_report.json` verdict is `FAIL`, so the dashboard shows a failed-backtest warning. Paper trading remains allowed on purpose, so we can observe real operator behavior and losses while the signal layer is being revised. Live trading remains gated.
 
 ## How To Read The Dashboard
 

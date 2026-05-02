@@ -428,6 +428,27 @@ src/driftpilot/signals/
 
 No separate research math.
 
+### Signal Registry
+
+`src/driftpilot/signals/` contains multiple named signals.
+Each is a self-contained module implementing `SignalProtocol`.
+
+Active signal selected via `ACTIVE_SIGNAL` env var.
+Default: `intraday_momentum_v1`.
+
+Backtest CLI takes `--signal` flag:
+
+```bash
+python -m driftpilot.backtest --signal mean_reversion_v1 \
+  --start 2024-01-01 --end 2024-12-31
+```
+
+Reports written to `reports/<signal_name>/<date>_<verdict>.json`,
+not overwriting a single `expectancy_report.json`.
+
+Live runtime and backtest both load the same signal via the
+same registry. No separate research math.
+
 ### Intraday Entry Filter
 
 A symbol enters the queue only if all are true:
@@ -1226,7 +1247,7 @@ Phase 7c acceptance:
 ### Phase 9: Real Runtime Wiring
 
 Prerequisite update, 2026-05-02: Phase 12 produced `verdict = FAIL`, so live deployment remains blocked.
-Per owner direction, Phases 9-11 may still proceed in paper/research mode so the product is fully wired while the signal is being revised. The Operator and Admin UI must surface the failed-backtest warning and `MODE=live` must remain blocked by the live gate.
+Per owner direction, paper trading must remain available even when the current algorithm failed the after-cost backtest. The product should warn clearly that the active algorithm is expected to lose, then allow paper trading so the operator loop, UI, allocation, exits, and loss behavior can be observed. `MODE=live` remains blocked by the live gate.
 
 Goal: turn the implemented parts into one runnable autonomous paper process.
 
@@ -1251,7 +1272,7 @@ Goal: turn the implemented parts into one runnable autonomous paper process.
 
 Phase 9 acceptance:
 
-- `python -m driftpilot.operator --once --mock-stream` writes SQLite state visible in `/api/operator/state` and shows the failed-backtest research-mode warning.
+- `python -m driftpilot.operator --once --mock-stream` writes SQLite state visible in `/api/operator/state` and shows the failed-backtest warning without blocking paper trading.
 - With no candidates, dashboard shows a clear non-trading reason, not mock data.
 - With injected candidates, allocator reserves slots and dashboard shows those slots.
 - Boot reconciliation event appears in Admin event log.
@@ -1259,7 +1280,7 @@ Phase 9 acceptance:
 
 ### Phase 10: Scanner Service And Candidate Queue Persistence
 
-Prerequisite: Phase 9 runtime command exists. If Phase 12 failed, scanner persistence is still allowed in paper/research mode, but all UI/API surfaces must continue to show the failed-backtest warning and live mode remains gated.
+Prerequisite: Phase 9 runtime command exists. If Phase 12 failed, scanner persistence and paper allocation are still allowed, but all UI/API surfaces must continue to show the failed-backtest warning and live mode remains gated.
 
 Goal: make the ranked queue real and continuously refreshed.
 
@@ -1330,9 +1351,9 @@ Goal: replace mock Backtest tab data with a real report and make the go/no-go de
 - Generate `expectancy_report.json`.
 - Confirm Backtest tab renders the real report without component changes.
 - If point-in-time constituents are unavailable, keep survivorship-bias caveat in the report.
-- Treat the report as the strategy-validation gate:
-  - `GATED`: positive after-cost expectancy; continue to Phase 9.
-  - `FAIL`: negative after-cost expectancy; stop and revisit signals.
+- Treat the report as the live-deploy strategy-validation gate:
+  - `GATED`: positive after-cost expectancy; live remains gated until paper-trading and account gates pass.
+  - `FAIL`: negative after-cost expectancy; live remains blocked, paper trading remains allowed with a warning, and strategy research moves to `refactor.plan`.
 
 Phase 12 acceptance:
 
@@ -1406,6 +1427,16 @@ Phase 15 acceptance:
 - DriftPilot runtime starts without Supabase credentials.
 - Legacy tests are either moved to legacy scope or replaced with DriftPilot runtime tests.
 - README describes the new architecture as the default path.
+
+### Phase 16: Signal Registry Refactor
+
+- Define `SignalProtocol` in `signals/base.py`.
+- Move current signal to `signals/intraday_momentum_v1/`.
+- Add registry in `signals/__init__.py`.
+- Add `ACTIVE_SIGNAL` setting and `--signal` CLI flag.
+- Add `reports/<signal_name>/` versioned output path.
+- Add signal name + version to `expectancy_report.json` schema.
+- Backtest tab shows which signal produced the report.
 
 ## Acceptance Test Mapping
 

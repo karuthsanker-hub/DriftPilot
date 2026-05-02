@@ -154,7 +154,9 @@
         document.getElementById("session-time").textContent = new Date(data.session?.time || Date.now()).toLocaleTimeString();
         document.getElementById("cycle").textContent = `cycle ${data.session?.cycle_seconds || 30}s`;
         document.getElementById("equity").textContent = fmtMoney(data.equity?.value);
-        document.getElementById("floor").textContent = `floor ${fmtMoney(data.equity?.floor)}`;
+        document.getElementById("floor").textContent = data.equity?.deployed !== undefined
+          ? `deployed ${fmtMoney(data.equity?.deployed)} · avail ${fmtMoney(data.equity?.available)}`
+          : `floor ${fmtMoney(data.equity?.floor)}`;
         document.getElementById("pnl").textContent = fmtMoney(data.equity?.daily_pnl);
         document.getElementById("pnl").className = `value mono ${Number(data.equity?.daily_pnl || 0) < 0 ? "red" : "green"}`;
         document.getElementById("pnl-pct").textContent = fmtPct(data.equity?.daily_pnl_pct);

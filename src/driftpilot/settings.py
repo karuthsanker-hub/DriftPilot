@@ -88,6 +88,7 @@ class DriftPilotSettings:
     alpaca_data_feed: str = "sip"
     universe_file: str = "config/universe.csv"
     parquet_bar_root: str = "data/bars/databento"
+    active_signal: str = "intraday_momentum_v1"
 
     @property
     def sqlite_path_obj(self) -> Path:
@@ -135,4 +136,5 @@ def load_settings(
         alpaca_data_feed=_get_str(values, "ALPACA_DATA_FEED", "sip"),
         universe_file=_get_str(values, "DRIFTPILOT_UNIVERSE_FILE", "config/universe.csv"),
         parquet_bar_root=_get_str(values, "DRIFTPILOT_PARQUET_BAR_ROOT", "data/bars/databento"),
+        active_signal=_get_str(values, "ACTIVE_SIGNAL", "intraday_momentum_v1"),
     )
