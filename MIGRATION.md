@@ -29,3 +29,13 @@ No legacy trading path has been deleted yet. Obsolete paths should be archived o
 - Slippage is applied to paper/backtest fills.
 - Time stop, target, stop, sector cap, and allocator lock are represented in the new runtime plan.
 - Operator UI no longer contains normal manual confirm buttons.
+
+## Phase 12 Databento Backtest Data
+
+- Required cache command: `python scripts/databento_pull.py --start 2024-01-01 --end 2024-12-31 --dataset EQUS.MINI --symbols-file config/universe.csv`.
+- The cache layout is `data/bars/databento/{symbol}/{year}.parquet` with UTC `timestamp`, `symbol`, `open`, `high`, `low`, `close`, and `volume` columns.
+- `EQUS.MINI` with schema `ohlcv-1m` is the ratified Phase 12 dataset. Backtests use the Databento EQUS.MINI top-of-book blended feed; live trading uses Alpaca SIP. RVOL z-scores remain internally consistent within each feed, but absolute RVOL thresholds may need recalibration during the 60-day paper phase.
+- The v1 symbol universe is `config/universe.csv`, generated from current iShares IVV, IJH, and IJR holdings, plus `SPY` as the market-regime heartbeat.
+- Current iShares holdings are not point-in-time historical constituents. Generated reports include `survivorship_bias_note: true`; this is an accepted v1 limitation until a historical constituent source is connected.
+- `scripts/databento_pull.py` runs `client.metadata.get_cost()` before any real data pull and logs the estimated dollar cost.
+- After cache population, run `python -m driftpilot.backtest --start 2024-01-01 --end 2024-12-31 --bar-root data/bars/databento --output expectancy_report.json`.

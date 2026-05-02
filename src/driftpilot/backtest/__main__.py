@@ -4,7 +4,7 @@ import argparse
 from datetime import date
 from pathlib import Path
 
-from driftpilot.backtest.replay import load_parquet_bars, replay_bars
+from driftpilot.backtest.replay import replay_parquet_cache
 from driftpilot.backtest.report import build_expectancy_report, write_expectancy_report
 from driftpilot.settings import load_settings
 
@@ -21,9 +21,10 @@ def main() -> None:
 
     settings = load_settings()
     bar_root = Path(args.bar_root or settings.parquet_bar_root)
-    bars = load_parquet_bars(bar_root, start=args.start, end=args.end)
-    replay = replay_bars(
-        bars,
+    replay = replay_parquet_cache(
+        bar_root,
+        start=args.start,
+        end=args.end,
         settings=settings,
         rvol_lookback=args.rvol_lookback,
         point_in_time_constituents=args.point_in_time_constituents,
