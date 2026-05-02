@@ -52,6 +52,11 @@ def _get_bool(values: Mapping[str, str], key: str, default: bool) -> bool:
     return value.strip().lower() in {"1", "true", "t", "yes", "y", "on"}
 
 
+def _get_positive_float(values: Mapping[str, str], key: str, default: float) -> float:
+    value = _get_float(values, key, default)
+    return value if value > 0 else default
+
+
 @dataclass(frozen=True, slots=True)
 class DriftPilotSettings:
     mode: str = "paper"
@@ -81,7 +86,7 @@ class DriftPilotSettings:
     alpaca_paper_base_url: str = "https://paper-api.alpaca.markets"
     alpaca_live_base_url: str = "https://api.alpaca.markets"
     alpaca_data_feed: str = "sip"
-    universe_file: str = "config/pead_universe.csv"
+    universe_file: str = "config/universe.csv"
     parquet_bar_root: str = "data/bars/databento"
 
     @property
@@ -114,7 +119,7 @@ def load_settings(
         always_on_candidate_count=_get_int(values, "ALWAYS_ON_CANDIDATE_COUNT", 50),
         max_trades_per_day=_get_int(values, "MAX_TRADES_PER_DAY", 50),
         max_trades_per_symbol_per_day=_get_int(values, "MAX_TRADES_PER_SYMBOL_PER_DAY", 3),
-        daily_loss_limit_pct=_get_float(values, "DAILY_LOSS_LIMIT_PCT", 0.03),
+        daily_loss_limit_pct=_get_positive_float(values, "DAILY_LOSS_LIMIT_PCT", 0.03),
         equity_floor=_get_float(values, "EQUITY_FLOOR", 26_000.0),
         live_equity_buffer=_get_float(values, "LIVE_EQUITY_BUFFER", 1_000.0),
         backtest_expectancy_passed=_get_bool(values, "BACKTEST_EXPECTANCY_PASSED", False),
@@ -128,6 +133,6 @@ def load_settings(
         ),
         alpaca_live_base_url=_get_str(values, "ALPACA_LIVE_BASE_URL", "https://api.alpaca.markets"),
         alpaca_data_feed=_get_str(values, "ALPACA_DATA_FEED", "sip"),
-        universe_file=_get_str(values, "DRIFTPILOT_UNIVERSE_FILE", "config/pead_universe.csv"),
+        universe_file=_get_str(values, "DRIFTPILOT_UNIVERSE_FILE", "config/universe.csv"),
         parquet_bar_root=_get_str(values, "DRIFTPILOT_PARQUET_BAR_ROOT", "data/bars/databento"),
     )

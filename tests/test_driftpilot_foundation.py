@@ -48,6 +48,16 @@ def test_settings_loads_phase_one_defaults_and_env_overrides(tmp_path, monkeypat
     assert settings.daily_loss_limit_pct == 0.03
 
 
+def test_settings_falls_back_for_invalid_daily_loss_limit(tmp_path, monkeypatch) -> None:
+    env_path = tmp_path / ".env"
+    env_path.write_text("DAILY_LOSS_LIMIT_PCT=-2.0\n")
+    monkeypatch.delenv("DAILY_LOSS_LIMIT_PCT", raising=False)
+
+    settings = load_settings(env_path)
+
+    assert settings.daily_loss_limit_pct == 0.03
+
+
 def test_schema_creates_all_phase_one_tables_cleanly() -> None:
     connection = connect(":memory:")
     initialize_schema(connection)

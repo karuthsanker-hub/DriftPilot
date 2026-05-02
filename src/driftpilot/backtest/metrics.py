@@ -27,6 +27,7 @@ class BacktestMetrics:
     exit_breakdown: dict[str, int]
     regime_performance: dict[str, dict[str, float]]
     daily_pnl: dict[str, float]
+    monthly_returns: dict[str, float]
 
 
 def compute_metrics(trades: list[BacktestTrade], *, starting_capital: float) -> BacktestMetrics:
@@ -56,6 +57,7 @@ def compute_metrics(trades: list[BacktestTrade], *, starting_capital: float) -> 
         exit_breakdown=dict(Counter(trade.exit_reason for trade in trades)),
         regime_performance=_regime_performance(trades),
         daily_pnl={day.isoformat(): pnl for day, pnl in sorted(daily_pnl.items())},
+        monthly_returns=_monthly_returns(daily_pnl, starting_capital),
     )
 
 
@@ -64,6 +66,19 @@ def _daily_pnl(trades: list[BacktestTrade]) -> dict[date, float]:
     for trade in trades:
         pnl_by_day[trade.exit_at.date()] += trade.net_pnl
     return dict(pnl_by_day)
+
+
+def _monthly_returns(daily_pnl: dict[date, float], starting_capital: float) -> dict[str, float]:
+    equity = starting_capital
+    returns: dict[str, float] = {}
+    monthly_pnl: dict[str, float] = defaultdict(float)
+    for day, pnl in sorted(daily_pnl.items()):
+        month = day.strftime("%Y-%m")
+        monthly_pnl[month] += pnl
+    for month, pnl in sorted(monthly_pnl.items()):
+        returns[month] = pnl / equity if equity else 0.0
+        equity += pnl
+    return returns
 
 
 def _sharpe(daily_returns_or_pnl: list[float]) -> float:

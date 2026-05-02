@@ -7,6 +7,7 @@ import os
 import time
 import uuid
 from pathlib import Path
+from typing import Any, NoReturn
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
@@ -19,6 +20,7 @@ from pydantic import BaseModel, SecretStr
 
 from driftpilot.dashboard.view_models import admin_state_payload, backtest_report_payload, operator_state_payload
 from driftpilot.settings import load_settings as load_driftpilot_settings
+from driftpilot.storage.repositories import DriftPilotRepository
 from trading_bot.backtesting import BacktestTrade, run_backtest, run_split_backtest
 from trading_bot.config import EnvConfigStore
 from trading_bot.data.earnings_events import EarningsEventStore
@@ -259,7 +261,7 @@ def create_app(env_path: Path | str = ".env") -> FastAPI:
                 if row.get("entry_price") is not None and row.get("exit_price") is not None and row.get("shares") is not None
             ]
             if payload.split:
-                result = run_split_backtest(
+                result: Any = run_split_backtest(
                     trades,
                     starting_equity=payload.starting_equity,
                     transaction_cost_bps=payload.transaction_cost_bps,
@@ -327,6 +329,61 @@ def create_app(env_path: Path | str = ".env") -> FastAPI:
             return admin_state_payload(load_driftpilot_settings(env_path))
         except Exception as exc:
             _raise_api_error(exc, "admin_state")
+
+    @app.post("/api/admin/override/{action}")
+    def admin_override(action: str):
+        allowed = {
+            "pause_scanning": "manual_pause_scanning",
+            "resume_scanning": "manual_resume_scanning",
+            "flat_all_positions": "manual_flat_all_positions",
+            "reset_paper_state": "manual_reset_paper_state",
+            "cancel_open_orders": "manual_cancel_open_orders",
+            "force_reconciliation": "manual_force_reconciliation",
+            "restart_data_stream": "manual_restart_data_stream",
+        }
+        if action not in allowed:
+            raise HTTPException(status_code=404, detail=f"Unknown override action: {action}")
+        try:
+            settings = load_driftpilot_settings(env_path)
+            repo = DriftPilotRepository.open(settings.sqlite_path_obj)
+            now = repo.clock.now_utc()
+            if action in {"flat_all_positions", "reset_paper_state"}:
+                for position in repo.positions.list_open():
+                    repo.positions.close(
+                        position.id,
+                        exit_reason=allowed[action],
+                        realized_pnl=0.0,
+                        closed_at=now,
+                        metadata={"manual_override": action},
+                    )
+                for slot in repo.slots.list_all():
+                    repo.slots.upsert(
+                        slot.slot_id,
+                        status="EMPTY",
+                        symbol=None,
+                        position_id=None,
+                        reserved_order_id=None,
+                        slot_value=slot.slot_value,
+                        metadata={"empty_reason": "Manual override"},
+                        updated_at=now,
+                    )
+            current = repo.state.get()
+            transition = repo.transitions.append(
+                from_state=current.current_state if current else None,
+                to_state="BOOT" if action in {"resume_scanning", "force_reconciliation"} else "HALTED_RISK",
+                reason=allowed[action],
+                metadata={"manual_override": action},
+                timestamp=now,
+            )
+            repo.state.set(
+                transition.to_state,
+                last_transition_id=transition.id,
+                metadata={"manual_override": action},
+                updated_at=now,
+            )
+            return {"ok": True, "action": action, "transition_id": transition.id}
+        except Exception as exc:
+            _raise_api_error(exc, "admin_override")
 
     @app.post("/api/operator/settings")
     def save_operator_settings(update: OperatorSettingsUpdate):
@@ -422,7 +479,7 @@ def create_app(env_path: Path | str = ".env") -> FastAPI:
             scheduler_service.stop()
             settings = load_settings(env_path)
             client = create_supabase_client(settings)
-            broker_result = {"skipped": True}
+            broker_result: Any = {"skipped": True}
             if payload.reset_broker:
                 broker_result = AlpacaBroker(settings).reset_paper_account()
             reset_result = TradingRepository(client).reset_operator_paper_state()
@@ -851,7 +908,7 @@ def _number(value) -> float | None:
     return float(value)
 
 
-def _raise_api_error(exc: Exception, context: str, *, status_code: int = 503) -> None:
+def _raise_api_error(exc: Exception, context: str, *, status_code: int = 503) -> NoReturn:
     logger.exception("api_error", extra={"context": context, "error": _safe_error(exc)})
     raise HTTPException(status_code=status_code, detail={"message": _safe_error(exc), "context": context}) from exc
 

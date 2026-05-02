@@ -45,6 +45,7 @@ def admin_state_payload(settings: DriftPilotSettings) -> dict[str, Any]:
             repo = DriftPilotRepository.open(db_path)
             state = repo.state.get()
             latest = repo.transitions.latest()
+            transitions = repo.transitions.list_latest(limit=50)
         except Exception as exc:
             return {
                 "system_health": {"state_db": "ERROR", "message": str(exc)},
@@ -53,6 +54,8 @@ def admin_state_payload(settings: DriftPilotSettings) -> dict[str, Any]:
                 "event_log": [],
                 "configuration": _safe_config(settings),
             }
+    else:
+        transitions = []
     return {
         "system_health": {
             "state_db": "OK" if sqlite_exists else "MISSING",
@@ -68,11 +71,13 @@ def admin_state_payload(settings: DriftPilotSettings) -> dict[str, Any]:
         },
         "event_log": [
             {
-                "time": latest.timestamp.isoformat(),
-                "state": latest.to_state,
-                "reason": latest.reason,
+                "time": transition.timestamp.isoformat(),
+                "state": transition.to_state,
+                "reason": transition.reason,
+                "metadata": transition.metadata,
             }
-        ] if latest else [],
+            for transition in transitions
+        ],
         "configuration": _safe_config(settings),
     }
 
@@ -81,33 +86,145 @@ def _payload_from_repo(repo: DriftPilotRepository, settings: DriftPilotSettings)
     current = repo.state.get()
     slots = repo.slots.list_all()
     latest = repo.transitions.latest()
+    positions = {position.id: position for position in repo.positions.list_open()}
+    candidates = repo.list_candidates(limit=20)
+    recycle_events = repo.list_recycle_events(limit=20)
+    transitions = repo.transitions.list_latest(limit=20)
+    report = backtest_report_payload()
+    backtest_failed = report.get("verdict") == "FAIL"
     payload = _mock_payload(settings)
     payload["source"] = "sqlite"
     payload["state"] = current.current_state if current else "BOOT"
-    payload["halt_banner"] = latest.reason if latest else "Waiting for first operator transition"
+    payload["halt_banner"] = _halt_banner(current.current_state if current else "BOOT", latest.reason if latest else None, backtest_failed)
+    payload["regime"] = {
+        "label": (current.metadata or {}).get("regime", "UNKNOWN") if current else "UNKNOWN",
+        "detail": "Research mode: latest backtest verdict is FAIL" if backtest_failed else "Runtime state from SQLite",
+    }
+    payload["heartbeat"] = {"label": "synthetic feed", "age_seconds": 0, "stale": False}
+    payload["session"] = {
+        "time": (current.updated_at if current else datetime.now(UTC)).isoformat(),
+        "market_clock": (current.metadata or {}).get("feed", "sqlite") if current else "sqlite",
+        "cycle_seconds": settings.scan_interval_seconds,
+    }
+    realized = _realized_pnl(repo)
+    deployed = sum(position.entry_price * position.quantity for position in positions.values())
+    payload["equity"] = {
+        "value": settings.paper_capital + realized,
+        "floor": settings.equity_floor,
+        "daily_pnl": realized,
+        "daily_pnl_pct": realized / settings.paper_capital if settings.paper_capital else 0,
+        "daily_trade_count": repo.get_daily_counter(date_et=repo.clock.date_et(), counter_name="trades"),
+        "win_rate": _win_rate(repo),
+        "deployed": deployed,
+        "available": max(0, settings.paper_capital - deployed),
+    }
     payload["slots"] = [
-        {
-            "id": slot.slot_id,
-            "state": slot.status,
-            "symbol": slot.symbol,
-            "entry": None,
-            "current": None,
-            "pnl_pct": None,
-            "time_min": None,
-            "sector": (slot.metadata or {}).get("sector"),
-            "slippage": None,
-            "empty_reason": "Awaiting candidate" if slot.status.upper() == "EMPTY" else None,
-        }
+        _slot_payload(slot, positions)
         for slot in slots
     ] or payload["slots"]
+    payload["candidate_queue"] = [
+        {
+            "rank": index,
+            "symbol": candidate.symbol,
+            "score": candidate.score,
+            "rvol": candidate.rvol,
+            "return_15m": candidate.return_15m_pct,
+            "vwap_distance_pct": candidate.vwap_distance_pct,
+            "sector": candidate.sector,
+            "status": _candidate_status(candidate.queue_status, candidate.blocked_reason),
+            "blocked_reason": candidate.blocked_reason,
+        }
+        for index, candidate in enumerate(candidates, start=1)
+    ]
+    payload["recycle_log"] = [
+        {
+            "time": event.at.astimezone(UTC).strftime("%H:%M:%S"),
+            "slot": event.slot_id,
+            "from": event.freed_symbol,
+            "exit": event.exit_reason,
+            "pnl_pct": event.exit_pnl_pct,
+            "to": event.replacement_symbol,
+        }
+        for event in recycle_events
+    ]
     payload["event_log"] = [
         {
-            "time": latest.timestamp.isoformat(),
-            "state": latest.to_state,
-            "reason": latest.reason,
+            "time": transition.timestamp.isoformat(),
+            "state": transition.to_state,
+            "reason": transition.reason,
         }
-    ] if latest else []
+        for transition in transitions
+    ]
+    payload["equity_curve"] = _equity_curve(settings.paper_capital, realized)
     return payload
+
+
+def _slot_payload(slot: Any, positions: dict[int, Any]) -> dict[str, Any]:
+    metadata = slot.metadata or {}
+    position = positions.get(slot.position_id or -1)
+    entry = position.entry_price if position is not None else metadata.get("entry_price")
+    current = metadata.get("current_price", entry)
+    pnl_pct = None
+    time_min = None
+    if position is not None and entry is not None:
+        current_value = float(current if current is not None else entry)
+        entry_value = float(entry)
+        pnl_pct = (current_value - entry_value) / entry_value
+        time_min = int((datetime.now(UTC) - position.opened_at.astimezone(UTC)).total_seconds() // 60)
+    return {
+        "id": slot.slot_id,
+        "state": slot.status,
+        "symbol": slot.symbol,
+        "entry": entry,
+        "current": current,
+        "pnl_pct": pnl_pct,
+        "time_min": time_min,
+        "sector": metadata.get("sector"),
+        "slippage": metadata.get("slippage"),
+        "empty_reason": metadata.get("empty_reason") or ("Awaiting candidate" if slot.status.upper() == "EMPTY" else None),
+    }
+
+
+def _candidate_status(status: str, blocked_reason: str | None) -> str:
+    if blocked_reason == "sector_cap_reached":
+        return "CAP"
+    if status.lower() == "reserved":
+        return "RES"
+    if blocked_reason:
+        return "BLOCK"
+    return "Q"
+
+
+def _halt_banner(state: str, reason: str | None, backtest_failed: bool) -> str:
+    prefix = "BACKTEST FAIL: current algorithm loses after costs. " if backtest_failed else ""
+    if state == "MARKET_CLOSED":
+        return f"{prefix}Market closed - {reason or 'waiting for next open'}"
+    if state == "ERROR":
+        return f"{prefix}ERROR: {reason or 'operator error'}"
+    if state.startswith("HALTED"):
+        return f"{prefix}{reason or state}"
+    return f"{prefix}{reason or 'Operator running in paper mode'}"
+
+
+def _realized_pnl(repo: DriftPilotRepository) -> float:
+    rows = repo.connection.execute("SELECT COALESCE(SUM(realized_pnl), 0) AS pnl FROM positions WHERE status = 'closed'").fetchone()
+    return float(rows["pnl"] if rows is not None else 0.0)
+
+
+def _win_rate(repo: DriftPilotRepository) -> float:
+    rows = repo.connection.execute(
+        "SELECT COUNT(*) AS total, SUM(CASE WHEN realized_pnl > 0 THEN 1 ELSE 0 END) AS wins FROM positions WHERE status = 'closed'"
+    ).fetchone()
+    total = int(rows["total"] if rows is not None else 0)
+    wins = int(rows["wins"] or 0) if rows is not None else 0
+    return wins / total if total else 0.0
+
+
+def _equity_curve(starting_capital: float, realized: float) -> list[dict[str, float]]:
+    return [
+        {"t": index, "equity": starting_capital + (realized * index / 23 if index else 0)}
+        for index in range(24)
+    ]
 
 
 def _mock_payload(settings: DriftPilotSettings) -> dict[str, Any]:

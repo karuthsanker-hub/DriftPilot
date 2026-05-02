@@ -12,9 +12,18 @@ DriftPilot is being refactored into a continuous autonomous intraday paper-tradi
 uv run uvicorn trading_bot.dashboard.app:create_app --factory --reload
 ```
 
-4. Open `http://127.0.0.1:8000/`.
+4. In a second terminal, run one synthetic operator cycle or the continuous paper loop:
+
+```bash
+PYTHONPATH=src uv run python -m driftpilot.operator --once --mock-stream
+PYTHONPATH=src uv run python -m driftpilot.operator --mock-stream
+```
+
+5. Open `http://127.0.0.1:8000/`.
 
 The autonomous runtime code lives under `src/driftpilot/`. The legacy manual PEAD workflow remains available from Admin while the migration finishes.
+
+The current `expectancy_report.json` verdict is `FAIL`, so the dashboard runs in paper/research mode and shows a failed-backtest warning. This is intentional while the signal layer is being revised.
 
 ## How To Read The Dashboard
 

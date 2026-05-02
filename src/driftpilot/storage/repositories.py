@@ -346,6 +346,28 @@ class TransitionRepository:
             metadata=_json_loads_object(row["metadata_json"]),
         )
 
+    def list_latest(self, *, limit: int = 50) -> list[StateTransitionRecord]:
+        rows = self.connection.execute(
+            """
+            SELECT id, from_state, to_state, reason, timestamp, metadata_json
+            FROM state_transitions
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return [
+            StateTransitionRecord(
+                id=row["id"],
+                from_state=row["from_state"],
+                to_state=row["to_state"],
+                reason=row["reason"],
+                timestamp=datetime_from_storage(row["timestamp"]),
+                metadata=_json_loads_object(row["metadata_json"]),
+            )
+            for row in rows
+        ]
+
 
 class SlotRepository:
     def __init__(
@@ -460,6 +482,44 @@ class PositionRepository:
             """
         ).fetchall()
         return [self._from_row(row) for row in rows]
+
+    def close(
+        self,
+        position_id: int,
+        *,
+        exit_reason: str,
+        realized_pnl: float,
+        closed_at: datetime | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> PositionRecord:
+        existing = self.get(position_id)
+        if existing is None:
+            raise ValueError(f"position {position_id} does not exist")
+        timestamp = closed_at or self.clock.now_utc()
+        merged_metadata = {**(existing.metadata or {}), **(metadata or {})}
+        self.connection.execute(
+            """
+            UPDATE positions
+            SET status = 'closed',
+                closed_at = ?,
+                exit_reason = ?,
+                realized_pnl = ?,
+                metadata_json = ?
+            WHERE id = ?
+            """,
+            (
+                datetime_to_storage(timestamp),
+                exit_reason,
+                realized_pnl,
+                _json_dumps(merged_metadata),
+                position_id,
+            ),
+        )
+        self.connection.commit()
+        updated = self.get(position_id)
+        if updated is None:
+            raise RuntimeError("closed position disappeared")
+        return updated
 
     def create_open(
         self,

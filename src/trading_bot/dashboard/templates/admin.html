@@ -26,8 +26,11 @@
           <div class="label">Manual Override</div>
           <p style="color:var(--muted)">Emergency controls stay here, outside the autonomous Operator tab.</p>
           <div class="actions">
-            <button class="warn" onclick="confirmAction('Pause scanning')">Pause scanning</button>
-            <button class="danger" onclick="confirmAction('Flat all positions')">Flat all positions</button>
+            <button class="warn" onclick="confirmAction('pause_scanning', 'Pause scanning')">Pause scanning</button>
+            <button onclick="confirmAction('resume_scanning', 'Resume scanning')">Resume scanning</button>
+            <button class="danger" onclick="confirmAction('flat_all_positions', 'Flat all positions')">Flat all positions</button>
+            <button class="danger" onclick="confirmAction('reset_paper_state', 'Reset paper state')">Reset paper state</button>
+            <button onclick="confirmAction('force_reconciliation', 'Force broker reconciliation')">Force reconciliation</button>
             <button onclick="runDiagnostics()">Run diagnostics</button>
             <button onclick="checkProviders()">Check providers</button>
           </div>
@@ -64,9 +67,10 @@
         document.getElementById("config").textContent = fmt(data.configuration || {});
         document.getElementById("events").innerHTML = (data.event_log || []).map(e => `<tr><td class="mono">${new Date(e.time).toLocaleTimeString()}</td><td class="mono">${e.state}</td><td>${e.reason}</td></tr>`).join("") || `<tr><td colspan="3" style="color:var(--muted)">No events yet.</td></tr>`;
       }
-      function confirmAction(label) {
+      async function confirmAction(action, label) {
         if (!confirm(`${label}? This is an emergency override and should write an operator event.`)) return;
-        document.getElementById("action_result").textContent = `${label} requested. Backend override wiring lands with Phase 8 acceptance flows.`;
+        document.getElementById("action_result").textContent = fmt(await apiJson(`/api/admin/override/${action}`, {method:"POST"}).catch(e => ({error:String(e)})));
+        loadAdmin();
       }
       async function runDiagnostics() { document.getElementById("action_result").textContent = fmt(await apiJson("/api/diagnostics").catch(e => ({error:String(e)}))); }
       async function checkProviders() { document.getElementById("action_result").textContent = fmt(await apiJson("/api/providers/health").catch(e => ({error:String(e)}))); }

@@ -1225,12 +1225,13 @@ Phase 7c acceptance:
 
 ### Phase 9: Real Runtime Wiring
 
-Prerequisite: Phase 12 must produce `verdict = GATED` or better. If Phase 12 produces `FAIL`, Phase 9 is blocked.
+Prerequisite update, 2026-05-02: Phase 12 produced `verdict = FAIL`, so live deployment remains blocked.
+Per owner direction, Phases 9-11 may still proceed in paper/research mode so the product is fully wired while the signal is being revised. The Operator and Admin UI must surface the failed-backtest warning and `MODE=live` must remain blocked by the live gate.
 
 Goal: turn the implemented parts into one runnable autonomous paper process.
 
 - Add `src/driftpilot/operator.py` or equivalent `python -m driftpilot.operator` command.
-- Instantiate settings, clock, SQLite repository, Alpaca stream, broker client, scanner service, allocator, paper fill engine, and position monitor.
+- Instantiate settings, clock, SQLite repository, Alpaca stream or synthetic stream, broker client or mock reconciler, scanner service, allocator, paper fill engine, and position monitor.
 - Drive everything through `DriftPilotStateMachine`; scanner, allocator, monitor, and exit handler must not run independent loops.
 - On boot:
   - evaluate live gate
@@ -1250,7 +1251,7 @@ Goal: turn the implemented parts into one runnable autonomous paper process.
 
 Phase 9 acceptance:
 
-- `python -m driftpilot.operator --once --mock-stream` writes SQLite state visible in `/api/operator/state`.
+- `python -m driftpilot.operator --once --mock-stream` writes SQLite state visible in `/api/operator/state` and shows the failed-backtest research-mode warning.
 - With no candidates, dashboard shows a clear non-trading reason, not mock data.
 - With injected candidates, allocator reserves slots and dashboard shows those slots.
 - Boot reconciliation event appears in Admin event log.
@@ -1258,7 +1259,7 @@ Phase 9 acceptance:
 
 ### Phase 10: Scanner Service And Candidate Queue Persistence
 
-Prerequisite: Phase 9 runtime command exists and Phase 12 did not fail.
+Prerequisite: Phase 9 runtime command exists. If Phase 12 failed, scanner persistence is still allowed in paper/research mode, but all UI/API surfaces must continue to show the failed-backtest warning and live mode remains gated.
 
 Goal: make the ranked queue real and continuously refreshed.
 
