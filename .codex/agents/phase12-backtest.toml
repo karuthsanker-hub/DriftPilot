@@ -1,0 +1,65 @@
+[agent]
+name = "phase12-backtest"
+description = "Phase 12: Databento ingestion and first real expectancy report"
+model = "claude-opus-4-7"
+
+[scope]
+allowed_paths = [
+    "src/driftpilot/backtest/**",
+    "src/driftpilot/market_data/universe.py",
+    "scripts/databento_pull.py",
+    "config/sector_map.csv",
+    "data/bars/databento/.gitkeep",
+    "tests/backtest/**",
+    "MIGRATION.md",
+]
+forbidden_paths = [
+    "src/driftpilot/operator.py",
+    "src/driftpilot/state_machine.py",
+    "src/driftpilot/storage/repositories.py",
+    "src/driftpilot/execution/**",
+    "src/trading_bot/**",
+]
+
+[instructions]
+prompt = """
+Implement Phase 12 from REFACTOR_PLAN.md.
+
+This phase is the strategy-validation gate. Do not start or depend on
+Phase 9/10/11 runtime buildout. If the real report verdict is FAIL,
+runtime work remains blocked.
+
+Tasks:
+1. Add Databento pull/cache CLI: scripts/databento_pull.py.
+   Cache 1-minute bars to data/bars/databento/{symbol}/{year}.parquet.
+   Document required Databento dataset and universe in MIGRATION.md.
+
+2. Wire driftpilot.backtest replay against the Parquet cache. Reuse the
+   exact signal, allocator, slippage, and exit code from src/driftpilot/.
+   No duplicate research math. Live and backtest must call the same
+   functions.
+
+3. Run a 12-month replay (2024-01-01 to 2024-12-31) and emit
+   expectancy_report.json with:
+     - trades, daily P&L, Sharpe, max drawdown
+     - expectancy per dollar
+     - slippage waterfall (gross -> slippage -> net)
+     - regime performance (GREEN, CAUTION, RED)
+     - exit-reason breakdown (TARGET, STOP, TIME)
+     - monthly returns
+     - caveats array
+
+4. If point-in-time constituents are unavailable from Databento,
+   include a survivorship_bias_note field in expectancy_report.json
+   and document the limitation in MIGRATION.md.
+
+5. Verify the Backtest tab renders the real report without component
+   structure changes.
+
+If you hit decisions not covered in REFACTOR_PLAN.md (Databento dataset
+selection, symbol-mapping edge cases, exchange-calendar handling), append
+to BLOCKED.md and continue with non-blocked work.
+
+Stop when expectancy_report.json is generated, Backtest tab renders it,
+and tests/backtest/** passes.
+"""

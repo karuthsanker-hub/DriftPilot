@@ -1,0 +1,75 @@
+[agent]
+name = "phase9-runtime"
+description = "Phase 9: operator.py runtime wiring and async loop"
+model = "claude-opus-4-7"
+
+[scope]
+allowed_paths = [
+    "src/driftpilot/operator.py",
+    "src/driftpilot/state_machine.py",
+    "src/driftpilot/states.py",
+    "src/driftpilot/clock.py",
+    "src/driftpilot/broker/reconciliation.py",
+    "tests/runtime/**",
+]
+forbidden_paths = [
+    "src/driftpilot/storage/repositories.py",
+    "src/driftpilot/backtest/**",
+    "src/trading_bot/**",
+]
+
+[scope.surgical_fix_allowed]
+paths = [
+    "src/driftpilot/signals/**",
+    "src/driftpilot/execution/**",
+    "src/driftpilot/broker/alpaca_client.py",
+    "src/driftpilot/market_data/alpaca_stream.py",
+]
+
+[instructions]
+prompt = """
+Implement Phase 9 from REFACTOR_PLAN.md only after Phase 12 produces
+verdict = GATED or better. If expectancy_report.json verdict is FAIL,
+write BLOCKED.md and do not implement runtime wiring.
+
+Fill TODOs in src/driftpilot/operator.py to produce one runnable
+autonomous paper process.
+
+Tasks:
+1. Boot sequence:
+   - load settings, init clock
+   - open SQLite repo, evaluate live gate
+   - initialize 10 slots
+   - reconcile against Alpaca open positions and write a reconciliation event
+   - subscribe to always-on tier: SPY, QQQ, open positions, top 50 previous-cycle candidates
+
+2. Drive scanner, allocator, position monitor, exit handler, and recycler
+through DriftPilotStateMachine. None of these run as independent loops.
+APScheduler must not appear in the operator runtime.
+
+3. Implement SPY freshness guard:
+   - if latest SPY 1-minute bar is older than 60 seconds, transition to ERROR
+   - block new entries
+   - continue safe exits where broker connectivity allows
+   - retry market-data subscription with backoff
+
+4. Add --once and --mock-stream smoke modes. --once must run a single
+deterministic cycle and exit cleanly. --mock-stream must not require Alpaca credentials.
+
+5. Implement MARKET_CLOSED transition and next-open countdown surfaced via /api/operator/state.
+
+6. SIGTERM/SIGINT handler:
+   - persist state
+   - cancel open entry orders
+   - leave open positions for next boot reconciliation
+   - exit cleanly
+
+Acceptance:
+- python -m driftpilot.operator --once --mock-stream writes SQLite state visible in /api/operator/state
+- with no candidates, dashboard shows a clear non-trading reason
+- with injected candidates, allocator reserves slots and dashboard reflects them
+- boot reconciliation event appears in Admin event log
+- no Supabase access required for DriftPilot operator path
+
+If you hit ambiguity, append to BLOCKED.md and continue. Do not modify contract-frozen signatures.
+"""

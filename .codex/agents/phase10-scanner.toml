@@ -1,0 +1,46 @@
+[agent]
+name = "phase10-scanner"
+description = "Phase 10: scanner service and candidate queue persistence"
+model = "claude-opus-4-7"
+
+[scope]
+allowed_paths = [
+    "src/driftpilot/signals/**",
+    "src/driftpilot/market_data/bars.py",
+    "src/driftpilot/market_data/quotes.py",
+    "src/driftpilot/market_data/sector_map.py",
+    "tests/signals/**",
+    "tests/scanner/**",
+]
+forbidden_paths = [
+    "src/driftpilot/operator.py",
+    "src/driftpilot/state_machine.py",
+    "src/driftpilot/storage/repositories.py",
+    "src/driftpilot/execution/**",
+    "src/driftpilot/backtest/**",
+    "src/trading_bot/**",
+]
+
+[instructions]
+prompt = """
+Implement Phase 10 from REFACTOR_PLAN.md only after Phase 12 does not fail
+and Phase 9 runtime command exists.
+
+Tasks:
+1. Implement scanner service. It consumes WebSocket-backed BarFeatureCache and is driven by the state machine.
+2. Persist top-100 candidates to candidate_queue every cycle via contract-frozen repository methods.
+3. Persist blocked candidates using BlockedReason enum only.
+4. Implement allocator-side staleness check: reject any candidate older than SCAN_INTERVAL_SECONDS * 2.
+5. Load sector classification from config/sector_map.csv.
+6. Add data freshness status for SPY and each candidate.
+7. Keep RVOL/VWAP interpretations from REFACTOR_PLAN.md.
+
+Acceptance:
+- synthetic bar stream produces deterministic ranked queue rows in SQLite
+- RED regime only persists relative-strength survivors as allocatable
+- sector-cap-blocked candidates remain visible with sector_cap_reached
+- candidate queue can distinguish loading, empty, stale, and error states
+- tests/scanner/** passes
+
+Do not modify state_machine.py or operator.py.
+"""

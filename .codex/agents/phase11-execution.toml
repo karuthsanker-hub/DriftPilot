@@ -1,0 +1,43 @@
+[agent]
+name = "phase11-execution"
+description = "Phase 11: entry, exit, and recycling services"
+model = "claude-opus-4-7"
+
+[scope]
+allowed_paths = [
+    "src/driftpilot/execution/**",
+    "tests/execution/**",
+]
+forbidden_paths = [
+    "src/driftpilot/operator.py",
+    "src/driftpilot/state_machine.py",
+    "src/driftpilot/storage/repositories.py",
+    "src/driftpilot/signals/**",
+    "src/driftpilot/backtest/**",
+    "src/trading_bot/**",
+]
+
+[instructions]
+prompt = """
+Implement Phase 11 from REFACTOR_PLAN.md only after Phase 12 does not fail,
+Phase 9 runtime exists, and Phase 10 scanner persistence is working.
+
+Tasks:
+1. Convert slot reservations into entry orders or paper fills. Persist positions, orders, and fills.
+2. Position monitor evaluates TARGET, STOP, and TIME exits only when driven by the state machine.
+3. Implement order fallback rules from REFACTOR_PLAN.md and log every fallback.
+4. On exit fill, update realized P&L, mark slot RECYCLING, write recycle event, return slot to EMPTY.
+5. Persist daily counters before the related order transition completes.
+6. PDT guard in live mode blocks entries but continues exits.
+
+Acceptance:
+- synthetic position exits on target and recycles its slot
+- synthetic position exits on stop and recycles its slot
+- flat synthetic position exits exactly at MAX_HOLD_MINUTES
+- capital deployed never exceeds configured paper capital
+- duplicate opposite-side orders not submitted when an exit is open
+- daily counters survive process restart, reset only on ET date change
+- tests/execution/** passes
+
+Do not modify signals/, state_machine.py, or operator.py.
+"""
