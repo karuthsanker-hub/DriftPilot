@@ -27,6 +27,7 @@ class BacktestMetrics:
     exit_breakdown: dict[str, int]
     regime_performance: dict[str, dict[str, float]]
     daily_pnl: dict[str, float]
+    monthly_returns: dict[str, float]
 
 
 def compute_metrics(trades: list[BacktestTrade], *, starting_capital: float) -> BacktestMetrics:
@@ -56,6 +57,7 @@ def compute_metrics(trades: list[BacktestTrade], *, starting_capital: float) -> 
         exit_breakdown=dict(Counter(trade.exit_reason for trade in trades)),
         regime_performance=_regime_performance(trades),
         daily_pnl={day.isoformat(): pnl for day, pnl in sorted(daily_pnl.items())},
+        monthly_returns=_monthly_returns(daily_pnl, starting_capital),
     )
 
 
@@ -103,3 +105,25 @@ def _regime_performance(trades: list[BacktestTrade]) -> dict[str, dict[str, floa
         for regime, items in sorted(by_regime.items())
         if items
     }
+
+
+def _monthly_returns(daily_pnl: dict[date, float], starting_capital: float) -> dict[str, float]:
+    if not daily_pnl:
+        return {}
+    equity = starting_capital
+    month_start_equity = starting_capital
+    current_month: str | None = None
+    returns: dict[str, float] = {}
+    for day, pnl in sorted(daily_pnl.items()):
+        month = day.strftime("%Y-%m")
+        if current_month is None:
+            current_month = month
+            month_start_equity = equity
+        elif month != current_month:
+            returns[current_month] = equity / month_start_equity - 1.0
+            current_month = month
+            month_start_equity = equity
+        equity += pnl
+    if current_month is not None:
+        returns[current_month] = equity / month_start_equity - 1.0
+    return returns

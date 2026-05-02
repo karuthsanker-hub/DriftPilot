@@ -29,3 +29,12 @@ No legacy trading path has been deleted yet. Obsolete paths should be archived o
 - Slippage is applied to paper/backtest fills.
 - Time stop, target, stop, sector cap, and allocator lock are represented in the new runtime plan.
 - Operator UI no longer contains normal manual confirm buttons.
+
+## Phase 12 Databento Backtest Data
+
+- Required cache command: `python scripts/databento_pull.py --start 2024-01-01 --end 2024-12-31 --dataset EQUS.MINI --symbols-file config/sector_map.csv`.
+- The cache layout is `data/bars/databento/{symbol}/{year}.parquet` with UTC `timestamp`, `symbol`, `open`, `high`, `low`, `close`, and `volume` columns.
+- `EQUS.MINI` is the default Databento dataset because it provides U.S. equities `ohlcv-1m` aggregates and covers NMS stocks. Confirm this remains the intended strategy-validation dataset before treating Phase 12 as complete.
+- The default symbol universe is `config/sector_map.csv` plus `SPY` as the market-regime heartbeat. Replace this with a point-in-time universe before relying on production research conclusions.
+- Databento point-in-time constituents were not available in this worktree, so generated reports must include the survivorship-bias caveat until a historical constituent source is connected.
+- After cache population, run `python -m driftpilot.backtest --start 2024-01-01 --end 2024-12-31 --bar-root data/bars/databento --output expectancy_report.json`.

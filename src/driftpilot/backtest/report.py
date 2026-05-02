@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +20,11 @@ def build_expectancy_report(
     point_in_time_constituents: bool,
 ) -> dict[str, Any]:
     metrics = compute_metrics(replay.trades, starting_capital=replay.starting_capital)
+    survivorship_bias_note = None
+    if not point_in_time_constituents:
+        survivorship_bias_note = (
+            "Point-in-time constituents were unavailable; results may include survivorship bias."
+        )
     live_gate = {
         "backtest_expectancy_positive": metrics.expectancy_per_dollar > 0,
         "paper_trading_60_days_positive_pnl_sharpe_gt_1": False,
@@ -32,9 +37,17 @@ def build_expectancy_report(
 
     return {
         "schema_version": 1,
+        "generated_at": datetime.now(UTC).isoformat(),
         "period": {"start": start.isoformat(), "end": end.isoformat()},
+        "run_config": {
+            "bar_source": "databento_parquet",
+            "start": start.isoformat(),
+            "end": end.isoformat(),
+            "point_in_time_constituents": point_in_time_constituents,
+        },
         "verdict": verdict,
         "live_gate": live_gate,
+        "live_gate_criteria": live_gate,
         "settings": {
             "paper_capital": settings.paper_capital,
             "trade_slots": settings.trade_slots,
@@ -45,22 +58,30 @@ def build_expectancy_report(
         },
         "constituents": {
             "point_in_time": point_in_time_constituents,
-            "survivorship_bias_note": None
-            if point_in_time_constituents
-            else "Point-in-time constituents were unavailable; results may include survivorship bias.",
+            "survivorship_bias_note": survivorship_bias_note,
         },
+        "survivorship_bias_note": survivorship_bias_note,
         "metrics": _metrics_dict(metrics),
+        "headline_metrics": _metrics_dict(metrics),
         "slippage_waterfall": {
             "gross_return_pct": metrics.gross_return_pct,
             "slippage_cost_pct": -metrics.slippage_return_pct,
             "net_return_pct": metrics.total_return_pct,
+            "gross_pnl": metrics.gross_pnl,
+            "slippage_cost": metrics.slippage_cost,
+            "net_pnl": metrics.total_pnl,
         },
+        "performance_by_regime": metrics.regime_performance,
+        "exit_breakdown": metrics.exit_breakdown,
+        "monthly_returns": metrics.monthly_returns,
+        "drawdown_analysis": {"max_drawdown_pct": metrics.max_drawdown_pct},
+        "return_distribution": {"daily_pnl": metrics.daily_pnl},
         "trades": [asdict(trade) for trade in replay.trades],
         "equity_curve": [
             {"timestamp": timestamp.isoformat(), "equity": equity}
             for timestamp, equity in replay.equity_curve
         ],
-        "caveats": replay.caveats,
+        "caveats": _dedupe([*replay.caveats, *([survivorship_bias_note] if survivorship_bias_note else [])]),
     }
 
 
@@ -89,4 +110,16 @@ def _metrics_dict(metrics: BacktestMetrics) -> dict[str, Any]:
         "exit_breakdown": metrics.exit_breakdown,
         "regime_performance": metrics.regime_performance,
         "daily_pnl": metrics.daily_pnl,
+        "monthly_returns": metrics.monthly_returns,
     }
+
+
+def _dedupe(items: list[str | None]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for item in items:
+        if not item or item in seen:
+            continue
+        seen.add(item)
+        result.append(item)
+    return result
