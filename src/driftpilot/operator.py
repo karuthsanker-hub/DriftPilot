@@ -134,12 +134,18 @@ def main() -> None:
         action="store_true",
         help="Use synthetic bars instead of Alpaca WebSocket data.",
     )
+    parser.add_argument(
+        "--paper-live",
+        action="store_true",
+        help="Submit real orders to Alpaca paper account. Catalyst-only "
+        "(event-driven signals; no SIP bar stream wired yet).",
+    )
     parser.add_argument("--env-file", default=".env")
     args = parser.parse_args()
-    asyncio.run(_run(args.once, args.mock_stream, args.env_file))
+    asyncio.run(_run(args.once, args.mock_stream, args.env_file, args.paper_live))
 
 
-async def _run(once: bool, mock_stream: bool, env_file: str) -> None:
+async def _run(once: bool, mock_stream: bool, env_file: str, paper_live: bool = False) -> None:
     settings = load_settings(env_file)
     clock = DriftPilotClock(settings.timezone)
     repository = DriftPilotRepository.open(settings.sqlite_path_obj, clock)
@@ -150,20 +156,36 @@ async def _run(once: bool, mock_stream: bool, env_file: str) -> None:
     catalyst_bus, universe_filter, discovery_service = _build_catalyst_layer(settings)
     catalyst_db_path = settings.catalyst_db_path if settings.catalyst_enabled else None
 
+    if paper_live:
+        from driftpilot.services_live import build_live_components
+        broker, allocator_service, monitor_service = build_live_components(
+            repository, settings, clock=clock, catalyst_db_path=catalyst_db_path,
+        )
+        logger.warning(
+            "🚨 PAPER-LIVE MODE: submitting real orders to Alpaca paper account at %s",
+            settings.alpaca_paper_base_url,
+        )
+        # Note: AlpacaBrokerClient is the broker reconciler in live mode too,
+        # but the existing state machine expects the BrokerReconciler protocol
+        # (get_account/get_open_positions). AlpacaBrokerClient implements those,
+        # so we can pass it directly.
+        broker_for_machine = broker
+    else:
+        broker_for_machine = MockBrokerReconciler(repository, settings)
+        allocator_service = PaperExecutionAllocator(
+            repository, settings, clock=clock, catalyst_db_path=catalyst_db_path,
+        )
+        monitor_service = PaperPositionMonitor(repository, settings, clock=clock)
+
     machine = DriftPilotStateMachine(
         repository,
         settings,
         clock=clock,
         market_clock=MockOpenMarketClock() if mock_stream else None,
-        broker=MockBrokerReconciler(repository, settings),
+        broker=broker_for_machine,
         scanner=scanner,
-        allocator=PaperExecutionAllocator(
-            repository,
-            settings,
-            clock=clock,
-            catalyst_db_path=catalyst_db_path,
-        ),
-        position_monitor=PaperPositionMonitor(repository, settings, clock=clock),
+        allocator=allocator_service,
+        position_monitor=monitor_service,
         catalyst_event_bus=catalyst_bus,
         catalyst_universe_filter=universe_filter,
     )

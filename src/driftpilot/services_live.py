@@ -1,0 +1,246 @@
+"""Live (Alpaca paper) execution allocator + position monitor.
+
+Drop-in replacements for PaperExecutionAllocator + PaperPositionMonitor
+that submit real orders to Alpaca's paper broker. Used when the operator
+runs with `--paper-live`.
+
+Key differences vs the mock services:
+  - allocator.allocate() calls AlpacaBrokerClient.submit_entry_order which
+    submits a marketable limit, waits for fill, and falls back to
+    cancel-and-recycle on timeout.
+  - position_monitor periodically polls the latest quote (REST), computes
+    unrealized_pct, and asks the signal's evaluate_exit; if it says close,
+    submit_exit_order is called.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import inspect
+import logging
+from datetime import datetime, timezone
+
+from driftpilot.broker.alpaca_client import AlpacaBrokerClient
+from driftpilot.clock import DriftPilotClock
+from driftpilot.execution.slot_allocator import (
+    AllocationCandidate,
+    AllocationResult,
+    SlotAllocator,
+)
+from driftpilot.market_data.rest_quotes import AlpacaRestQuoteProvider
+from driftpilot.settings import DriftPilotSettings
+from driftpilot.signals import get_signal
+from driftpilot.storage.repositories import DriftPilotRepository
+
+logger = logging.getLogger(__name__)
+
+
+class LiveAlpacaAllocator:
+    """Allocator that submits real Alpaca paper orders."""
+
+    def __init__(
+        self,
+        repository: DriftPilotRepository,
+        settings: DriftPilotSettings,
+        broker: AlpacaBrokerClient,
+        *,
+        clock: DriftPilotClock | None = None,
+        catalyst_db_path: str | None = None,
+    ) -> None:
+        self.repository = repository
+        self.settings = settings
+        self.broker = broker
+        self.clock = clock or DriftPilotClock(settings.timezone)
+        self.allocator = SlotAllocator(
+            repository, settings, clock=self.clock, catalyst_db_path=catalyst_db_path
+        )
+
+    async def allocate(self, candidates: list[AllocationCandidate]) -> AllocationResult:
+        result = await self.allocator.allocate(candidates)
+        candidate_by_symbol = {c.symbol.upper(): c for c in candidates}
+
+        for allocation in result.allocations:
+            candidate = candidate_by_symbol[allocation.symbol.upper()]
+            reference_price = float(candidate.metadata.get("reference_price", 100.0))
+            quantity = max(1, int(allocation.slot_value // reference_price))
+
+            logger.info(
+                "LIVE: submitting paper buy %s qty=%d slot=%s ref_price=%.2f",
+                allocation.symbol, quantity, allocation.slot_id, reference_price,
+            )
+
+            try:
+                submission = await self.broker.submit_entry_order(
+                    symbol=allocation.symbol,
+                    quantity=quantity,
+                    slot_id=allocation.slot_id,
+                )
+            except Exception as exc:
+                logger.exception("LIVE: entry submission failed for %s: %s", allocation.symbol, exc)
+                continue
+
+            if not submission.submitted:
+                logger.warning(
+                    "LIVE: entry not submitted for %s — reason=%s",
+                    allocation.symbol, submission.reason,
+                )
+                continue
+
+            # Order submitted AND filled (broker waited). Record the position
+            # locally so the monitor can track it for exit.
+            entry_price = submission.limit_price or reference_price
+            position = self.repository.positions.create_open(
+                symbol=allocation.symbol,
+                quantity=quantity,
+                entry_price=entry_price,
+                target_price=entry_price * (1 + self.settings.target_pct),
+                stop_price=entry_price * (1 - self.settings.stop_pct),
+                slot_id=allocation.slot_id,
+                opened_at=allocation.reserved_at,
+                metadata={
+                    "sector": allocation.sector,
+                    "broker_order_id": submission.broker_order_id,
+                    "reference_price": reference_price,
+                    "current_price": entry_price,
+                    "entry_ts": allocation.reserved_at.isoformat(),
+                    "entry_price": entry_price,
+                    "source": "live_alpaca_paper",
+                },
+            )
+            logger.info(
+                "LIVE: position opened symbol=%s qty=%d entry=%.2f position_id=%s broker_order_id=%s",
+                allocation.symbol, quantity, entry_price,
+                getattr(position, "id", None), submission.broker_order_id,
+            )
+
+        return result
+
+
+class LiveAlpacaPositionMonitor:
+    """Polls latest quotes for open positions, evaluates the signal's exit
+    decision, and submits real Alpaca exits when triggered.
+
+    Designed for catalyst signals that need only current quote (not bar
+    history). For technical signals that need bar history, the SIP stream
+    integration is a separate sprint.
+    """
+
+    def __init__(
+        self,
+        repository: DriftPilotRepository,
+        settings: DriftPilotSettings,
+        broker: AlpacaBrokerClient,
+        quote_provider: AlpacaRestQuoteProvider,
+        *,
+        clock: DriftPilotClock | None = None,
+    ) -> None:
+        self.repository = repository
+        self.settings = settings
+        self.broker = broker
+        self.quote_provider = quote_provider
+        self.clock = clock or DriftPilotClock(settings.timezone)
+
+    async def monitor_open_positions(self) -> None:
+        """One sweep: for each open position, check exit and submit if so."""
+        signal = get_signal(self.settings.active_signal)
+        positions = self.repository.positions.list_open()
+        now = self.clock.now_utc()
+
+        for position in positions:
+            symbol = position.symbol.upper()
+            quote = await asyncio.to_thread(self.quote_provider.latest_quote, symbol)
+            if quote is None:
+                logger.debug("monitor: no quote for %s — skipping", symbol)
+                continue
+
+            mid = (quote.bid_price + quote.ask_price) / 2.0
+            entry_price = float(getattr(position, "entry_price", 0.0))
+            unrealized_pct = ((mid - entry_price) / entry_price * 100.0) if entry_price > 0 else 0.0
+
+            # Set current_price on the position object so the signal sees fresh data
+            try:
+                position_metadata = dict(getattr(position, "metadata", {}) or {})
+            except Exception:
+                position_metadata = {}
+            position_metadata["current_price"] = mid
+            # In-memory shim — repository persistence is best-effort for live mode
+            object.__setattr__(position, "current_price", mid) if hasattr(position, "current_price") else None
+
+            try:
+                decision = signal.evaluate_exit(position, now)
+                if inspect.isawaitable(decision):
+                    decision = await decision
+            except Exception as exc:
+                logger.exception("monitor: evaluate_exit raised for %s: %s", symbol, exc)
+                continue
+
+            if decision is None or not getattr(decision, "close", False):
+                continue
+
+            quantity = float(getattr(position, "quantity", 0))
+            if quantity <= 0:
+                continue
+
+            logger.info(
+                "LIVE: signal requests exit symbol=%s reason=%s unrealized=%.3f%%",
+                symbol, getattr(decision, "reason", "unknown"), unrealized_pct,
+            )
+            try:
+                exit_result = await self.broker.submit_exit_order(
+                    symbol=symbol,
+                    quantity=quantity,
+                    position_id=getattr(position, "id", None),
+                )
+                if exit_result.submitted:
+                    exit_price = exit_result.limit_price or mid
+                    realized = (exit_price - entry_price) * quantity
+                    self.repository.positions.close(
+                        position_id=getattr(position, "id"),
+                        exit_reason=getattr(decision, "reason", "signal_exit"),
+                        realized_pnl=realized,
+                        closed_at=self.clock.now_utc(),
+                        metadata={
+                            "exit_price": exit_price,
+                            "broker_exit_order_id": exit_result.broker_order_id,
+                        },
+                    )
+                    logger.info(
+                        "LIVE: position closed symbol=%s broker_order_id=%s",
+                        symbol, exit_result.broker_order_id,
+                    )
+            except Exception as exc:
+                logger.exception("LIVE: exit submission failed for %s: %s", symbol, exc)
+
+
+def build_live_components(
+    repository: DriftPilotRepository,
+    settings: DriftPilotSettings,
+    *,
+    clock: DriftPilotClock | None = None,
+    catalyst_db_path: str | None = None,
+) -> tuple[AlpacaBrokerClient, LiveAlpacaAllocator, LiveAlpacaPositionMonitor]:
+    """Construct the live trio: broker, allocator, position monitor."""
+    if not settings.alpaca_key_id or not settings.alpaca_secret_key:
+        raise RuntimeError(
+            "LIVE mode requires ALPACA_API_KEY/ALPACA_KEY_ID and ALPACA_SECRET_KEY"
+        )
+
+    quote_provider = AlpacaRestQuoteProvider(
+        api_key=settings.alpaca_key_id,
+        api_secret=settings.alpaca_secret_key,
+    )
+    broker = AlpacaBrokerClient(
+        settings,
+        clock=clock,
+        quote_provider=quote_provider,
+        repository=repository,
+    )
+    allocator = LiveAlpacaAllocator(
+        repository, settings, broker,
+        clock=clock,
+        catalyst_db_path=catalyst_db_path,
+    )
+    monitor = LiveAlpacaPositionMonitor(
+        repository, settings, broker, quote_provider, clock=clock,
+    )
+    return broker, allocator, monitor
