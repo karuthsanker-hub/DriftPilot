@@ -87,9 +87,18 @@ class CatalystSample:
     symbol: str
     catalyst_at: datetime
     headline: str
+    # Forward windows (post-news): what the original v1 spike tested.
     abs_return_30m_pct: float | None
     abs_return_60m_pct: float | None
     abs_return_120m_pct: float | None
+    # Backward windows (pre-news): tests the "market reacted 2 days earlier"
+    # hypothesis. If pre-news shows abnormal movement vs baseline, the
+    # catalyst signal lives in the price action BEFORE the article
+    # publishes (smart-money positioning, leaks, options flow).
+    abs_return_back_2h_pct: float | None
+    abs_return_back_1d_pct: float | None
+    abs_return_back_2d_pct: float | None
+    abs_return_back_3d_pct: float | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,6 +108,10 @@ class BaselineSample:
     abs_return_30m_pct: float | None
     abs_return_60m_pct: float | None
     abs_return_120m_pct: float | None
+    abs_return_back_2h_pct: float | None
+    abs_return_back_1d_pct: float | None
+    abs_return_back_2d_pct: float | None
+    abs_return_back_3d_pct: float | None
 
 
 def main() -> None:
@@ -177,13 +190,21 @@ def main() -> None:
     print("=" * 72)
     print(f" VERDICT: {summary['verdict']}")
     print("=" * 72)
-    for key in ("ratio_30m", "ratio_60m", "ratio_120m",
+    print()
+    print(" === FORWARD windows (post-news) ===")
+    for key in ("ratio_forward_30m", "ratio_forward_60m", "ratio_forward_120m",
                 "mean_abs_return_60m_catalyst_pct",
                 "mean_abs_return_60m_baseline_pct",
-                "p1pct_60m_catalyst", "p1pct_60m_baseline",
-                "p2pct_60m_catalyst", "p2pct_60m_baseline"):
-        v = summary.get(key)
-        print(f"  {key:<40} {v}")
+                "p1pct_forward_60m_catalyst", "p1pct_forward_60m_baseline"):
+        print(f"   {key:<48} {summary.get(key)}")
+    print()
+    print(" === BACKWARD windows (pre-news) — 'market moves earlier' test ===")
+    for key in ("ratio_back_2h", "ratio_back_1d", "ratio_back_2d", "ratio_back_3d",
+                "mean_abs_return_back_1d_catalyst_pct",
+                "mean_abs_return_back_1d_baseline_pct",
+                "p1pct_back_1d_catalyst", "p1pct_back_1d_baseline",
+                "p2pct_back_1d_catalyst", "p2pct_back_1d_baseline"):
+        print(f"   {key:<48} {summary.get(key)}")
     print()
     print(f"  Full report: {output_path}")
 
@@ -306,6 +327,10 @@ def _build_catalyst_samples(
             abs_return_30m_pct=_forward_abs_return_pct(bars, at, 30),
             abs_return_60m_pct=_forward_abs_return_pct(bars, at, 60),
             abs_return_120m_pct=_forward_abs_return_pct(bars, at, 120),
+            abs_return_back_2h_pct=_backward_abs_return_pct(bars, at, 120),
+            abs_return_back_1d_pct=_backward_abs_return_pct(bars, at, 60 * 24),
+            abs_return_back_2d_pct=_backward_abs_return_pct(bars, at, 60 * 48),
+            abs_return_back_3d_pct=_backward_abs_return_pct(bars, at, 60 * 72),
         )
         # Keep only samples where at least the 60m return is computable.
         if sample.abs_return_60m_pct is not None:
@@ -347,6 +372,10 @@ def _build_baseline_for_symbol(
                 abs_return_30m_pct=_forward_abs_return_pct(bars, ts, 30),
                 abs_return_60m_pct=_forward_abs_return_pct(bars, ts, 60),
                 abs_return_120m_pct=_forward_abs_return_pct(bars, ts, 120),
+                abs_return_back_2h_pct=_backward_abs_return_pct(bars, ts, 120),
+                abs_return_back_1d_pct=_backward_abs_return_pct(bars, ts, 60 * 24),
+                abs_return_back_2d_pct=_backward_abs_return_pct(bars, ts, 60 * 48),
+                abs_return_back_3d_pct=_backward_abs_return_pct(bars, ts, 60 * 72),
             )
         )
     return picked
@@ -382,6 +411,30 @@ def _forward_abs_return_pct(bars: pd.DataFrame, anchor: datetime, minutes: int) 
     return abs(fwd_close / base_close - 1.0) * 100.0
 
 
+def _backward_abs_return_pct(bars: pd.DataFrame, anchor: datetime, minutes: int) -> float | None:
+    """|return| over a backward window ending at ``anchor``.
+
+    Tests the "market reacted before the news" hypothesis: was there
+    abnormal price movement in the N minutes BEFORE the article timestamp?
+    Returns absolute pct change between the close at (anchor - N min) and
+    the close at anchor.
+    """
+    if bars.empty:
+        return None
+    earlier = anchor - timedelta(minutes=minutes)
+    earlier_bars = bars[bars["timestamp"] <= pd.Timestamp(earlier)]
+    if earlier_bars.empty:
+        return None
+    earlier_close = float(earlier_bars.iloc[-1]["close"])
+    anchor_bars = bars[bars["timestamp"] <= pd.Timestamp(anchor)]
+    if anchor_bars.empty or anchor_bars.iloc[-1]["timestamp"] == earlier_bars.iloc[-1]["timestamp"]:
+        return None
+    anchor_close = float(anchor_bars.iloc[-1]["close"])
+    if earlier_close <= 0:
+        return None
+    return abs(anchor_close / earlier_close - 1.0) * 100.0
+
+
 def _summarize(catalysts: list[CatalystSample], baselines: list[BaselineSample]) -> dict:
     def vec(samples, attr):
         return [getattr(s, attr) for s in samples if getattr(s, attr) is not None]
@@ -398,36 +451,92 @@ def _summarize(catalysts: list[CatalystSample], baselines: list[BaselineSample])
     base_30 = vec(baselines, "abs_return_30m_pct")
     base_60 = vec(baselines, "abs_return_60m_pct")
     base_120 = vec(baselines, "abs_return_120m_pct")
+    # Backward (pre-news) windows
+    cat_back_2h = vec(catalysts, "abs_return_back_2h_pct")
+    cat_back_1d = vec(catalysts, "abs_return_back_1d_pct")
+    cat_back_2d = vec(catalysts, "abs_return_back_2d_pct")
+    cat_back_3d = vec(catalysts, "abs_return_back_3d_pct")
+    base_back_2h = vec(baselines, "abs_return_back_2h_pct")
+    base_back_1d = vec(baselines, "abs_return_back_1d_pct")
+    base_back_2d = vec(baselines, "abs_return_back_2d_pct")
+    base_back_3d = vec(baselines, "abs_return_back_3d_pct")
 
     def safe_ratio(num, den):
         return (num / den) if den > 0 else float("inf") if num > 0 else 0.0
 
     return {
+        # FORWARD (post-news) — what v1 of the spike tested
         "mean_abs_return_30m_catalyst_pct": round(mean(cat_30), 4),
         "mean_abs_return_30m_baseline_pct": round(mean(base_30), 4),
         "mean_abs_return_60m_catalyst_pct": round(mean(cat_60), 4),
         "mean_abs_return_60m_baseline_pct": round(mean(base_60), 4),
         "mean_abs_return_120m_catalyst_pct": round(mean(cat_120), 4),
         "mean_abs_return_120m_baseline_pct": round(mean(base_120), 4),
-        "ratio_30m": round(safe_ratio(mean(cat_30), mean(base_30)), 3),
-        "ratio_60m": round(safe_ratio(mean(cat_60), mean(base_60)), 3),
-        "ratio_120m": round(safe_ratio(mean(cat_120), mean(base_120)), 3),
-        "p1pct_60m_catalyst": round(gt(cat_60, 1.0), 4),
-        "p1pct_60m_baseline": round(gt(base_60, 1.0), 4),
-        "p2pct_60m_catalyst": round(gt(cat_60, 2.0), 4),
-        "p2pct_60m_baseline": round(gt(base_60, 2.0), 4),
+        "ratio_forward_30m": round(safe_ratio(mean(cat_30), mean(base_30)), 3),
+        "ratio_forward_60m": round(safe_ratio(mean(cat_60), mean(base_60)), 3),
+        "ratio_forward_120m": round(safe_ratio(mean(cat_120), mean(base_120)), 3),
+        "p1pct_forward_60m_catalyst": round(gt(cat_60, 1.0), 4),
+        "p1pct_forward_60m_baseline": round(gt(base_60, 1.0), 4),
+        "p2pct_forward_60m_catalyst": round(gt(cat_60, 2.0), 4),
+        "p2pct_forward_60m_baseline": round(gt(base_60, 2.0), 4),
+        # BACKWARD (pre-news) — does the market move BEFORE the article?
+        # If yes, the catalyst signal lives in pre-event positioning, not
+        # in the news article itself.
+        "mean_abs_return_back_2h_catalyst_pct": round(mean(cat_back_2h), 4),
+        "mean_abs_return_back_2h_baseline_pct": round(mean(base_back_2h), 4),
+        "mean_abs_return_back_1d_catalyst_pct": round(mean(cat_back_1d), 4),
+        "mean_abs_return_back_1d_baseline_pct": round(mean(base_back_1d), 4),
+        "mean_abs_return_back_2d_catalyst_pct": round(mean(cat_back_2d), 4),
+        "mean_abs_return_back_2d_baseline_pct": round(mean(base_back_2d), 4),
+        "mean_abs_return_back_3d_catalyst_pct": round(mean(cat_back_3d), 4),
+        "mean_abs_return_back_3d_baseline_pct": round(mean(base_back_3d), 4),
+        "ratio_back_2h": round(safe_ratio(mean(cat_back_2h), mean(base_back_2h)), 3),
+        "ratio_back_1d": round(safe_ratio(mean(cat_back_1d), mean(base_back_1d)), 3),
+        "ratio_back_2d": round(safe_ratio(mean(cat_back_2d), mean(base_back_2d)), 3),
+        "ratio_back_3d": round(safe_ratio(mean(cat_back_3d), mean(base_back_3d)), 3),
+        "p1pct_back_1d_catalyst": round(gt(cat_back_1d, 1.0), 4),
+        "p1pct_back_1d_baseline": round(gt(base_back_1d, 1.0), 4),
+        "p2pct_back_1d_catalyst": round(gt(cat_back_1d, 2.0), 4),
+        "p2pct_back_1d_baseline": round(gt(base_back_1d, 2.0), 4),
     }
 
 
 def _verdict(summary: dict) -> str:
-    ratio = summary.get("ratio_60m", 0.0)
-    p1c = summary.get("p1pct_60m_catalyst", 0.0)
-    p1b = summary.get("p1pct_60m_baseline", 0.0)
-    if ratio >= 2.0 and p1b > 0 and p1c >= 2.0 * p1b:
-        return "ALIVE"
-    if ratio < 1.5 or (p1b > 0 and p1c < 1.2 * p1b):
-        return "DEAD"
-    return "MARGINAL"
+    """Verdict combines forward AND backward windows:
+
+    - ALIVE_FORWARD: post-news movement clearly elevated (the original
+      v1 hypothesis).
+    - ALIVE_PRE_NEWS: pre-news movement clearly elevated (smart-money
+      positioning / leaks visible 1-3 days before).
+    - ALIVE_BOTH: both directions show signal.
+    - MARGINAL: one direction marginal, neither strong.
+    - DEAD: neither direction shows meaningful signal.
+    """
+    fwd_ratio = summary.get("ratio_forward_60m", 0.0)
+    fwd_p1c = summary.get("p1pct_forward_60m_catalyst", 0.0)
+    fwd_p1b = summary.get("p1pct_forward_60m_baseline", 0.0)
+    fwd_alive = fwd_ratio >= 2.0 and fwd_p1b > 0 and fwd_p1c >= 2.0 * fwd_p1b
+    fwd_dead = fwd_ratio < 1.5 or (fwd_p1b > 0 and fwd_p1c < 1.2 * fwd_p1b)
+
+    back_ratios = [
+        summary.get("ratio_back_2h", 0.0),
+        summary.get("ratio_back_1d", 0.0),
+        summary.get("ratio_back_2d", 0.0),
+        summary.get("ratio_back_3d", 0.0),
+    ]
+    back_alive_any = any(r >= 1.5 for r in back_ratios)
+    back_alive_strong = any(r >= 2.0 for r in back_ratios)
+    back_dead = all(r < 1.2 for r in back_ratios)
+
+    if fwd_alive and back_alive_strong:
+        return "ALIVE_BOTH"
+    if back_alive_strong:
+        return "ALIVE_PRE_NEWS"
+    if fwd_alive:
+        return "ALIVE_FORWARD"
+    if back_alive_any or not fwd_dead:
+        return "MARGINAL"
+    return "DEAD"
 
 
 if __name__ == "__main__":

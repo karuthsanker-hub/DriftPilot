@@ -238,7 +238,91 @@ If yes, the rest of the plan is worth executing.
 6. Read-only API endpoints stay read-only; only `/api/admin/*` writes.
 7. Tests pass before each phase ships.
 
-## Spike result (2026-05-03): DEAD on the simple test
+## Update: spike v2 — corrected methodology, partial signal
+
+The original spike (within-minute, ±30 min baseline exclusion) returned
+DEAD. User pushback: "you're over-rotating on earnings calendar; the
+market often reacts 2 days earlier; look at other news as well." Two
+follow-ups ran:
+
+### v2a — backward windows (does the market move BEFORE the article?)
+Same data, added 2h/1d/2d/3d backward windows:
+
+| Window | Catalyst | Baseline | Ratio |
+|---|---|---|---|
+| 2h before | 0.40% | 0.48% | 0.84 |
+| 1d before | 1.53% | 1.82% | 0.84 |
+| 2d before | 2.20% | 2.31% | 0.95 |
+| 3d before | 2.66% | 2.91% | 0.92 |
+
+All backward ratios < 1.0. The "market moves 2 days earlier" hypothesis
+does NOT survive on this data + this methodology. But …
+
+### v2b — daily granularity with whole-day baseline exclusion
+The within-minute baseline was contaminated: a "non-catalyst minute"
+could fall on a day that had a news article 12 hours earlier (only ±30
+min was excluded). Re-tested at daily granularity, comparing:
+- News-days (any tagged Alpaca article that ET-date for that symbol)
+- No-news-days (entire day clean for that symbol)
+
+| Metric | News-days | No-news-days | Ratio |
+|---|---|---|---|
+| Sample size | 67 | 1,153 | — |
+| Mean daily \|return\| | **1.41%** | **1.30%** | **1.085** |
+| Pr(>1% move) | 44.8% | 48.5% | 0.92 |
+| Pr(>2% move) | **25.4%** | **18.3%** | **1.387** |
+| Pr(>3% move) | 10.4% | 8.5% | 1.22 |
+
+**News days ARE more volatile than no-news days at daily granularity** —
+modestly in the mean (~9% higher) but more meaningfully in the tail
+(>2% moves are 39% more likely on news days). The earlier within-day
+DEAD was a methodology artifact, not a real null result.
+
+### What this tells us
+
+1. **Pure news presence IS a real signal** at daily granularity. The
+   user's broader intuition (technical signals chase tails without
+   context) is supported by data, not refuted.
+2. **The magnitude is small for mega-caps.** A 1.085× mean ratio is
+   too weak to be a sole universe filter; we'd be selecting from a set
+   only marginally more volatile than random.
+3. **The tail ratio is more interesting.** 1.39× for >2% moves is
+   meaningful — suggests news days produce a "fatter tail" of big
+   moves even when the average is only mildly elevated. A strategy
+   that captures big moves (apex-hunter-style trend signals) might
+   benefit MORE from the news filter than mean-revert signals.
+4. **Mega-cap selection bias understates the signal.** AAPL/MSFT/NVDA
+   absorb news within seconds. Mid/small caps would likely show
+   stronger ratios.
+5. **Combining news with another signal would multiply, not add.** A
+   stock with both abnormal volume AND a news-day-flag is a much
+   stronger setup than either alone. v3 architecture should treat
+   news as a multiplier on existing technical signals, not a sole
+   filter.
+
+### Refined recommendation
+
+The previous "DEAD, do not build" stands only for the naive *blanket
+news-presence at minute granularity* design. The signal IS detectable
+at daily granularity. The v3 infrastructure decision now hinges on
+three sub-questions that each warrant their own short spike:
+
+| Sub-spike | Hypothesis | Effort | Source |
+|---|---|---|---|
+| **2c** Mid/small-cap signal | Daily news-day ratio is >1.5× on $1-10B cap names | 1h | Same Alpaca News, different universe |
+| **2d** News + RVOL combo | RVOL>3 on news-day predicts >2% moves at >2× baseline | 2h | Cached bars + same Alpaca News |
+| **2e** Curated news subset | Earnings/M&A only (vs blanket) ratio is >2× baseline | 4h | Alpaca News + headline keyword filtering OR yfinance earnings calendar |
+
+If any of 2c/2d/2e returns ratio > 1.5× on the >2% move metric, build
+v3 with the corresponding architecture. If all three return weak, the
+strategy is to **skip v3 catalyst layer entirely** and instead invest
+in (a) the v2 operator console + (b) entry-quality work on the
+existing technical signals.
+
+The v2 operator console work is independent and ships visible operator
+value in days regardless of v3 outcome.
+
+## Original spike result (2026-05-03): DEAD on the simple test
 
 `scripts/catalyst_hypothesis_spike.py` ran on 20 high-volume symbols
 (AAPL, MSFT, NVDA, etc.) across 2024-Q1. Pulled 337 Alpaca News
