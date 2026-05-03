@@ -634,6 +634,93 @@ everything and stop anything", which is the user's stated minimum.
 
 ---
 
+## Agent orchestration
+
+Each phase is implemented in its own git worktree under
+`../driftpilot-worktrees/<phase>` so multiple agents can work in
+parallel without file conflicts. The pattern is:
+
+```mermaid
+flowchart LR
+    P[Parent / orchestrator] -->|"spawn (no Bash)"| I1[Implementer A]
+    P -->|"spawn (no Bash)"| I2[Implementer B]
+    P -->|"spawn (no Bash)"| I3[Implementer C]
+    I1 --> WT1[("wt-A/")]
+    I2 --> WT2[("wt-B/")]
+    I3 --> WT3[("wt-C/")]
+    WT1 --> R[Reviewer agent]
+    WT2 --> R
+    WT3 --> R
+    R -->|"findings only"| P
+    P -->|"runs tests + applies fixes"| WT1
+    P -->|"runs tests + applies fixes"| WT2
+    P -->|"runs tests + applies fixes"| WT3
+    P -->|"git merge --no-ff"| Main[refactor/driftpilot-operator]
+```
+
+### Agent assignment
+
+| Wave | Phase | Worktree | Branch | Scope |
+|---|---|---|---|---|
+| 1 | 0.5 | `wt-typeddicts` | `v2/typeddicts` | NEW `signals/<name>/signal_state.py` (4 files) + cast in each `exits.py` |
+| 1 | C | `wt-regime` | `v2/regime-detector` | NEW `regime_detector.py` + tests |
+| 1 | G | `wt-midprice-wiring` | `v2/midprice-fill-wiring` | Edit `replay.py` + `metrics.py` + tests |
+| 2 | B | `wt-emergency-stop` | `v2/emergency-stop` | NEW `operator_control.py` + `state_machine.py` + FastAPI + frontend STOP |
+| 2 | A | `wt-event-bus` | `v2/event-bus` | NEW `event_bus.py` + WebSocket endpoint + tape frontend |
+| 3 | D | `wt-router` | `v2/signal-router` | NEW `signal_router.py` + 3-mode API + dropdown |
+| 4 | E | `wt-frontend-integration` | `v2/frontend-integration` | Dashboard wiring (regime panel, dropdown, tape) |
+| 4 | F | `wt-docs` | `v2/docs` | `docs/` runbook + diagrams |
+
+Wave 1 runs concurrently — no shared files. Wave 2 also concurrent.
+Wave 3 starts when C is merged. Wave 4 when A/B/D are merged.
+
+### Implementer agent rules
+
+1. **No Bash.** Write/Edit/Read only. Parent runs tests + commits.
+2. **Stay in your worktree path.** Don't read or write outside it.
+3. **Reuse Phase 0 contracts** (`BlockedReason`, `Candidate`,
+   `ExitDecision`, `signal_state` opaque dict). Don't redefine.
+4. **Add tests.** Every new module needs at least one happy-path
+   test plus one edge-case test. Tests go under `tests/` mirroring
+   the source path.
+5. **Commit message format:** `v2-<phase>: <module> - <change>`.
+   *Implementers do not commit themselves; this is for the parent's
+   final commit message.*
+6. **Stop condition:** respond with the list of files written + any
+   open questions. The reviewer reads from those files.
+
+### Reviewer agent rules
+
+1. **No Bash.** Reads worktrees, applies the code-review skill criteria
+   (engineering:code-review), reports findings only.
+2. **Per-worktree report** with: shipped vs spec gaps, test coverage
+   gaps, type-safety issues, hard-rules compliance (timezone-aware
+   datetimes, no silent except, no new deps without justification),
+   one-line "ship as-is" / "ship after these fixes" / "back to
+   implementer" verdict.
+3. **Parent (me) acts on findings:** runs `pytest -q` against each
+   worktree, applies fixes if reviewer flags them, commits with the
+   `v2-<phase>:` prefix once green, then merges via `git merge --no-ff`
+   into `refactor/driftpilot-operator`.
+4. **Reviewer never commits or merges.**
+
+### Why this pattern
+
+- **Parallelism without conflicts** — worktrees physically separate file
+  modifications. Conflicts only at merge, only on shared files
+  (`signals/__init__.py`, `state_machine.py`).
+- **Review before commit** — code never lands on the integration branch
+  without a review pass. The reviewer is structurally separate from the
+  implementer (no incentive to wave its own code through).
+- **Parent owns the safety boundary** — `pytest`, `git`, and any
+  destructive op runs only as the parent. Subagents can't accidentally
+  break the integration branch even if Bash is granted.
+- **Failure is bounded** — if an implementer fails (denied Bash, usage
+  limit, etc.), only its worktree is affected. The other waves' work
+  remains intact.
+
+---
+
 ## Status: DRAFT
 
 Awaiting user approval before implementation. Suggested first phase to
