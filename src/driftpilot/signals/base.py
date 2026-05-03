@@ -11,7 +11,7 @@ Every signal under `driftpilot.signals.<name>/` must:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Mapping, Protocol, Sequence, runtime_checkable
+from typing import Any, Mapping, Protocol, Sequence, TypeVar, cast, runtime_checkable
 
 from driftpilot.signals.features import DEFAULT_RVOL_LOOKBACK, MinuteBar, Quote
 from driftpilot.signals.regime import RegimeSnapshot
@@ -128,6 +128,22 @@ def signal_required_history_minutes(signal: object) -> int:
     return int(method() if callable(method) else method)
 
 
+_SignalStateT = TypeVar("_SignalStateT")
+
+
+def typed_signal_state(position: object, signal_state_cls: type[_SignalStateT]) -> _SignalStateT:
+    """Return position.metadata cast to the signal-specific TypedDict.
+
+    Runtime no-op (the cast is type-only). Lets signal `evaluate_exit`
+    bodies do `state = typed_signal_state(position, ApexHunterState)`
+    and get mypy checking on subsequent state[...] accesses. The
+    underlying `dict[str, Any]` is unchanged at runtime.
+    """
+
+    metadata = getattr(position, "metadata")
+    return cast(_SignalStateT, metadata)
+
+
 __all__ = [
     "BlockedReason",
     "Candidate",
@@ -138,4 +154,5 @@ __all__ = [
     "no_exit_decision",
     "signal_data_dependencies",
     "signal_required_history_minutes",
+    "typed_signal_state",
 ]
