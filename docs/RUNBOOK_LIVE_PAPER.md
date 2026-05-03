@@ -196,11 +196,60 @@ In the log:
 
 ---
 
-## End of day (4:00 ET)
+## End of day (4:00 ET) — full audit
 
-```
+```bash
 kill $(cat logs/operator.pid) && rm logs/operator.pid
+
+# Full audit: per-position chain (catalyst event → order → fill → exit → PnL)
+# plus aggregate metrics + Alpaca ground-truth + catalyst event volume
+./.venv/bin/python scripts/analyze_paper_trading_day.py --include-alpaca-snapshot
 ```
+
+This prints:
+
+1. **Per-position chain** for every position opened today:
+   - The catalyst event that triggered it (sentiment, headline, age at entry)
+   - The order submission (limit price, broker_order_id)
+   - The exit (reason, realized PnL, hold time)
+
+2. **Aggregate summary** in the same shape as the backtest reports:
+   - trades, win rate, breakeven, edge_ratio, total realized PnL
+   - exit_reasons breakdown (profit_take / time_stop / stop_loss)
+   - by_catalyst_sentiment breakdown
+
+3. **Alpaca ground-truth snapshot** (with `--include-alpaca-snapshot`):
+   - account equity, buying power, open positions
+
+4. **Catalyst event volume** for the day (top 20 by count) — to compare
+   the news flow against trade activity.
+
+### What every log line tells you (grep cheatsheet)
+
+```bash
+# Every event published to the bus, with sentiment + headline
+grep "EVENT " logs/operator_*.log
+
+# Every candidate the scanner emitted (admitted by signal + sentiment gate)
+grep "CANDIDATE " logs/operator_*.log
+
+# Every paper buy submitted
+grep "LIVE: submitting paper buy" logs/operator_*.log
+
+# Every position opened (with broker_order_id)
+grep "LIVE: position opened" logs/operator_*.log
+
+# Every signal-driven exit
+grep "LIVE: signal requests exit" logs/operator_*.log
+
+# Every error
+grep -E "ERROR|Traceback" logs/operator_*.log
+```
+
+If a candidate did NOT become a position, look back to:
+1. `LIVE: entry not submitted — reason=quote_unavailable` (broker rejected)
+2. `LIVE: entry submission failed` (Alpaca API error)
+3. SlotAllocator `BlockedReason` (sector cap, dup symbol, daily cap, catalyst_negative)
 
 Then:
 ```
