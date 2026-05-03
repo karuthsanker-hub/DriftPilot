@@ -512,22 +512,22 @@ def replay_bars(
     # tests and intraday-momentum callers leave it None (preserve old
     # behavior).
     cap: int | None = history_cap_minutes
-    # Per-month progress checkpoints so a silent OOM-kill leaves a trace of
-    # how far the replay got. Only fires when the harness sees real activity
-    # (i.e. `_log` prints to stdout, captured by nohup'd log files).
-    _last_logged_month: tuple[int, int] | None = None
+    # Per-DAY progress checkpoints so a silent OOM-kill leaves a trace of
+    # how far the replay got. ~252 trading days/year = 252 lines, manageable.
+    # Per-month was too sparse — a stuck January gives zero diagnostic.
+    _last_logged_day: date | None = None
     _timestamps_seen = 0
     for timestamp, rows in normalized.groupby("timestamp", sort=True):
         current_time = _as_aware_datetime(timestamp)
         _timestamps_seen += 1
-        month_key = (current_time.year, current_time.month)
-        if month_key != _last_logged_month:
+        day_key = current_time.date()
+        if day_key != _last_logged_day:
             _log(
-                f"replay_bars: entering {current_time.date()} "
-                f"({_timestamps_seen:,} bars processed, "
-                f"{len(trades)} trades closed, equity ${equity:,.2f})"
+                f"replay_bars: entering {day_key} "
+                f"({_timestamps_seen:,} bars seen, "
+                f"{len(trades)} trades closed, {len(positions)} open, equity ${equity:,.2f})"
             )
-            _last_logged_month = month_key
+            _last_logged_day = day_key
         latest_by_symbol: dict[str, MinuteBar] = {}
         for row in rows.to_dict("records"):
             bar = _row_to_bar(row)
