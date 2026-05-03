@@ -2,6 +2,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from dataclasses import dataclass
 from typing import Literal
 
@@ -23,23 +24,42 @@ _DEFAULT = EnrichmentResult(sentiment="neutral", priority_modifier=0.0, horizon_
 _VALID_HORIZONS = {60, 240, 1440, 2880}
 _VALID_SENTIMENTS = {"positive", "negative", "neutral"}
 
+# Qwen3 is a "thinking" model: responses come wrapped in <think>...</think>{json}.
+# We disable thinking via the /no_think tag and strip any residual block.
+_THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", flags=re.DOTALL)
+# Find the first JSON object in the response (after any think block).
+_JSON_OBJECT_RE = re.compile(r"\{[^{}]*\}", flags=re.DOTALL)
+
+
+def _strip_thinking_and_extract_json(content: str) -> str:
+    """Strip Qwen3 <think>...</think> wrapper and return the first JSON object substring."""
+    cleaned = _THINK_BLOCK_RE.sub("", content).strip()
+    match = _JSON_OBJECT_RE.search(cleaned)
+    return match.group(0) if match else cleaned
+
 
 class QwenEnricher:
     def __init__(
         self,
         base_url: str = "http://192.168.1.166:8000/v1",
         model: str = "qwen",
-        timeout_ms: int = 500,
+        # Realistic for Qwen3-8B with /no_think on DGX: cold ~2s, warm ~0.5s.
+        # 3000ms gives margin without making the news pipeline stall.
+        timeout_ms: int = 3000,
+        max_tokens: int = 128,
         client: httpx.AsyncClient | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._model = model
         self._timeout_s = timeout_ms / 1000.0
+        self._max_tokens = max_tokens
         self._client = client  # injected for tests; if None, create per-call
 
     async def enrich(self, headline: str, category: str, subcategory: str) -> EnrichmentResult:
+        # /no_think tells Qwen3 to emit an empty <think></think> block.
         prompt = (
-            "Classify this financial headline. Return JSON with keys "
+            "/no_think Classify this financial headline. Return ONLY a JSON object "
+            "(no prose, no markdown) with keys "
             "'sentiment' (positive/negative/neutral), "
             "'priority_modifier' (float in [-0.2, +0.2] reflecting headline strength), "
             "'horizon_override' (one of 60, 240, 1440, 2880 if the default category horizon "
@@ -57,6 +77,7 @@ class QwenEnricher:
                             "model": self._model,
                             "messages": [{"role": "user", "content": prompt}],
                             "temperature": 0.0,
+                            "max_tokens": self._max_tokens,
                         },
                     ),
                     timeout=self._timeout_s,
@@ -71,7 +92,8 @@ class QwenEnricher:
 
             payload = resp.json()
             content = payload["choices"][0]["message"]["content"]
-            data = json.loads(content)
+            json_str = _strip_thinking_and_extract_json(content)
+            data = json.loads(json_str)
             return self._parse(data)
         except (asyncio.TimeoutError, httpx.RequestError, KeyError, json.JSONDecodeError, ValueError) as exc:
             logger.warning("qwen enrichment failed (%s): %s", type(exc).__name__, str(exc)[:120])
