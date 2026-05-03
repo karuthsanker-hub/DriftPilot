@@ -38,7 +38,9 @@ class _Position:
 @pytest.mark.asyncio
 async def test_signal_protocol_compliance() -> None:
     bus = CatalystEventBus()
-    cfg = EarningsReportConfig()
+    # Protocol compliance test exercises the API surface, not the sentiment
+    # gate. require_sentiment=None matches the spike's behavior.
+    cfg = EarningsReportConfig(require_sentiment=None)
     sig = EarningsReportSignal(cfg, bus)
     await sig.subscribe()
 

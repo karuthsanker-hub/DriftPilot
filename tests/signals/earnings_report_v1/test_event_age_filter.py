@@ -29,7 +29,10 @@ def _event(symbol: str, ts: datetime) -> CatalystEvent:
 @pytest.mark.asyncio
 async def test_stale_events_do_not_produce_candidates() -> None:
     bus = CatalystEventBus()
-    cfg = EarningsReportConfig(max_event_age_minutes=60)
+    # require_sentiment=None so this test exercises ONLY the age filter
+    # (the production default require_sentiment="positive" is covered by
+    # tests/signals/earnings_report_v1/test_sentiment_gate.py).
+    cfg = EarningsReportConfig(max_event_age_minutes=60, require_sentiment=None)
     sig = EarningsReportSignal(cfg, bus)
     await sig.subscribe()
 
