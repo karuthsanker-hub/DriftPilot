@@ -1,0 +1,249 @@
+# DriftPilot Refactor Plan v3 — Catalyst-Driven Selection Layer
+
+Status: **DRAFT, gated on spike**. Date: 2026-05-03.
+
+## Why this exists
+
+The v1.1 backtests on 2024 data showed all 4 locked-spec signals failing
+with `edge_ratio < 1.1`. The first signal to land (RS-Drift) had **76.8%
+of trades with peak unrealized gain < 0.25%** — three quarters of selected
+stocks didn't move at all during the trade. This is the signature of
+"chasing tails": picking on technical thresholds in a 1500-symbol
+universe where most names are doing nothing on any given day, then
+getting noise-mined.
+
+The fix is to add a layer ABOVE the technical signals that constrains
+the universe to stocks where **something is happening** (earnings,
+product launches, macro shocks, sector disruptions). Technical signals
+operate unchanged on this smaller, higher-quality universe.
+
+## Hard architectural rules (from the design conversation)
+
+These were debated and locked in before any code is written.
+
+1. **Catalyst is a UNIVERSE FILTER + QUEUE PRIORITY input. NOT an entry-rule modifier.**
+   - Wrong: "Apex Hunter lowers its R² threshold from 0.35 to 0.25 when a catalyst is present"
+   - Right: "Apex Hunter only ever sees the 50 stocks that had a catalyst in the last 4 hours; its R² threshold stays at 0.35"
+   - Reason: parameter-coupling-on-catalyst is human bias. Bots should not "trade more eagerly when the news looks good." The signals' thresholds were chosen on price patterns; preserve that.
+
+2. **Catalyst exits are BACKUP to technical exits, NOT replacements.**
+   - Wrong: "Catalyst-flagged position bypasses the price stop and exits immediately on classification"
+   - Right: "Catalyst-flagged position has its technical stop *tightened* (e.g., halve the stop distance). Exit still happens on the price trigger, just sooner."
+   - Reason: news latency >> price latency. By the time we classify the headline, the price has already moved. The technical stop is faster than the news handler. Catalyst speeds up the existing stop; it does not race it.
+
+3. **Sentiment is per-symbol-pair, not per-symbol-only.**
+   - A tornado destroying Home Depot warehouses is **negative HD** AND **positive LOW** AND **positive BLDR/heavy-equipment**.
+   - Binary "positive/negative" on the primary symbol misses the second-order alpha plays that v3's tier 4 ("Alpha — Disaster Recovery") explicitly wants to capture.
+   - Data model carries `primary_symbol`, `primary_impact`, `secondary_impacts: dict[symbol → impact]`.
+
+4. **Macro events are SCHEDULED, not streamed. They live in a separate service.**
+   - FOMC, CPI, jobs prints, etc. come from an economic calendar (months in advance).
+   - News stream is for unscheduled events (earnings surprises, product launches, disasters).
+   - Two services, one event bus, one classifier downstream.
+
+5. **Catalyst freshness > catalyst category.**
+   - A 6-hour-old earnings beat is mostly priced in.
+   - A 60-second-old fire is not.
+   - Every catalyst carries a `freshness_seconds` field; effect score decays as
+     `score = base × exp(-age_minutes / half_life)` where half-life depends on
+     category (news shocks: 30 min; earnings: 4 hours; product launches: 24 hours).
+
+6. **Catalyst layer ships ONLY after the spike validates the hypothesis.**
+   - If `scripts/catalyst_hypothesis_spike.py` returns verdict `ALIVE`, build.
+   - If `MARGINAL`, build with caution and explicit assumption-tracking.
+   - If `DEAD`, do not build. The strategy needs a different fix (entry-quality
+     work, walk-forward periods, smaller universe, etc.).
+
+## The four discovery engines
+
+| Tier | Examples | Source | Effect on system |
+|---|---|---|---|
+| **Micro (corporate)** | Earnings surprise, product launch, FDA approval, warehouse fire | Alpaca News stream | (a) Add affected symbol(s) to candidate universe with priority boost; (b) tighten stop on existing positions in affected symbols |
+| **Meso (sector)** | "Claude AI disrupts SaaS leaders", new sector regulation | Alpaca News + sector classifier | Freeze new entries in the affected sector for 60 min; existing positions tightened |
+| **Macro (global)** | FOMC, CPI print, jobs report, presidential address | Economic calendar API + ad hoc news | Force regime to RED (or new HALTED_MACRO state); block all new entries; existing exits proceed |
+| **Alpha (disaster)** | Tornado, hurricane, flood, supply chain disruption | News stream + secondary-impact classifier | Auto-promote recovery-play symbols (e.g., LOW/BLDR after HD warehouse fire) to top of queue |
+
+## Architecture
+
+```mermaid
+flowchart LR
+    subgraph "External"
+        AlpacaNews["Alpaca News<br/>WebSocket + REST"]
+        EconCal["Economic Calendar<br/>(future: Trading Economics / FRED)"]
+    end
+
+    subgraph "v3 Catalyst Layer"
+        Sieve["catalyst/sieve.py<br/>(news fetch + classify)"]
+        EconWatcher["catalyst/econ_watcher.py<br/>(scheduled events)"]
+        Classifier["catalyst/classifier.py<br/>(tier + sentiment + freshness)"]
+        Cache["catalyst/cache.py<br/>(in-memory + SQLite)"]
+    end
+
+    subgraph "Existing v1/v2 Runtime"
+        Allocator["execution/<br/>SlotAllocator"]
+        SigProto["signals/<br/>5 algos"]
+        StateMachine["state_machine.py"]
+        Router["signal_router.py<br/>(v2 Phase D)"]
+    end
+
+    AlpacaNews --> Sieve
+    EconCal --> EconWatcher
+    Sieve --> Classifier
+    EconWatcher --> Classifier
+    Classifier --> Cache
+    Cache --> Allocator
+    Cache --> SigProto
+    Cache --> StateMachine
+    Cache --> Router
+
+    Allocator -->|"priority queue"| SigProto
+    SigProto -->|"unchanged"| Allocator
+    Router -->|"regime + envelope + catalyst"| SigProto
+```
+
+Key flow: catalyst data is INJECTED via the cache. Signals receive it as
+optional context (`catalyst_context: Mapping[str, EventData]` in the
+SignalProtocol scan signature). They MAY use it to skip symbols not in
+the catalyst set; they MUST NOT use it to lower their own thresholds.
+
+## Three infrastructure pieces (only after spike passes)
+
+### A. SQLite schema (`storage/schema.sql`)
+
+```sql
+CREATE TABLE catalyst_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol TEXT NOT NULL,
+    tier TEXT NOT NULL,             -- "micro" | "meso" | "macro" | "alpha"
+    primary_impact TEXT NOT NULL,   -- "positive" | "negative" | "neutral"
+    confidence REAL NOT NULL,       -- 0-1
+    freshness_seconds INTEGER NOT NULL,
+    half_life_seconds INTEGER NOT NULL,
+    headline TEXT NOT NULL,
+    source TEXT NOT NULL,           -- "alpaca_news" | "econ_calendar" | etc.
+    occurred_at TEXT NOT NULL,      -- ISO-8601 tz-aware
+    ingested_at TEXT NOT NULL,
+    secondary_impacts_json TEXT NOT NULL DEFAULT '{}'  -- {symbol: impact}
+);
+
+CREATE INDEX idx_catalyst_symbol_time ON catalyst_events(symbol, occurred_at DESC);
+CREATE INDEX idx_catalyst_tier_time ON catalyst_events(tier, occurred_at DESC);
+
+ALTER TABLE candidate_queue ADD COLUMN priority_score REAL DEFAULT 0.0;
+ALTER TABLE candidate_queue ADD COLUMN catalyst_event_id INTEGER REFERENCES catalyst_events(id);
+```
+
+### B. SignalProtocol extension (`signals/base.py`)
+
+Optional, opt-in field:
+
+```python
+@dataclass(frozen=True, slots=True)
+class CatalystContext:
+    """What signals see in their scan() call. Read-only."""
+    by_symbol: Mapping[str, list["CatalystEvent"]]
+    sector_freezes: frozenset[str]      # sectors with active freeze
+    macro_halt: bool                     # if True, block all new entries
+
+@runtime_checkable
+class SignalProtocol(Protocol):
+    @property
+    def name(self) -> str: ...
+    @property
+    def version(self) -> str: ...
+
+    def scan(
+        self,
+        symbol_bars: Mapping[str, list[MinuteBar]],
+        quotes: Mapping[str, Quote],
+        spy_bars: list[MinuteBar],
+        *,
+        rvol_lookback: int = DEFAULT_RVOL_LOOKBACK,
+        catalyst: CatalystContext | None = None,   # NEW (optional)
+    ) -> tuple[RegimeSnapshot, Sequence[Any]]: ...
+```
+
+Existing signals ignore `catalyst` (default `None`). New catalyst-aware
+signals filter their candidate set to `catalyst.by_symbol.keys()`.
+
+### C. State machine: HALTED_MACRO (NOT CATALYST_EXIT)
+
+After the design discussion: instead of `CATALYST_EXIT` (which races
+the price-based exits), introduce `HALTED_MACRO` for tier-3 macro
+events. Behavior:
+- Block ALL new entries
+- Allow existing exits to proceed
+- Surface in dashboard with the triggering event
+- Auto-clear after configurable window (e.g., 60 min after FOMC) OR
+  operator manual clear
+
+Tier-1 micro events (warehouse fire on a single name) DO NOT trigger
+state changes. They tighten the affected position's technical stop;
+the position still exits on the price trigger.
+
+## Sequence of work (gated on spike)
+
+| Step | Description | Effort | Trigger |
+|---|---|---|---|
+| **0** | Run `catalyst_hypothesis_spike.py` | 30 min | now |
+| 1 | If spike says ALIVE: write SQLite schema + migration test | 1d | spike result |
+| 2 | catalyst/sieve.py — Alpaca News REST poller (start with REST, upgrade to WebSocket later) | 1d | step 1 |
+| 3 | catalyst/classifier.py — categorize tier + sentiment with simple keyword rules first | 1.5d | step 2 |
+| 4 | catalyst/cache.py — in-memory + SQLite-backed catalyst lookup | 0.5d | step 3 |
+| 5 | SignalProtocol extension + opt-in for one signal (Apex Hunter) | 1d | step 4 |
+| 6 | Backtest harness wiring — feed historical news into replay_bars as catalyst_context | 1.5d | step 5 |
+| 7 | Re-run Apex Hunter on 2024 with + without catalyst filter; compare verdicts | 1d | step 6 |
+| 8 | If catalyst-filtered Apex passes: extend to other signals | 2-3d | step 7 |
+| **Total** | | **~10 days** | only after spike |
+
+## What the spike answers (and what it doesn't)
+
+`scripts/catalyst_hypothesis_spike.py`:
+- Pulls Alpaca News for ~20 high-volume names across 2024-Q1
+- For each news event timestamp, computes |return| at +30/+60/+120 min
+- Computes baseline: random non-catalyst minutes, same forward windows
+- Reports ratio: post-catalyst movement / baseline movement
+
+Verdicts:
+- `ALIVE` (ratio_60m ≥ 2.0 AND p1pct_catalyst ≥ 2× p1pct_baseline) → build
+- `DEAD` (ratio_60m < 1.5 OR p1pct_catalyst < 1.2× p1pct_baseline) → don't build, look elsewhere
+- `MARGINAL` → build with caution and explicit assumption tracking
+
+The spike CANNOT answer:
+- Whether catalyst-filtering improves a specific signal's edge_ratio (need full backtest)
+- Whether news classification is accurate enough (sentiment is hard)
+- Whether the architecture scales to live trading
+
+It CAN answer the cheapest question: do stocks with catalyst news move
+materially more than stocks without? If no, no architecture saves us.
+If yes, the rest of the plan is worth executing.
+
+## Out of scope for v3
+
+- LLM-based classification (use simple keyword rules first; LLM is v4)
+- Real-time news WebSocket (start with REST polling at 60s; WebSocket is post-v3)
+- Catalyst-aware portfolio allocation across multiple signals (v4)
+- Cross-asset catalysts (oil, FX, crypto influence on equities)
+- Sentiment confidence calibration against external sources
+
+## Hard rules (consistent with v1/v2)
+
+1. Datetimes timezone-aware via `driftpilot.clock`.
+2. No new dependencies without one-line justification in `pyproject.toml`.
+   `alpaca-py` is already a dep; news client is part of it. No new install.
+3. No silent except blocks in catalyst code.
+4. Every classification decision writes a row to `catalyst_events`. Audit trail.
+5. Sentiment classification is testable; bring fixtures + unit tests for the
+   keyword rules.
+6. Read-only API endpoints stay read-only; only `/api/admin/*` writes.
+7. Tests pass before each phase ships.
+
+## Status: DRAFT pending spike
+
+Run order:
+1. `python3 scripts/catalyst_hypothesis_spike.py` — 30 min
+2. Read `reports/catalyst_spike.json`
+3. If `verdict == "ALIVE"`: implementation begins per the table above.
+4. If `verdict == "DEAD"`: this doc stays as a record of the design
+   discussion but no code lands. Energy goes to entry-quality work
+   (RS threshold sweeps, sector breadth filters, walk-forward periods).
