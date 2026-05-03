@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Protocol
 
+from driftpilot.catalyst.universe_filter import CatalystUniverseFilter
 from driftpilot.clock import DriftPilotClock, datetime_to_storage, require_aware
 from driftpilot.execution.slot_allocator import AllocationCandidate, AllocationResult
 from driftpilot.settings import DriftPilotSettings
@@ -109,6 +110,7 @@ class DriftPilotStateMachine:
         allocator: AllocatorService | None = None,
         position_monitor: PositionMonitorService | None = None,
         catalyst_event_bus: CatalystEventBusProtocol | None = None,
+        catalyst_universe_filter: CatalystUniverseFilter | None = None,
     ) -> None:
         self.repository = repository
         self.settings = settings
@@ -119,12 +121,40 @@ class DriftPilotStateMachine:
         self.allocator = allocator
         self.position_monitor = position_monitor
         self.catalyst_event_bus = catalyst_event_bus
+        self.catalyst_universe_filter = catalyst_universe_filter
+        # TODO(operator-runtime): the SCANNING-state scanner pipeline currently
+        # encapsulates symbol selection inside `ScannerService.scan()`. The
+        # operator runtime should construct the scanner with this same
+        # `catalyst_universe_filter` so that the technical signals
+        # (apex_hunter, rs_drift, whale_tail, stationary_ghost) receive the
+        # filtered+ranked universe BEFORE invoking their `scan(symbol_bars=...)`
+        # entry points. The catalyst signals (earnings_report_v1,
+        # analyst_target_raise_v1) MUST NOT be passed through this filter --
+        # they read candidates from the catalyst event bus, not from a
+        # universe scan. See `apply_universe_filter()` below for the hook used
+        # by tests and runtime wiring.
         self._booted = False
         self._error_count = 0
         self._catalyst_subscription_id: str | None = None
         # TODO(operator-runtime): if `catalyst_event_bus` is None at construction
         # time, the operator runtime should call `await self.subscribe_to_catalyst_bus(bus)`
         # at startup so that analyst/target_cut events drive EMERGENCY_FLUSH.
+
+    def apply_universe_filter(self, symbols: list[str]) -> list[str]:
+        """Apply the catalyst universe filter to a list of symbols.
+
+        Hook used by the SCANNING state (and the operator-runtime scanner
+        wiring) to filter+rank the universe seen by the FOUR technical
+        signals (apex_hunter, rs_drift, whale_tail, stationary_ghost).
+
+        IMPORTANT: do NOT call this for catalyst signals
+        (earnings_report_v1, analyst_target_raise_v1). Those signals receive
+        their candidates from the catalyst event bus and must not be
+        subjected to the universe filter.
+        """
+        if self.catalyst_universe_filter is None:
+            return symbols
+        return self.catalyst_universe_filter.filter_and_rank(symbols)
 
     async def subscribe_to_catalyst_bus(
         self, bus: CatalystEventBusProtocol | None = None
