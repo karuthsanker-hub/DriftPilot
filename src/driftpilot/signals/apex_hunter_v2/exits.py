@@ -62,7 +62,13 @@ def evaluate_exit(position: Any, latest_bar: MinuteBar, settings: Any) -> ExitDe
       6. Stage transitions (one-way), then re-apply ratchet rule with new mult.
       7. Persist + return no-exit.
     """
-    md: dict[str, Any] = position.metadata
+    # Refactor v2 Phase 0.5: typed view on position.metadata so mypy
+    # catches typos like `md["rachet_stage"]` at type-check time. The
+    # cast is a runtime no-op — `md` is the same dict as
+    # `position.metadata`. Mutations propagate back unchanged.
+    from driftpilot.signals.apex_hunter_v2.signal_state import ApexHunterState
+    from driftpilot.signals.base import typed_signal_state
+    md: ApexHunterState = typed_signal_state(position, ApexHunterState)
     entry_price = float(position.entry_price)
     close = float(latest_bar.close)
 
