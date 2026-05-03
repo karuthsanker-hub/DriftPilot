@@ -231,36 +231,51 @@ def _fetch_news(
 
     client = NewsClient(api_key=api_key, secret_key=secret_key)
 
-    # Alpaca News doesn't accept a single huge symbol list well; chunk to 5 per request.
+    # Alpaca News: NewsSet.data is {"news": [News, ...]} per symbol-chunk request.
+    # Chunk symbols to 5/request; paginate via next_page_token until exhausted.
     out: list[dict] = []
+    symbols_set = set(symbols)
     for chunk_start in range(0, len(symbols), 5):
         chunk = symbols[chunk_start: chunk_start + 5]
-        request = NewsRequest(
-            symbols=chunk,
-            start=datetime(start.year, start.month, start.day, tzinfo=UTC),
-            end=datetime(end.year, end.month, end.day, 23, 59, 59, tzinfo=UTC),
-            limit=50,
-            include_content=False,
-        )
-        try:
-            page = client.get_news(request)
-        except Exception as exc:  # alpaca-py raises a variety of types
-            print(f"[spike] WARN: news pull failed for {chunk}: {exc}")
-            continue
-        # alpaca-py returns NewsSet; iterate articles
-        articles = getattr(page, "data", None) or getattr(page, "news", None) or page
-        for article in articles or []:
-            tagged = getattr(article, "symbols", None) or chunk
-            created_at = getattr(article, "created_at", None) or getattr(article, "updated_at", None)
-            if created_at is None:
-                continue
-            for sym in tagged:
-                if sym in symbols:
-                    out.append({
-                        "symbol": sym,
-                        "at": created_at,
-                        "headline": (getattr(article, "headline", "") or "")[:200],
-                    })
+        page_token: str | None = None
+        pages_fetched = 0
+        while True:
+            request = NewsRequest(
+                symbols=",".join(chunk),
+                start=datetime(start.year, start.month, start.day, tzinfo=UTC),
+                end=datetime(end.year, end.month, end.day, 23, 59, 59, tzinfo=UTC),
+                limit=50,
+                include_content=False,
+                page_token=page_token,
+            )
+            try:
+                result = client.get_news(request)
+            except Exception as exc:
+                print(f"[spike] WARN: news pull failed for {chunk}: {exc}")
+                break
+            data = getattr(result, "data", None) or {}
+            articles = data.get("news") if isinstance(data, dict) else None
+            if not articles:
+                break
+            for article in articles:
+                tagged = getattr(article, "symbols", None) or []
+                created_at = getattr(article, "created_at", None) or getattr(article, "updated_at", None)
+                if created_at is None:
+                    continue
+                # An article is relevant if any of its tagged symbols is in our universe;
+                # we attribute the timestamp to that symbol.
+                for sym in tagged:
+                    if sym in symbols_set:
+                        out.append({
+                            "symbol": sym,
+                            "at": created_at,
+                            "headline": (getattr(article, "headline", "") or "")[:200],
+                        })
+            pages_fetched += 1
+            page_token = getattr(result, "next_page_token", None)
+            if not page_token or pages_fetched >= 40:
+                # Cap pages per chunk so we don't run forever on a long window.
+                break
     return out
 
 

@@ -238,12 +238,106 @@ If yes, the rest of the plan is worth executing.
 6. Read-only API endpoints stay read-only; only `/api/admin/*` writes.
 7. Tests pass before each phase ships.
 
-## Status: DRAFT pending spike
+## Spike result (2026-05-03): DEAD on the simple test
 
-Run order:
-1. `python3 scripts/catalyst_hypothesis_spike.py` — 30 min
-2. Read `reports/catalyst_spike.json`
-3. If `verdict == "ALIVE"`: implementation begins per the table above.
-4. If `verdict == "DEAD"`: this doc stays as a record of the design
-   discussion but no code lands. Energy goes to entry-quality work
-   (RS threshold sweeps, sector breadth filters, walk-forward periods).
+`scripts/catalyst_hypothesis_spike.py` ran on 20 high-volume symbols
+(AAPL, MSFT, NVDA, etc.) across 2024-Q1. Pulled 337 Alpaca News
+articles, computed forward |return| at +30/60/120 min for 242 usable
+catalyst samples vs 4,000 baseline samples. Saved to
+`reports/catalyst_spike.json`.
+
+| Metric | Catalyst | Baseline | Ratio |
+|---|---|---|---|
+| mean abs return 30m | 0.265% | 0.315% | **0.84** |
+| mean abs return 60m | 0.359% | 0.427% | **0.84** |
+| mean abs return 120m | 0.532% | 0.593% | 0.90 |
+| Pr(>1% move in 60m) | 7.85% | 8.20% | 0.96 |
+| Pr(>2% move in 60m) | 1.24% | 2.06% | **0.60** |
+
+**Verdict: DEAD.** Catalyst-tagged minutes move *less* than random
+non-news minutes on these symbols, not more. The result is robust —
+all three forward windows + both probability buckets point the same
+direction.
+
+### Why this happened (and why it doesn't kill the underlying intuition)
+
+Three explanations for why the simple test failed, ordered by
+likely contribution:
+
+1. **Article timestamp ≠ event timestamp.** Alpaca News timestamps the
+   article *publication*, not the underlying event. By the time an
+   AAPL 8-K filing is summarized in a news article, the price has
+   already moved on the actual filing release. Our forward window
+   from article-timestamp captures the post-event quietude, not
+   the pre-event volatility. Real fix: use the **announcement** time
+   from a structured source (earnings calendar, SEC EDGAR), not the
+   article publication time.
+
+2. **Baseline contamination by aftermath periods.** We excluded ±30
+   min around each catalyst article timestamp. But earnings reactions
+   play out across the next session's open (15+ hours after the
+   article). Many baseline samples land in those reactionary periods
+   and inadvertently capture the price action we should have
+   attributed to the catalyst. This inflates baseline. Real fix:
+   exclude the entire trading day for any symbol with any news that
+   day, or use a different baseline (random minutes on different
+   symbols).
+
+3. **News-then-mean-reversion on liquid names.** Even when an article
+   is contemporaneous with an event, the initial price spike on a
+   liquid large cap reverts within minutes. Forward returns from
+   article timestamp on AAPL/MSFT/NVDA likely show mean reversion =
+   smaller |return|. Real fix: test on mid/small caps where news
+   doesn't get arbitraged out within seconds.
+
+### What this finding does NOT prove
+
+- It does not prove that catalysts are useless. It proves that
+  "every Alpaca News article timestamp on a large-cap symbol"
+  doesn't predict elevated forward movement. That's a much narrower
+  claim than the underlying hypothesis.
+- It does not prove that the v3 architecture is wrong. The
+  universe-filter + queue-priority design is still correct in
+  principle if we get a meaningful catalyst signal. We just don't
+  have one from this source on this universe.
+
+### What this finding DOES tell us
+
+- The naive "stream all Alpaca News tagged for our universe" approach
+  will not improve signal performance. Building infrastructure on
+  top of it would be a 10-day commitment to a noise source.
+- A curated, schedule-aware catalyst source is needed before
+  re-testing. Candidates:
+  - **Earnings calendar** with confirmed announce timestamps (Polygon,
+    Finnhub, or scrape from EDGAR 8-K timestamps).
+  - **High-impact news subset** filtered by source (Reuters, Bloomberg
+    only) and by event type (M&A, FDA, regulatory) — would need a
+    different news vendor.
+  - **Mid/small-cap universe** where news has more durable price
+    impact.
+
+### Recommendation: do NOT build v3 as designed yet
+
+The plan's architecture is preserved. The implementation is paused
+until a curated catalyst source is identified and re-tested with the
+spike. Specifically:
+
+- ❌ Do not add the SQLite schema (`catalyst_events`, `priority_score`).
+- ❌ Do not extend `SignalProtocol` with a `catalyst` kwarg.
+- ❌ Do not add `HALTED_MACRO` to the state machine.
+- ✅ Do keep this document as the design record of the conversation.
+- ✅ Do refine the spike (`scripts/catalyst_hypothesis_spike.py`)
+   with an earnings-calendar source and re-run before any v3
+   implementation work.
+
+Energy in the meantime should go to:
+
+1. **Finishing v2 (live operator console + emergency stop + signal router)** — independent of catalyst layer, ships visible operator value.
+2. **Entry-quality work on existing signals** — RS threshold sweep, sector breadth filter, walk-forward train/test periods. These don't require catalyst data and address the same "chasing tails" problem from a different angle.
+3. **Curated-catalyst spike v2** — once we have a structured source (earnings calendar at minimum), re-run the spike with announce-timestamp anchoring. If THAT verdict is ALIVE, then v3 implementation justifies itself.
+
+## Status: PAUSED on simple-spike DEAD verdict
+
+This document is preserved as a record of the design conversation
+and the surprising spike result. Implementation does not begin until
+a curated catalyst source is re-tested with positive verdict.
