@@ -82,6 +82,30 @@ def test_catalyst_layer_settings_round_trip(monkeypatch, tmp_path):
     assert s.catalyst_universe_lookback_minutes == 180
 
 
+def test_alpaca_api_key_alias_accepted(monkeypatch):
+    """ALPACA_API_KEY (alpaca-py docs naming) is accepted as alias for
+    ALPACA_KEY_ID. This is what most users have in their .env files."""
+    monkeypatch.delenv("ALPACA_KEY_ID", raising=False)
+    monkeypatch.setenv("ALPACA_API_KEY", "PKAPIKEYALIAS123")
+    monkeypatch.setenv("ALPACA_SECRET_KEY", "secret")
+
+    from driftpilot.settings import load_settings
+    s = load_settings(env_path=None, environ=os.environ)
+    assert s.alpaca_key_id == "PKAPIKEYALIAS123"
+    assert s.alpaca_secret_key == "secret"
+
+
+def test_alpaca_key_id_takes_precedence_over_api_key(monkeypatch):
+    """If both are set, ALPACA_KEY_ID wins (canonical name)."""
+    monkeypatch.setenv("ALPACA_KEY_ID", "CANONICAL")
+    monkeypatch.setenv("ALPACA_API_KEY", "ALIAS")
+    monkeypatch.setenv("ALPACA_SECRET_KEY", "secret")
+
+    from driftpilot.settings import load_settings
+    s = load_settings(env_path=None, environ=os.environ)
+    assert s.alpaca_key_id == "CANONICAL"
+
+
 # ---------------------------------------------------------------------------
 # Bus → state machine subscription wiring
 # ---------------------------------------------------------------------------
