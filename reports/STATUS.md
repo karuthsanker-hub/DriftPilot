@@ -15,7 +15,7 @@ backtests done, and what did they say?"
 | `rs_drift_v1` | ✅ DONE | **FAIL** | 0.597 | 25.07% / 41.98% | 85,363 | −13.60% | [link](rs_drift_v1/20260503T131306Z_fail.json) |
 | `whale_tail_v1` | ✅ DONE | **FAIL** | 0.754 | 38.92% / 51.60% | 42,468 | −7.45% | [link](whale_tail_v1/20260503T132956Z_fail.json) |
 | `apex_hunter_v2_2` | ✅ DONE | **FAIL** | 0.527 | 21.64% / 41.09% | 104,267 | −16.50% | [link](apex_hunter_v2_2/20260503T143804Z_fail.json) |
-| `stationary_ghost_v1` | 🔄 running (PID 204009 on DGX, started 2026-05-03 10:45 ET) | TBD | — | — | — | — | — |
+| `stationary_ghost_v1` | ✅ DONE | **FAIL** | 0.763 | 38.87% / 50.93% | 36,733 | −5.13% | [link](stationary_ghost_v1/20260503T182448Z_fail.json) |
 
 `intraday_momentum_v1` (the reference signal) had its run completed in
 Phase 12 with verdict **FAIL** before this batch — see
@@ -146,11 +146,29 @@ restrict Apex to the 50-100 symbols/day with active catalyst, and the
 entry gate is doing its job on a population where acceleration actually
 means something.
 
-### `stationary_ghost_v1` — running
+### `stationary_ghost_v1` — FAIL (edge_ratio=0.763)
 
-Started 2026-05-03 10:45 ET on DGX (PID 204009, PPID=1, detached).
-Expected ETA ~15 min based on prior runs. Watch for the inverted-R:R
-failure (spec said needs ~75% win rate to PASS).
+**One-line:** mean-reversion-on-z-score-extension fired 36,733 times in
+2024; realized R:R 0.96 (winner +1.22% / loser −1.36%), 38.9% win-rate
+vs 50.9% breakeven. Same noise-mining shape as Whale-Tail.
+
+**Exit breakdown:**
+- TIME (25,417 / 69.2%) — avg PnL −0.11%, avg hold 161 min. **The
+  signature of every v1 signal: most trades drift nowhere and hit the
+  TIME stop at near-flat.** Stationary-Ghost is the "purest" version
+  of the failure — its z-score-extension thesis is supposed to be a
+  reversion bet, but reversion to a mean that isn't there leaves the
+  position floating until time runs out.
+- STOP (6,327 / 17.2%) — avg PnL −1.36%, avg hold 80 min.
+- TARGET (4,979 / 13.6%) — avg PnL +1.22%, avg hold 132 min.
+
+**Implication:** completes the v1 batch picture. **All 4 technical
+signals fail with the same pattern** on the raw 1500-symbol universe
+(see [reports/COMPARISON.md](COMPARISON.md)). Edge-ratio range 0.527-0.763,
+win-rate consistently ~half of breakeven. The diagnosis is unanimous:
+selection bottleneck. v3 catalyst layer landed on main today and is
+the test of the fix — re-run these 4 backtests on the filtered
+universe to see if the bottleneck moves.
 
 ---
 
@@ -178,3 +196,4 @@ Six fields, in order, tell you the story:
 ## Update log
 - 2026-05-03 09:15 ET — RS-Drift verdict FAIL captured, lessons written, status doc created.
 - 2026-05-03 10:45 ET — Whale-Tail and Apex Hunter verdicts FAIL captured. Cross-signal pattern is now clear: noise-mining on 1500-symbol universe. Stationary-Ghost re-kicked off (was never started in May 3 morning batch). [reports/COMPARISON.md](COMPARISON.md) drafted.
+- 2026-05-03 14:25 ET — Stationary Ghost verdict FAIL (edge_ratio=0.763). All 4 v1 backtests now complete. Same noise-mining pattern across all 4. v3 catalyst layer (PR #4-7) is the test of the fix — retrofit backtests pending.

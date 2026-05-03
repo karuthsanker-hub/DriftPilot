@@ -1,8 +1,9 @@
 # Cross-Signal Comparison — 2024 Full-Year Backtests
 
-**Date:** 2026-05-03. **Status:** 3 of 4 signals complete; Stationary
-Ghost is running on DGX (PID 204009). This doc will be updated when it
-lands. Sibling docs: [STATUS.md](STATUS.md), [REFACTOR_PLAN_V3_CATALYST_LAYER.md](../docs/REFACTOR_PLAN_V3_CATALYST_LAYER.md).
+**Date:** 2026-05-03. **Status:** all 4 v1 signals complete — all FAIL.
+v3 catalyst layer landed on main today (PR #4-7); next step is the
+retrofit backtests on the filtered universe. Sibling docs:
+[STATUS.md](STATUS.md), [REFACTOR_PLAN_V3_CATALYST_LAYER.md](../docs/REFACTOR_PLAN_V3_CATALYST_LAYER.md).
 
 ---
 
@@ -13,18 +14,21 @@ lands. Sibling docs: [STATUS.md](STATUS.md), [REFACTOR_PLAN_V3_CATALYST_LAYER.md
 | `rs_drift_v1` | **FAIL** | 0.597 | 25.07 | 41.98 | 1.38 | 85,363 | −13.60% | `fill_rate_pct` 1.0 (placeholder, pre-Phase G) |
 | `whale_tail_v1` | **FAIL** | 0.754 | 38.92 | 51.60 | 0.94 | 42,468 | −7.45% | `give_back_ratio` −0.41 (n/a, signal-agnostic) |
 | `apex_hunter_v2_2` | **FAIL** | 0.527 | 21.64 | 41.09 | 1.43 | 104,267 | −16.50% | `give_back_ratio` −0.30 |
-| `stationary_ghost_v1` | running | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
+| `stationary_ghost_v1` | **FAIL** | 0.763 | 38.87 | 50.93 | 0.96 | 36,733 | −5.13% | n/a |
 
 **Universal gate:** `edge_ratio ≥ 1.10` (FAIL otherwise). All three
 finished signals miss it. None ship to live paper.
 
 ---
 
-## The pattern across all three failures
+## The pattern across all FOUR failures
 
-Different entry models — relative strength (RS-Drift), compression-breakout
-(Whale-Tail), EWMLR acceleration (Apex Hunter) — produced the **same
-failure signature**:
+Stationary Ghost (mean-reversion on z-score extension) makes the
+diagnosis unanimous: four very different entry models produced the
+same shape. Different entry models — relative strength (RS-Drift),
+compression-breakout (Whale-Tail), EWMLR acceleration (Apex Hunter),
+mean-reversion (Stationary-Ghost) — produced the **same failure
+signature**:
 
 1. **The entry gates fire too often on the raw 1500-symbol universe.**
    - 85k / 42k / 104k trades over 252 trading days.
@@ -35,10 +39,12 @@ failure signature**:
    - RS-Drift: 73% at TIME / EOD with avg PnL near flat.
    - Whale-Tail: 59% at TIME with avg PnL −0.13%.
    - Apex Hunter: **66% via HARD_EXIT in 5.2 minutes** (entry-then-immediately-puked).
+   - Stationary-Ghost: **69% at TIME with avg PnL −0.11%** — the purest case.
 3. **Realized R:R is OK but win-rate is half of breakeven.**
    - RS-Drift R:R 1.38 needs 41.98% win — got 25.07%.
    - Whale-Tail R:R 0.94 needs 51.60% win — got 38.92%.
    - Apex     R:R 1.43 needs 41.09% win — got 21.64%.
+   - Ghost    R:R 0.96 needs 50.93% win — got 38.87%.
    - Stops are doing their job. Targets when hit are real wins.
      The bottleneck is **selection** — picking the wrong stocks.
 4. **`give_back_ratio` is negative on both signals where it's measured.**
@@ -101,8 +107,11 @@ These predictions become the v3 acceptance criteria.
 
 ## What ships now
 
-Nothing. None of the four signals passes the universal `edge_ratio ≥ 1.1`
-gate, so per the locked plan no signal proceeds to live paper.
+Nothing from the v1 batch. None of the four signals passes the universal
+`edge_ratio ≥ 1.1` gate, so per the locked plan no v1 signal proceeds
+to live paper. **The v3 catalyst layer is now on main** (PR #4-7,
+84/84 tests green) and is the test of whether selection-by-catalyst
+moves these edge ratios.
 
 What does ship is the **infrastructure**: backtest harness, signal
 contract, allocator, state machine, regime detector, mid-price fill
