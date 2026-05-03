@@ -1,7 +1,7 @@
 # Backtest Status — 2024 Full-Year Baselines
 
-Last update: 2026-05-03 09:15 ET. Live status doc — updated as each
-report lands. Source code: integration branch `refactor/driftpilot-operator`.
+Last update: 2026-05-03 10:45 ET. Live status doc — updated as each
+report lands. Source code: branch `main` (HEAD `4556564`).
 
 This doc is the single page to read when checking "are the v1 signal
 backtests done, and what did they say?"
@@ -13,9 +13,9 @@ backtests done, and what did they say?"
 | Signal | Status | Verdict | edge_ratio | Win rate / breakeven | Trades | Total return | Report |
 |---|---|---|---|---|---|---|---|
 | `rs_drift_v1` | ✅ DONE | **FAIL** | 0.597 | 25.07% / 41.98% | 85,363 | −13.60% | [link](rs_drift_v1/20260503T131306Z_fail.json) |
-| `whale_tail_v1` | 🔄 running | TBD | — | — | 34,588 (so far) | — | — |
-| `apex_hunter_v2_2` | 🔄 running | TBD | — | — | 44,828 (so far) | — | — |
-| `stationary_ghost_v1` | 🔄 running | TBD | — | — | 30,774 (so far) | — | — |
+| `whale_tail_v1` | ✅ DONE | **FAIL** | 0.754 | 38.92% / 51.60% | 42,468 | −7.45% | [link](whale_tail_v1/20260503T132956Z_fail.json) |
+| `apex_hunter_v2_2` | ✅ DONE | **FAIL** | 0.527 | 21.64% / 41.09% | 104,267 | −16.50% | [link](apex_hunter_v2_2/20260503T143804Z_fail.json) |
+| `stationary_ghost_v1` | 🔄 running (PID 204009 on DGX, started 2026-05-03 10:45 ET) | TBD | — | — | — | — | — |
 
 `intraday_momentum_v1` (the reference signal) had its run completed in
 Phase 12 with verdict **FAIL** before this batch — see
@@ -92,14 +92,65 @@ See [`signals/rs_drift_v1/README.md` § Counterfactual analysis](../src/driftpil
 
 Full lesson set + remediation list: [`src/driftpilot/signals/rs_drift_v1/README.md`](../src/driftpilot/signals/rs_drift_v1/README.md) § Lessons learned.
 
-### `whale_tail_v1` — pending
-ETA ~10 min. Signal fired aggressively (~34k trades by Oct 25). Equity at −$51k (~5× starting capital). Verdict pending; expected FAIL on edge_ratio.
+### `whale_tail_v1` — FAIL (edge_ratio=0.754)
 
-### `apex_hunter_v2_2` — pending
-ETA ~30 min (slowest — EWMLR per-cycle compute). Already at 44k trades by mid-June. Equity −$62k. Watch the Apex-specific `give_back_ratio` gate independently of edge_ratio.
+**One-line:** compression-then-breakout pattern fired 42,468 times in 2024;
+realized R:R collapsed to 0.94 (winner +1.20% / loser −1.36%) and only
+38.9% won, well below the 51.6% breakeven.
 
-### `stationary_ghost_v1` — pending
-ETA ~15 min. Signal at Nov 1 already, equity −$33k. Watch for the inverted-R:R failure (spec said needs ~75% win rate).
+**Exit breakdown:**
+- TIME (24,881 / 58.6%) — avg PnL −0.13%, avg hold 156 min. **Same
+  signature as RS-Drift: stocks pile into the TIME stop having drifted
+  nowhere.** The compression-breakout thesis didn't materialize the
+  majority of the time.
+- STOP (9,978 / 23.5%) — avg PnL −1.36%, avg hold 64 min. Healthy stop
+  cadence but the wins below don't pay for these losses.
+- TARGET (7,599 / 17.9%) — avg PnL +1.20%, avg hold 94 min.
+- `give_back_ratio` = −0.41 (negative because the average winner gave
+  back more than its peak unrealized — "let winners run" is leaving
+  money on the table).
+
+**Implication:** the signal is not catastrophically broken (closer to
+breakeven than RS-Drift / Apex), but absent a universe filter it is
+mining noise on the 1500-symbol universe. v3 catalyst layer should help
+disproportionately here — `whale_tail` works on directional follow-through,
+which is exactly what catalyst events generate.
+
+### `apex_hunter_v2_2` — FAIL (edge_ratio=0.527)
+
+**One-line:** EWMLR-acceleration entry produced 104,267 trades but **66%
+of them puke within 5.2 minutes via HARD_EXIT** — the entry condition
+is being met by noise that immediately invalidates.
+
+**Exit breakdown:**
+- HARD_EXIT (68,686 / 65.9%) — avg PnL −0.16%, **avg hold 5.2 min.** This
+  is the load-bearing diagnostic: two thirds of trades are entered and
+  immediately ejected by the HARD_EXIT (acceleration-failure invalidation).
+  The entry signal is over-firing on transient EWMLR slope events that
+  don't sustain.
+- TIME (20,848 / 20.0%) — avg PnL −0.12%, avg hold 174 min. Same
+  drifted-nowhere story.
+- STOP (7,744 / 7.4%) — avg PnL −1.29%, avg hold 56 min.
+- TARGET (6,376 / 6.1%) — avg PnL +1.18%, avg hold 104 min.
+- RATCHET_STOP (603 / 0.6%) — avg PnL −2.21%, avg hold 281 min. The
+  three-stage ratchet that was the Apex thesis fired on **0.6% of
+  trades**. Whatever Apex was supposed to capture, it's capturing
+  almost nothing.
+- `give_back_ratio` = −0.30 (negative, same direction as Whale-Tail).
+
+**Implication:** Apex's EWMLR entry threshold is too loose for the raw
+1500-symbol universe. The HARD_EXIT count is the smoking gun — a
+healthy entry signal would not produce 68k 5-minute round-trips.
+This is the *strongest* case for the v3 catalyst universe filter:
+restrict Apex to the 50-100 symbols/day with active catalyst, and the
+entry gate is doing its job on a population where acceleration actually
+means something.
+
+### `stationary_ghost_v1` — running
+
+Started 2026-05-03 10:45 ET on DGX (PID 204009, PPID=1, detached).
+Expected ETA ~15 min based on prior runs. Watch for the inverted-R:R
+failure (spec said needs ~75% win rate to PASS).
 
 ---
 
@@ -126,4 +177,4 @@ Six fields, in order, tell you the story:
 
 ## Update log
 - 2026-05-03 09:15 ET — RS-Drift verdict FAIL captured, lessons written, status doc created.
-- (next update when whale_tail_v1 lands)
+- 2026-05-03 10:45 ET — Whale-Tail and Apex Hunter verdicts FAIL captured. Cross-signal pattern is now clear: noise-mining on 1500-symbol universe. Stationary-Ghost re-kicked off (was never started in May 3 morning batch). [reports/COMPARISON.md](COMPARISON.md) drafted.
