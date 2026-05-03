@@ -9,7 +9,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import logging
+import os
 from datetime import datetime
+from pathlib import Path
 
 from driftpilot.clock import DriftPilotClock
 from driftpilot.services import (
@@ -18,14 +21,109 @@ from driftpilot.services import (
     PaperPositionMonitor,
     SyntheticScannerService,
 )
-from driftpilot.settings import load_settings
+from driftpilot.settings import DriftPilotSettings, load_settings
 from driftpilot.state_machine import DriftPilotStateMachine, MarketSession
 from driftpilot.storage.repositories import DriftPilotRepository
+
+logger = logging.getLogger(__name__)
 
 
 class MockOpenMarketClock:
     def session(self, now: datetime | None = None) -> MarketSession:
         return MarketSession(True, "mock_regular_session")
+
+
+def _build_catalyst_layer(settings: DriftPilotSettings):
+    """Construct the v3 catalyst layer from settings.
+
+    Returns ``(bus, universe_filter, discovery_service)`` if
+    ``CATALYST_ENABLED=true``, else ``(None, None, None)``.
+
+    The discovery_service is only constructed if Alpaca credentials are
+    present; otherwise we still wire the bus + filter so the state machine
+    can react to programmatically-injected events (useful for paper testing
+    without live Alpaca News access).
+    """
+    if not settings.catalyst_enabled:
+        return None, None, None
+
+    # Local imports keep the catalyst layer out of the import graph when disabled.
+    from driftpilot.catalyst.classifier import CatalystClassifier
+    from driftpilot.catalyst.db import init_catalyst_schema
+    from driftpilot.catalyst.discovery_service import DiscoveryService
+    from driftpilot.catalyst.event_bus import CatalystEventBus
+    from driftpilot.catalyst.qwen_enricher import QwenEnricher
+    from driftpilot.catalyst.universe_filter import CatalystUniverseFilter
+
+    Path(settings.catalyst_db_path).parent.mkdir(parents=True, exist_ok=True)
+    init_catalyst_schema(settings.catalyst_db_path)
+
+    bus = CatalystEventBus()
+    universe_filter = CatalystUniverseFilter(
+        settings.catalyst_db_path,
+        lookback_minutes=settings.catalyst_universe_lookback_minutes,
+    )
+
+    feeds: list[tuple[str, callable]] = []
+
+    if settings.alpaca_key_id and settings.alpaca_secret_key:
+        from driftpilot.catalyst.feed_alpaca import AlpacaNewsFeed
+
+        # Read universe symbols once at startup
+        symbols: list[str] = []
+        with open(settings.universe_file) as f:
+            next(f, None)  # header
+            for line in f:
+                sym = line.split(",", 1)[0].strip()
+                if sym:
+                    symbols.append(sym)
+
+        classifier = CatalystClassifier()
+        enricher = QwenEnricher(
+            base_url=settings.catalyst_qwen_url,
+            model=settings.catalyst_qwen_model,
+            timeout_ms=settings.catalyst_qwen_timeout_ms,
+        )
+        alpaca_feed = AlpacaNewsFeed(
+            api_key=settings.alpaca_key_id,
+            api_secret=settings.alpaca_secret_key,
+            symbols=symbols,
+            classifier=classifier,
+            enricher=enricher,
+            bus=bus,
+            db_path=settings.catalyst_db_path,
+            poll_interval_s=settings.catalyst_alpaca_poll_seconds,
+        )
+        feeds.append(("alpaca", alpaca_feed.run))
+
+        if settings.catalyst_rss_enabled:
+            from driftpilot.catalyst.feed_rss import (
+                DEFAULT_FEEDS,
+                RssNewsFeed,
+                _load_universe,
+            )
+
+            try:
+                universe_set = _load_universe(settings.universe_file)
+                rss_feed = RssNewsFeed(
+                    feed_urls=DEFAULT_FEEDS,
+                    universe=universe_set,
+                    classifier=classifier,
+                    enricher=enricher,
+                    bus=bus,
+                    db_path=settings.catalyst_db_path,
+                )
+                feeds.append(("rss", rss_feed.run))
+            except Exception as exc:  # pragma: no cover — defensive
+                logger.warning("rss feed init failed (additive only): %s", exc)
+    else:
+        logger.warning(
+            "catalyst enabled but ALPACA credentials missing — bus + filter will run "
+            "but no live news will arrive. Inject events programmatically for testing."
+        )
+
+    discovery_service = DiscoveryService(feeds) if feeds else None
+    return bus, universe_filter, discovery_service
 
 
 def main() -> None:
@@ -45,7 +143,13 @@ async def _run(once: bool, mock_stream: bool, env_file: str) -> None:
     settings = load_settings(env_file)
     clock = DriftPilotClock(settings.timezone)
     repository = DriftPilotRepository.open(settings.sqlite_path_obj, clock)
-    scanner = SyntheticScannerService(repository, settings, clock=clock, universe_file="config/universe.csv")
+    scanner = SyntheticScannerService(
+        repository, settings, clock=clock, universe_file=settings.universe_file
+    )
+
+    catalyst_bus, universe_filter, discovery_service = _build_catalyst_layer(settings)
+    catalyst_db_path = settings.catalyst_db_path if settings.catalyst_enabled else None
+
     machine = DriftPilotStateMachine(
         repository,
         settings,
@@ -53,14 +157,39 @@ async def _run(once: bool, mock_stream: bool, env_file: str) -> None:
         market_clock=MockOpenMarketClock() if mock_stream else None,
         broker=MockBrokerReconciler(repository, settings),
         scanner=scanner,
-        allocator=PaperExecutionAllocator(repository, settings, clock=clock),
+        allocator=PaperExecutionAllocator(
+            repository,
+            settings,
+            clock=clock,
+            catalyst_db_path=catalyst_db_path,
+        ),
         position_monitor=PaperPositionMonitor(repository, settings, clock=clock),
+        catalyst_event_bus=catalyst_bus,
+        catalyst_universe_filter=universe_filter,
     )
+
+    # Wire the catalyst bus subscription if available
+    if catalyst_bus is not None:
+        await machine.subscribe_to_catalyst_bus(catalyst_bus)
+        logger.info(
+            "catalyst layer ENABLED: db=%s qwen=%s feeds=%s",
+            settings.catalyst_db_path,
+            settings.catalyst_qwen_url,
+            "yes" if discovery_service is not None else "no",
+        )
+
     if once:
         state = await machine.run_once()
         print(f"state={state.value} sqlite={settings.sqlite_path}")
         return
-    await machine.run_forever()
+
+    # Run discovery service alongside the state machine so a feed crash
+    # cannot kill the operator (DiscoveryService supervises with restarts).
+    coros = [machine.run_forever()]
+    if discovery_service is not None:
+        coros.append(discovery_service.start())
+
+    await asyncio.gather(*coros)
 
 
 if __name__ == "__main__":

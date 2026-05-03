@@ -89,6 +89,15 @@ class DriftPilotSettings:
     universe_file: str = "config/universe.csv"
     parquet_bar_root: str = "data/bars/databento"
     active_signal: str = "intraday_momentum_v1"
+    # v3 catalyst layer
+    catalyst_enabled: bool = False
+    catalyst_db_path: str = "data/driftpilot/catalyst_events.sqlite3"
+    catalyst_qwen_url: str = "http://192.168.1.166:8000/v1"
+    catalyst_qwen_model: str = "Qwen/Qwen3-8B"
+    catalyst_qwen_timeout_ms: int = 3000
+    catalyst_rss_enabled: bool = True
+    catalyst_alpaca_poll_seconds: int = 30
+    catalyst_universe_lookback_minutes: int = 240
 
     @property
     def sqlite_path_obj(self) -> Path:
@@ -137,4 +146,12 @@ def load_settings(
         universe_file=_get_str(values, "DRIFTPILOT_UNIVERSE_FILE", "config/universe.csv"),
         parquet_bar_root=_get_str(values, "DRIFTPILOT_PARQUET_BAR_ROOT", "data/bars/databento"),
         active_signal=_get_str(values, "ACTIVE_SIGNAL", "intraday_momentum_v1"),
+        catalyst_enabled=_get_bool(values, "CATALYST_ENABLED", False),
+        catalyst_db_path=_get_str(values, "CATALYST_DB_PATH", "data/driftpilot/catalyst_events.sqlite3"),
+        catalyst_qwen_url=_get_str(values, "CATALYST_QWEN_URL", "http://192.168.1.166:8000/v1"),
+        catalyst_qwen_model=_get_str(values, "CATALYST_QWEN_MODEL", "Qwen/Qwen3-8B"),
+        catalyst_qwen_timeout_ms=_get_int(values, "CATALYST_QWEN_TIMEOUT_MS", 3000),
+        catalyst_rss_enabled=_get_bool(values, "CATALYST_RSS_ENABLED", True),
+        catalyst_alpaca_poll_seconds=_get_int(values, "CATALYST_ALPACA_POLL_SECONDS", 30),
+        catalyst_universe_lookback_minutes=_get_int(values, "CATALYST_UNIVERSE_LOOKBACK_MINUTES", 240),
     )
