@@ -99,6 +99,8 @@ def main() -> None:
     p.add_argument("--bar-root", default="data/bars/databento")
     p.add_argument("--starting-capital", type=float, default=10_000.0)
     p.add_argument("--slot-value", type=float, default=1_000.0)
+    p.add_argument("--require-sentiment", choices=["positive", "negative", "neutral"], default=None,
+                   help="Filter events to only those Qwen tagged with this sentiment")
     args = p.parse_args()
 
     cfg = SIGNAL_CONFIGS[args.signal]
@@ -122,6 +124,7 @@ def main() -> None:
         max_event_age_minutes=cfg["max_event_age_minutes"],
         slot_value=args.slot_value,
         starting_capital=args.starting_capital,
+        require_sentiment=args.require_sentiment,
     )
 
     metrics = _compute_metrics(result.trades)
@@ -146,6 +149,7 @@ def main() -> None:
         "fail_reason": fail_reason,
         "config": cfg,
         "window": {"start": args.start, "end": args.end},
+        "sentiment_filter": args.require_sentiment,
         "headline_metrics": metrics,
         "diagnostics": {
             "exit_breakdown_detailed": exit_breakdown,
