@@ -115,11 +115,17 @@ class PaperExecutionAllocator:
         settings: DriftPilotSettings,
         *,
         clock: DriftPilotClock | None = None,
+        catalyst_db_path: str | None = None,
     ) -> None:
         self.repository = repository
         self.settings = settings
         self.clock = clock or DriftPilotClock(settings.timezone)
-        self.allocator = SlotAllocator(repository, settings, clock=self.clock)
+        self.allocator = SlotAllocator(
+            repository,
+            settings,
+            clock=self.clock,
+            catalyst_db_path=catalyst_db_path,
+        )
         self.fills = PaperFillEngine(repository, settings, clock=self.clock)
 
     async def allocate(self, candidates: list[AllocationCandidate]) -> AllocationResult:
