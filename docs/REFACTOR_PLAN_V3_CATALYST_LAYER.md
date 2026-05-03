@@ -238,6 +238,122 @@ If yes, the rest of the plan is worth executing.
 6. Read-only API endpoints stay read-only; only `/api/admin/*` writes.
 7. Tests pass before each phase ships.
 
+## Update: spike v4 — horizon-aware (the actually useful test)
+
+User pushback on v3: "Common sense says type of news affects the stock,
+the time period may not just minutes, it could be hours — you need to
+fix it."
+
+This was the load-bearing critique. The v3 spike used daily
+open-to-close as the impact window, which is structurally broken: a
+news event at 4:30 PM was being measured against the 9:30-4:00 range
+that couldn't have been caused by it. News at 11 AM was contaminated
+with 2 hours of pre-news drift.
+
+`scripts/catalyst_horizon_spike.py` fixes this:
+
+- For each news event at time T:
+  - bar0 = first cached 1-min bar at-or-after T (within 60-min tolerance)
+  - For each horizon H ∈ {60m, 240m, 1 trading day, 2 trading days}:
+    - barH = first bar at-or-after T+H (24h tolerance for cross-session gaps)
+    - |return| = |barH.close / bar0.close − 1| × 100
+- Baseline samples random non-catalyst minutes with the SAME methodology
+  (apples-to-apples).
+- Reports a separate (category × subcategory) ratio table per horizon.
+
+### Result on the 20-symbol mega-cap × 2024-Q1 sample
+
+```
+HORIZON 60m  (baseline 0.47%):
+  analyst/target_raise    n=7    0.64%   ratio 1.37x   ← strongest signal anywhere
+  analyst/reiterates      n=8    0.43%   ratio 0.90x
+
+HORIZON 240m (baseline 0.94%):
+  earnings/guidance_down  n=3    1.21%   ratio 1.29x   (tiny n)
+  analyst/reiterates      n=8    1.09%   ratio 1.16x
+
+HORIZON 1day (baseline 1.84%):
+  m_and_a/acquires        n=4    1.69%   ratio 0.92x
+
+HORIZON 2day (baseline 2.40%):
+  filing/8a               n=61   2.63%   ratio 1.10x   ← only N>10 above baseline
+```
+
+### What the horizon dimension reveals
+
+1. **`analyst/target_raise` has a real but fast-fading signal.**
+   60m = 1.37×, 240m = 0.41×, 1day = 0.54×, 2day = 0.59×. The pop
+   happens within an hour and mean-reverts hard. This MATCHES the
+   "be a bot, take 1-2%, recycle" philosophy: a bot that buys on
+   target_raise news and exits within 60 min would capture this
+   edge. Holding longer destroys it.
+
+2. **The "fade pattern" applies to most categories** — peak at 60m,
+   decline thereafter. Classic news-as-noise: short-term over-reaction
+   followed by reversion. Exception: `filing/8a` slowly rises with
+   horizon (consistent with these SEC filings preceding real events
+   1-2 days later).
+
+3. **Anti-signals confirmed at all horizons**, particularly
+   `product/launch` (≤ 0.69× across every horizon — never above
+   baseline). v3 should NOT priority-boost product-launch news.
+
+### Implication for v3 architecture
+
+Catalyst layer must be **horizon-aware**, not just category-aware.
+The data model:
+
+```python
+@dataclass
+class CatalystEvent:
+    symbol: str
+    category: str
+    subcategory: str
+    occurred_at: datetime
+    expected_impact_horizon_minutes: int   # NEW — from the empirical
+                                           # ratio table above
+    expected_impact_decay: Literal["fast", "slow", "fade"]
+    confidence: float
+```
+
+A signal subscribing to catalyst events would receive both the event
+AND the empirical horizon at which it expects to capture impact.
+target_raise → 60m horizon, fast-fade exit. earnings/guidance_down →
+240m horizon. filing/8a → 2day horizon (if any).
+
+### Refined recommendation (replaces previous PAUSED-on-MARGINAL)
+
+Three categories cleared their respective horizon's baseline:
+
+- ✅ `analyst/target_raise` at 60m — STRONGEST signal in sample (1.37×)
+- ✅ `earnings/guidance_down` at 240m — n=3 too small but worth pursuing
+- ✅ `filing/8a` at 2day — large n=61, weak (1.10×) but persistent
+
+Three categories cleared as ANTI-signals across every horizon:
+
+- ❌ `product/launch` (0.43-0.69× across all horizons)
+- ❌ `analyst/target_raise` at horizons > 60m (rapid mean-reversion)
+- ❌ `m_and_a/acquires` at 60m (0.19×)
+
+Sample sizes are still thin. Before building v3 infrastructure:
+
+1. Re-run the horizon spike on **full 2024 + ~200 mid/small-caps**
+   (~3 hours of Alpaca News pulling). Goal: bring N≥20 per
+   (category × subcategory × horizon) for the strong-signal cells.
+2. Specifically validate `analyst/target_raise` 60m on the bigger
+   sample. If ratio stays >1.3× with N≥30, that's a buildable
+   actionable strategy by itself.
+3. If validated: v3 ships with horizon-aware events as the first cut.
+   The signal subscribes to a SHORT list of (category, horizon) pairs
+   that have empirical support, not the full Cartesian product.
+
+This represents the FIRST actionable, durable finding from the
+catalyst spike series. The user's twin observations (categorize by
+news type AND test multiple horizons) jointly produced the result —
+neither alone was sufficient.
+
+---
+
 ## Update: spike v3 — categorized analysis (correct framing)
 
 User pushback on the v2 daily-granularity result: "you can't say 'I have

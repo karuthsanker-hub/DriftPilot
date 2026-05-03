@@ -1,0 +1,421 @@
+{
+  "meta": {
+    "symbols": [
+      "AAPL",
+      "MSFT",
+      "NVDA",
+      "GOOGL",
+      "AMZN",
+      "META",
+      "TSLA",
+      "AVGO",
+      "AMD",
+      "NFLX",
+      "CRM",
+      "ORCL",
+      "ADBE",
+      "PLTR",
+      "COIN",
+      "MU",
+      "INTC",
+      "DIS",
+      "JPM",
+      "BAC"
+    ],
+    "start": "2024-01-01",
+    "end": "2024-03-31",
+    "horizons": {
+      "60m": 60,
+      "240m": 240,
+      "1day": 1440,
+      "2day": 2880
+    },
+    "n_articles_raw": 337,
+    "n_events": 337,
+    "n_baseline": 4000,
+    "anchor_gap_minutes": 60,
+    "target_gap_minutes": 1440,
+    "baseline_samples_per_symbol": 200,
+    "generated_at": "2026-05-03T14:19:55.419480+00:00"
+  },
+  "by_horizon": {
+    "60m": [
+      {
+        "category": "filing",
+        "subcategory": "8a",
+        "n": 232,
+        "mean_abs_return_pct": 0.3564,
+        "p_gt_1pct": 0.0733,
+        "p_gt_2pct": 0.0086,
+        "p_gt_3pct": 0.0043,
+        "ratio_mean": 0.757
+      },
+      {
+        "category": "analyst",
+        "subcategory": "downgrade",
+        "n": 2,
+        "mean_abs_return_pct": 1.0551,
+        "p_gt_1pct": 0.5,
+        "p_gt_2pct": 0.5,
+        "p_gt_3pct": 0.0,
+        "ratio_mean": 2.24
+      },
+      {
+        "category": "earnings",
+        "subcategory": "guidance_down",
+        "n": 3,
+        "mean_abs_return_pct": 0.0873,
+        "p_gt_1pct": 0.0,
+        "p_gt_2pct": 0.0,
+        "p_gt_3pct": 0.0,
+        "ratio_mean": 0.185
+      },
+      {
+        "category": "m_and_a",
+        "subcategory": "acquires",
+        "n": 4,
+        "mean_abs_return_pct": 0.0889,
+        "p_gt_1pct": 0.0,
+        "p_gt_2pct": 0.0,
+        "p_gt_3pct": 0.0,
+        "ratio_mean": 0.189
+      },
+      {
+        "category": "other",
+        "subcategory": "generic",
+        "n": 2,
+        "mean_abs_return_pct": 0.1507,
+        "p_gt_1pct": 0.0,
+        "p_gt_2pct": 0.0,
+        "p_gt_3pct": 0.0,
+        "ratio_mean": 0.32
+      },
+      {
+        "category": "analyst",
+        "subcategory": "target_cut",
+        "n": 2,
+        "mean_abs_return_pct": 0.2064,
+        "p_gt_1pct": 0.0,
+        "p_gt_2pct": 0.0,
+        "p_gt_3pct": 0.0,
+        "ratio_mean": 0.438
+      },
+      {
+        "category": "analyst",
+        "subcategory": "reiterates",
+        "n": 8,
+        "mean_abs_return_pct": 0.4254,
+        "p_gt_1pct": 0.0,
+        "p_gt_2pct": 0.0,
+        "p_gt_3pct": 0.0,
+        "ratio_mean": 0.903
+      },
+      {
+        "category": "product",
+        "subcategory": "partnership",
+        "n": 1,
+        "mean_abs_return_pct": 1.4688,
+        "p_gt_1pct": 1.0,
+        "p_gt_2pct": 0.0,
+        "p_gt_3pct": 0.0,
+        "ratio_mean": 3.118
+      },
+      {
+        "category": "product",
+        "subcategory": "launch",
+        "n": 7,
+        "mean_abs_return_pct": 0.2581,
+        "p_gt_1pct": 0.1429,
+        "p_gt_2pct": 0.0,
+        "p_gt_3pct": 0.0,
+        "ratio_mean": 0.548
+      },
+      {
+        "category": "legal",
+        "subcategory": "lawsuit",
+        "n": 1,
+        "mean_abs_return_pct": 0.0245,
+        "p_gt_1pct": 0.0,
+        "p_gt_2pct": 0.0,
+        "p_gt_3pct": 0.0,
+        "ratio_mean": 0.052
+      },
+      {
+        "category": "analyst",
+        "subcategory": "target_raise",
+        "n": 7,
+        "mean_abs_return_pct": 0.6443,
+        "p_gt_1pct": 0.1429,
+        "p_gt_2pct": 0.1429,
+        "p_gt_3pct": 0.0,
+        "ratio_mean": 1.368
+      },
+      {
+        "category": "legal",
+        "subcategory": "settlement",
+        "n": 1,
+        "mean_abs_return_pct": 0.1825,
+        "p_gt_1pct": 0.0,
+        "p_gt_2pct": 0.0,
+        "p_gt_3pct": 0.0,
+        "ratio_mean": 0.388
+      },
+      {
+        "category": "regulatory",
+        "subcategory": "investigation",
+        "n": 2,
+        "mean_abs_return_pct": 0.2658,
+        "p_gt_1pct": 0.0,
+        "p_gt_2pct": 0.0,
+        "p_gt_3pct": 0.0,
+        "ratio_mean": 0.564
+      }
+    ],
+    "240m": [
+      {
+        "category": "filing",
+        "subcategory": "8a",
+        "n": 229,
+        "mean_abs_return_pct": 0.7297,
+        "p_gt_1pct": 0.2533,
+        "p_gt_2pct": 0.0568,
+        "p_gt_3pct": 0.0262,
+        "ratio_mean": 0.774
+      },
+      {
+        "category": "analyst",
+        "subcategory": "downgrade",
+        "n": 2,
+        "mean_abs_return_pct": 2.6131,
+        "p_gt_1pct": 1.0,
+        "p_gt_2pct": 0.5,
+        "p_gt_3pct": 0.5,
+        "ratio_mean": 2.772
+      },
+      {
+        "category": "earnings",
+        "subcategory": "guidance_down",
+        "n": 3,
+        "mean_abs_return_pct": 1.2131,
+        "p_gt_1pct": 1.0,
+        "p_gt_2pct": 0.0,
+        "p_gt_3pct": 0.0,
+        "ratio_mean": 1.287
+      },
+      {
+        "category": "m_and_a",
+        "subcategory": "acquires",
+        "n": 4,
+        "mean_abs_return_pct": 0.3156,
+        "p_gt_1pct": 0.0,
+        "p_gt_2pct": 0.0,
+        "p_gt_3pct": 0.0,
+        "ratio_mean": 0.335
+      },
+      {
+        "category": "analyst",
+        "subcategory": "target_cut",
+        "n": 2,
+        "mean_abs_return_pct": 1.3102,
+        "p_gt_1pct": 0.5,
+        "p_gt_2pct": 0.0,
+        "p_gt_3pct": 0.0,
+        "ratio_mean": 1.39
+      },
+      {
+        "category": "other",
+        "subcategory": "generic",
+        "n": 1,
+        "mean_abs_return_pct": 0.9538,
+        "p_gt_1pct": 0.0,
+        "p_gt_2pct": 0.0,
+        "p_gt_3pct": 0.0,
+        "ratio_mean": 1.012
+      },
+      {
+        "category": "analyst",
+        "subcategory": "reiterates",
+        "n": 8,
+        "mean_abs_return_pct": 1.0902,
+        "p_gt_1pct": 0.375,
+        "p_gt_2pct": 0.25,
+        "p_gt_3pct": 0.0,
+        "ratio_mean": 1.157
+      },
+      {
+        "category": "product",
+        "subcategory": "partnership",
+        "n": 1,
+        "mean_abs_return_pct": 4.3452,
+        "p_gt_1pct": 1.0,
+        "p_gt_2pct": 1.0,
+        "p_gt_3pct": 1.0,
+        "ratio_mean": 4.61
+      },
+      {
+        "category": "product",
+        "subcategory": "launch",
+        "n": 7,
+        "mean_abs_return_pct": 0.655,
+        "p_gt_1pct": 0.1429,
+        "p_gt_2pct": 0.0,
+        "p_gt_3pct": 0.0,
+        "ratio_mean": 0.695
+      },
+      {
+        "category": "legal",
+        "subcategory": "lawsuit",
+        "n": 1,
+        "mean_abs_return_pct": 0.0163,
+        "p_gt_1pct": 0.0,
+        "p_gt_2pct": 0.0,
+        "p_gt_3pct": 0.0,
+        "ratio_mean": 0.017
+      },
+      {
+        "category": "analyst",
+        "subcategory": "target_raise",
+        "n": 7,
+        "mean_abs_return_pct": 0.3823,
+        "p_gt_1pct": 0.0,
+        "p_gt_2pct": 0.0,
+        "p_gt_3pct": 0.0,
+        "ratio_mean": 0.406
+      },
+      {
+        "category": "legal",
+        "subcategory": "settlement",
+        "n": 1,
+        "mean_abs_return_pct": 0.0249,
+        "p_gt_1pct": 0.0,
+        "p_gt_2pct": 0.0,
+        "p_gt_3pct": 0.0,
+        "ratio_mean": 0.026
+      },
+      {
+        "category": "regulatory",
+        "subcategory": "investigation",
+        "n": 2,
+        "mean_abs_return_pct": 0.2138,
+        "p_gt_1pct": 0.0,
+        "p_gt_2pct": 0.0,
+        "p_gt_3pct": 0.0,
+        "ratio_mean": 0.227
+      }
+    ],
+    "1day": [
+      {
+        "category": "filing",
+        "subcategory": "8a",
+        "n": 108,
+        "mean_abs_return_pct": 1.4828,
+        "p_gt_1pct": 0.4815,
+        "p_gt_2pct": 0.2407,
+        "p_gt_3pct": 0.1574,
+        "ratio_mean": 0.804
+      },
+      {
+        "category": "m_and_a",
+        "subcategory": "acquires",
+        "n": 4,
+        "mean_abs_return_pct": 1.6924,
+        "p_gt_1pct": 1.0,
+        "p_gt_2pct": 0.5,
+        "p_gt_3pct": 0.0,
+        "ratio_mean": 0.918
+      },
+      {
+        "category": "analyst",
+        "subcategory": "reiterates",
+        "n": 6,
+        "mean_abs_return_pct": 0.7803,
+        "p_gt_1pct": 0.5,
+        "p_gt_2pct": 0.0,
+        "p_gt_3pct": 0.0,
+        "ratio_mean": 0.423
+      },
+      {
+        "category": "product",
+        "subcategory": "launch",
+        "n": 7,
+        "mean_abs_return_pct": 0.8004,
+        "p_gt_1pct": 0.4286,
+        "p_gt_2pct": 0.0,
+        "p_gt_3pct": 0.0,
+        "ratio_mean": 0.434
+      },
+      {
+        "category": "analyst",
+        "subcategory": "target_raise",
+        "n": 4,
+        "mean_abs_return_pct": 0.9907,
+        "p_gt_1pct": 0.5,
+        "p_gt_2pct": 0.0,
+        "p_gt_3pct": 0.0,
+        "ratio_mean": 0.537
+      },
+      {
+        "category": "legal",
+        "subcategory": "settlement",
+        "n": 1,
+        "mean_abs_return_pct": 1.8254,
+        "p_gt_1pct": 1.0,
+        "p_gt_2pct": 0.0,
+        "p_gt_3pct": 0.0,
+        "ratio_mean": 0.99
+      },
+      {
+        "category": "regulatory",
+        "subcategory": "investigation",
+        "n": 2,
+        "mean_abs_return_pct": 1.3986,
+        "p_gt_1pct": 1.0,
+        "p_gt_2pct": 0.0,
+        "p_gt_3pct": 0.0,
+        "ratio_mean": 0.759
+      }
+    ],
+    "2day": [
+      {
+        "category": "filing",
+        "subcategory": "8a",
+        "n": 61,
+        "mean_abs_return_pct": 2.6299,
+        "p_gt_1pct": 0.6885,
+        "p_gt_2pct": 0.4754,
+        "p_gt_3pct": 0.3607,
+        "ratio_mean": 1.096
+      },
+      {
+        "category": "product",
+        "subcategory": "launch",
+        "n": 7,
+        "mean_abs_return_pct": 1.1016,
+        "p_gt_1pct": 0.4286,
+        "p_gt_2pct": 0.1429,
+        "p_gt_3pct": 0.0,
+        "ratio_mean": 0.459
+      },
+      {
+        "category": "analyst",
+        "subcategory": "target_raise",
+        "n": 3,
+        "mean_abs_return_pct": 1.4231,
+        "p_gt_1pct": 0.6667,
+        "p_gt_2pct": 0.3333,
+        "p_gt_3pct": 0.3333,
+        "ratio_mean": 0.593
+      },
+      {
+        "category": "regulatory",
+        "subcategory": "investigation",
+        "n": 2,
+        "mean_abs_return_pct": 2.1656,
+        "p_gt_1pct": 1.0,
+        "p_gt_2pct": 1.0,
+        "p_gt_3pct": 0.0,
+        "ratio_mean": 0.903
+      }
+    ]
+  }
+}
