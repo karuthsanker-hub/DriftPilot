@@ -12,6 +12,15 @@ from driftpilot.states import OperatorState
 from driftpilot.storage.repositories import DriftPilotRepository, StateTransitionRecord
 
 
+class CatalystEventBusProtocol(Protocol):
+    async def subscribe(
+        self,
+        category: str | None,
+        subcategory: str | None,
+        callback: Any,
+    ) -> str: ...
+
+
 class BrokerReconciler(Protocol):
     async def reconcile_open_positions(self) -> Any: ...
 
@@ -99,6 +108,7 @@ class DriftPilotStateMachine:
         scanner: ScannerService | None = None,
         allocator: AllocatorService | None = None,
         position_monitor: PositionMonitorService | None = None,
+        catalyst_event_bus: CatalystEventBusProtocol | None = None,
     ) -> None:
         self.repository = repository
         self.settings = settings
@@ -108,8 +118,77 @@ class DriftPilotStateMachine:
         self.scanner = scanner
         self.allocator = allocator
         self.position_monitor = position_monitor
+        self.catalyst_event_bus = catalyst_event_bus
         self._booted = False
         self._error_count = 0
+        self._catalyst_subscription_id: str | None = None
+        # TODO(operator-runtime): if `catalyst_event_bus` is None at construction
+        # time, the operator runtime should call `await self.subscribe_to_catalyst_bus(bus)`
+        # at startup so that analyst/target_cut events drive EMERGENCY_FLUSH.
+
+    async def subscribe_to_catalyst_bus(
+        self, bus: CatalystEventBusProtocol | None = None
+    ) -> None:
+        """Wire this state machine to a CatalystEventBus.
+
+        Subscribes to analyst/target_cut and routes the event through
+        `on_analyst_target_cut`. Safe to call once at startup; subsequent calls
+        are no-ops.
+        """
+        bus = bus or self.catalyst_event_bus
+        if bus is None or self._catalyst_subscription_id is not None:
+            return
+        self.catalyst_event_bus = bus
+        self._catalyst_subscription_id = await bus.subscribe(
+            "analyst", "target_cut", self.on_analyst_target_cut
+        )
+
+    async def on_analyst_target_cut(self, event: Any) -> OperatorState | None:
+        """Handle an `analyst/target_cut` catalyst event.
+
+        If any open slot is on the event symbol, transition the state machine
+        into EMERGENCY_FLUSH and trigger the flush pipeline. Returns the new
+        state value (or None if no action was taken).
+        """
+        symbol = getattr(event, "symbol", "").upper()
+        if not symbol:
+            return None
+        slots = self.repository.slots.list_all()
+        affected = [
+            slot for slot in slots
+            if slot.symbol is not None and slot.symbol.upper() == symbol
+        ]
+        if not affected:
+            return None
+        await self._transition(
+            OperatorState.EMERGENCY_FLUSH,
+            "analyst_target_cut",
+            {
+                "symbol": symbol,
+                "affected_slots": [s.slot_id for s in affected],
+                "headline": getattr(event, "headline", None),
+            },
+        )
+        await self.emergency_flush()
+        return OperatorState.EMERGENCY_FLUSH
+
+    async def emergency_flush(self) -> None:
+        """Cancel open orders and trigger market exits on all open positions.
+
+        Minimal implementation: delegates exit work to the existing position
+        monitor / EXITING handler by recording the transition. Real venue-side
+        order cancellation is the responsibility of the broker layer; this
+        method is the documented entry point for that wiring.
+        """
+        # Delegate the actual exit work to the existing EXITING flow. The
+        # state machine's normal `run_once` will pick up open positions on the
+        # next bar and submit market exits via the position monitor. After the
+        # cooldown timer in the operator runtime, transition to RECYCLING.
+        await self._transition(
+            OperatorState.EXITING,
+            "emergency_flush_exit",
+            {"source": "emergency_flush"},
+        )
 
     async def run_once(self) -> OperatorState:
         try:

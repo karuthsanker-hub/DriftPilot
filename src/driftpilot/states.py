@@ -19,6 +19,10 @@ class BlockedReason(StrEnum):
     DUPLICATE_SYMBOL = "duplicate_symbol"
     QUOTE_UNAVAILABLE = "quote_unavailable"
 
+    # Catalyst layer (v3 catalyst engine)
+    CATALYST_NEGATIVE = "catalyst_negative"
+    CATALYST_AGE_EXCEEDED = "catalyst_age_exceeded"
+
     # Common to all four locked v1 specs (universe + time gates)
     OUTSIDE_SCAN_WINDOW = "outside_scan_window"
     BELOW_ADV_FLOOR = "below_adv_floor"
@@ -66,4 +70,5 @@ class OperatorState(StrEnum):
     RECYCLING = "RECYCLING"
     HALTED_PDT = "HALTED_PDT"
     HALTED_RISK = "HALTED_RISK"
+    EMERGENCY_FLUSH = "EMERGENCY_FLUSH"
     ERROR = "ERROR"

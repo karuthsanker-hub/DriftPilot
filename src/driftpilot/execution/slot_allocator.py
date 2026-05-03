@@ -1,13 +1,36 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any, Protocol
 
 from driftpilot.clock import DriftPilotClock, datetime_to_storage, require_aware
 from driftpilot.settings import DriftPilotSettings
+from driftpilot.states import BlockedReason
 from driftpilot.storage.repositories import DriftPilotRepository, SlotRecord
+
+
+def _has_negative_catalyst(
+    db_path: str | None, symbol: str, lookback_minutes: int = 240
+) -> bool:
+    """Returns True if a negative analyst catalyst (target_cut) exists for `symbol`
+    within the last `lookback_minutes`. Uses parameterized SQL.
+    """
+    if not db_path:
+        return False
+    cutoff = (datetime.now(timezone.utc) - timedelta(minutes=lookback_minutes)).isoformat()
+    conn = sqlite3.connect(db_path)
+    try:
+        cur = conn.execute(
+            "SELECT 1 FROM catalyst_events WHERE symbol = ? AND category = ? "
+            "AND subcategory = ? AND event_ts >= ? LIMIT 1",
+            (symbol, "analyst", "target_cut", cutoff),
+        )
+        return cur.fetchone() is not None
+    finally:
+        conn.close()
 
 
 FREE_SLOT_STATUSES = {"EMPTY", "RECYCLING"}
@@ -81,11 +104,15 @@ class SlotAllocator:
         *,
         clock: DriftPilotClock | None = None,
         max_slots_per_sector: int = DEFAULT_MAX_SLOTS_PER_SECTOR,
+        catalyst_db_path: str | None = None,
+        catalyst_lookback_minutes: int = 240,
     ) -> None:
         self.repository = repository
         self.settings = settings
         self.clock = clock or DriftPilotClock(settings.timezone)
         self.max_slots_per_sector = max_slots_per_sector
+        self.catalyst_db_path = catalyst_db_path
+        self.catalyst_lookback_minutes = catalyst_lookback_minutes
         self._lock = asyncio.Lock()
 
     async def allocate(self, candidates: list[AllocationCandidate]) -> AllocationResult:
@@ -107,6 +134,27 @@ class SlotAllocator:
 
             for candidate in _ranked(candidates):
                 symbol = candidate.symbol.upper()
+
+                if self.catalyst_db_path and _has_negative_catalyst(
+                    self.catalyst_db_path,
+                    symbol,
+                    lookback_minutes=self.catalyst_lookback_minutes,
+                ):
+                    detail = {
+                        "category": "analyst",
+                        "subcategory": "target_cut",
+                        "lookback_minutes": self.catalyst_lookback_minutes,
+                    }
+                    self._mark_candidate_blocked(
+                        symbol, BlockedReason.CATALYST_NEGATIVE.value, detail, now
+                    )
+                    rejections.append(
+                        AllocationRejection(
+                            symbol, BlockedReason.CATALYST_NEGATIVE.value, detail
+                        )
+                    )
+                    continue
+
                 stale_seconds = (now - candidate.latest_bar_at.astimezone(now.tzinfo)).total_seconds()
                 if stale_seconds > self.settings.scan_interval_seconds * 2:
                     self._mark_candidate_blocked(
