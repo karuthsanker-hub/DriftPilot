@@ -461,6 +461,7 @@ def replay_bars(
     rvol_lookback: int = 20,
     point_in_time_constituents: bool = False,
     signal_name: str | None = None,
+    history_cap_minutes: int | None = None,
 ) -> ReplayResult:
     settings = settings or DriftPilotSettings()
     signal = get_signal(signal_name or settings.active_signal)
@@ -496,12 +497,30 @@ def replay_bars(
     equity = settings.paper_capital
     equity_curve: list[tuple[datetime, float]] = []
 
+    # Per refactor plan v1.1 Phase 6: cap per-symbol bar history at
+    # `history_cap_minutes` to keep memory bounded over long replays.
+    # Without a cap, 1500 symbols × ~100k bars/year × ~200 bytes/MinuteBar
+    # ≈ 30 GB per process — silently OOM-killed on memory-constrained
+    # shared boxes (DGX with vllm running, etc). Capping at 180 minutes
+    # keeps the per-process working set near 50 MB.
+    #
+    # The cap is OPT-IN because intraday_momentum_v1's same-minute-of-day
+    # RVOL needs ~20 trading days of bar history (~7,800 bars) per symbol.
+    # The four new signals (Stationary Ghost / Whale-Tail / RS-Drift /
+    # Apex Hunter) do NOT need that and can safely cap at 180 minutes.
+    # Generic-path callers pass `history_cap_minutes=MAX_HISTORY_MINUTES`;
+    # tests and intraday-momentum callers leave it None (preserve old
+    # behavior).
+    cap: int | None = history_cap_minutes
     for timestamp, rows in normalized.groupby("timestamp", sort=True):
         current_time = _as_aware_datetime(timestamp)
         latest_by_symbol: dict[str, MinuteBar] = {}
         for row in rows.to_dict("records"):
             bar = _row_to_bar(row)
-            history.setdefault(bar.symbol, []).append(bar)
+            symbol_history = history.setdefault(bar.symbol, [])
+            symbol_history.append(bar)
+            if cap is not None and len(symbol_history) > cap:
+                del symbol_history[: len(symbol_history) - cap]
             latest_by_symbol[bar.symbol] = bar
             quotes[bar.symbol] = _row_to_quote(row, bar, modeled=not has_quote_columns)
 
@@ -650,6 +669,9 @@ def replay_parquet_cache_generic(
         rvol_lookback=rvol_lookback,
         point_in_time_constituents=point_in_time_constituents,
         signal_name=signal_name or settings.active_signal,
+        # Phase 6: bound memory for the four new signals' year-long replay.
+        # See replay_bars docstring re: why this is opt-in.
+        history_cap_minutes=MAX_HISTORY_MINUTES,
     )
 
 
