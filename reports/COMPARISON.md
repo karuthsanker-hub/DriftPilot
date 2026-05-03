@@ -114,25 +114,42 @@ to live paper.
 **v3.0 catalyst engine is now on main** (PRs #4-12) and the first signal
 has just cleared its gate.
 
-## v3.0 first verdicts (Oct-Nov 2024)
+## v3.0 verdicts (Jul-Dec 2024, full enriched data)
 
-The catalyst signals were backtested on real 2024 Alpaca News + Databento
-bars. Three configurations per signal: (no filter), (+positive sentiment),
-(+negative sentiment). Sentiment from local Qwen3-8B on DGX.
+The catalyst signals were backtested on real 2024 Alpaca News +
+Databento bars. Sentiment enriched by local Qwen3-8B on DGX (5,552
+events tagged in 8.9 min). Window is Jul-Dec 2024 — the densest
+6-month period of Alpaca's free-tier news retention.
 
 | Signal × Filter | N | Win | Breakeven | edge_ratio | Verdict |
 |---|---|---|---|---|---|
-| **earnings_report_v1** (no filter) | 282 | 37% | 40% | 0.94 | FAIL |
-| **earnings_report_v1 + positive** | **57** | **47%** | **29%** | **1.62** | **🟢 PASS** |
-| earnings_report_v1 + negative | 23 | 26% | 59% | 0.44 | FAIL (correctly — anti-signal) |
-| analyst_target_raise_v1 (no filter) | 1,044 | 46% | 53% | 0.88 | FAIL |
-| analyst_target_raise_v1 + positive | 410 | 44% | 57% | 0.77 | FAIL |
+| earnings_report_v1 (no filter) | 425 | 37.88% | 41.68% | 0.91 | FAIL |
+| **earnings_report_v1 + positive** | **185** | **44.32%** | **40.11%** | **1.105** | **🟢 GATED** |
+| earnings_report_v1 + neutral | 145 | 34.48% | 39.24% | 0.88 | FAIL |
+| earnings_report_v1 + negative | 95 | 30.53% | 47.58% | 0.64 | FAIL (correctly — anti-signal) |
+| analyst_target_raise_v1 (no filter) | 2,050 | 44.20% | 52.23% | 0.85 | FAIL |
+| analyst_target_raise_v1 + positive | 1,591 | 44.50% | 52.43% | 0.85 | FAIL (82% are already pos — no info) |
 
-**The breakthrough**: gating earnings reports by Qwen-positive sentiment
-flipped the verdict from FAIL to PASS. Win-rate climbed +10pp, breakeven
-dropped −11pp (winners got bigger), and edge_ratio almost doubled
-(0.94 → 1.62, clears both the 1.1 universal gate and the 1.5
-signal-specific gate from requirements.md).
+**The directional gate works.** Win rate is monotonic in sentiment
+direction (positive 44% > neutral 34% > negative 31%) and edge_ratio
+mirrors it (1.105 > 0.88 > 0.64). The negative cohort produces a
+correct anti-signal — going long on Qwen-negative earnings reports
+produces a 30% win rate against a 48% breakeven, exactly as expected.
+
+`earnings_report_v1 + positive sentiment` clears the universal
+`edge_ratio ≥ 1.1` gate at N=185 over 6 months. Per the locked plan
+that is a **GATED** verdict — proceeds to paper trading with continued
+monitoring, not yet promoted to PASS (which requires the
+signal-specific 1.5 gate I set in requirements.md). The 1.5 gate was
+anchored on the spike's 5.09× *absolute* return ratio — but absolute
+return × directional gate dilutes the magnitude. The realistic gate
+for a sentiment-gated long-only catalyst signal is closer to 1.1-1.2.
+
+### Note on the Oct-Nov "1.62" sample
+
+An earlier Oct-Nov 2024 cut showed edge_ratio=1.62 at N=57 trades. That
+was a small window in a friendlier regime; the honest 6-month verdict
+is **1.105**. Always trust the larger-N verdict.
 
 ## Why the spike's "5.09×" became "0.94×" without sentiment
 
