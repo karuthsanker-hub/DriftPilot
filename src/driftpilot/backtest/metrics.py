@@ -34,6 +34,11 @@ class BacktestMetrics:
 def compute_metrics(trades: list[BacktestTrade], *, starting_capital: float) -> BacktestMetrics:
     if starting_capital <= 0:
         raise ValueError("starting_capital must be positive")
+    # Phase G (mid-price fill wiring): exclude unfilled-attempt sentinel rows
+    # from P&L statistics. Their qty/pnl is zero by construction, but they'd
+    # still bias win_rate, average hold_minutes, and per-trade expectancy
+    # downward if counted.
+    trades = [trade for trade in trades if getattr(trade, "entry_was_filled", True)]
     total_pnl = sum(trade.net_pnl for trade in trades)
     gross_pnl = sum(trade.gross_pnl for trade in trades)
     slippage_cost = sum(trade.slippage_cost for trade in trades)
@@ -86,22 +91,44 @@ def compute_locked_spec_metrics(
         attempted_count = len(signals_attempted)
 
     total_trades: int = len(trades)
-    if total_trades == 0:
+    # Phase G (mid-price fill wiring): the trades list now includes sentinel
+    # rows for mid-price limits that timed out unfilled (entry_was_filled=False,
+    # qty=0). Those rows must NOT be counted as winners/losers — they
+    # represent a non-event, not a 0% return trade. They are, however, counted
+    # toward `signals_attempted` so `fill_rate_pct = filled / attempted` is
+    # honest. Pre-Phase-G callers passed `attempted_count == len(trades)`;
+    # since they didn't emit unfilled rows, `signals_filled == total_trades`
+    # for them and behavior is unchanged.
+    filled_trades: list[BacktestTrade] = [
+        trade for trade in trades if getattr(trade, "entry_was_filled", True)
+    ]
+    signals_filled: int = len(filled_trades)
+    # The on-disk attempted count must reflect every attempt, including
+    # unfilled. If the caller provided a smaller number (legacy behavior),
+    # take the larger of (caller-supplied, len(trades)) so the unfilled rows
+    # we appended ourselves are always counted.
+    effective_attempted: int = max(attempted_count, total_trades)
+
+    if signals_filled == 0:
         return {
             "actual_win_rate": 0.0,
             "breakeven_win_rate": 0.0,
             "edge_ratio": 0.0,
             "give_back_ratio": 0.0,
-            "fill_rate_pct": 0.0,
+            "fill_rate_pct": (
+                signals_filled / effective_attempted
+                if effective_attempted > 0
+                else 0.0
+            ),
             "realized_avg_winner_pct": 0.0,
             "realized_avg_loser_pct": 0.0,
             "realized_rr": 0.0,
         }
 
-    winners: list[BacktestTrade] = [trade for trade in trades if trade.net_pnl > 0]
-    losers: list[BacktestTrade] = [trade for trade in trades if trade.net_pnl < 0]
+    winners: list[BacktestTrade] = [trade for trade in filled_trades if trade.net_pnl > 0]
+    losers: list[BacktestTrade] = [trade for trade in filled_trades if trade.net_pnl < 0]
 
-    actual_win_rate: float = len(winners) / total_trades
+    actual_win_rate: float = len(winners) / signals_filled
 
     realized_avg_winner_pct: float = (
         fmean(trade.return_pct for trade in winners) if winners else 0.0
@@ -129,11 +156,11 @@ def compute_locked_spec_metrics(
 
     peak_pcts: list[float] = [
         trade.peak_unrealized_pct
-        for trade in trades
+        for trade in filled_trades
         if getattr(trade, "peak_unrealized_pct", 0.0) > 0
     ]
     if peak_pcts:
-        avg_realized_pct: float = fmean(trade.return_pct for trade in trades)
+        avg_realized_pct: float = fmean(trade.return_pct for trade in filled_trades)
         avg_peak_unrealized_pct: float = fmean(peak_pcts)
         give_back_ratio: float = (
             avg_realized_pct / avg_peak_unrealized_pct
@@ -144,7 +171,7 @@ def compute_locked_spec_metrics(
         give_back_ratio = 0.0
 
     fill_rate_pct: float = (
-        total_trades / attempted_count if attempted_count > 0 else 0.0
+        signals_filled / effective_attempted if effective_attempted > 0 else 0.0
     )
 
     return {

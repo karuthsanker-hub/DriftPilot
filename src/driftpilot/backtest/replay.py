@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import importlib
+import sys
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -15,6 +17,7 @@ from driftpilot.backtest.constants import (
     AVAILABLE_DATA_DEPENDENCIES,
     MAX_HISTORY_MINUTES,
 )
+from driftpilot.backtest.limit_fill import LimitFillResult, LimitOrder, attempt_limit_fill
 from driftpilot.signals.base import (
     InsufficientDataError,
     signal_data_dependencies,
@@ -74,6 +77,15 @@ class BacktestTrade:
     # 0.0 so every existing caller / test that constructs `BacktestTrade`
     # without this field keeps working.
     peak_unrealized_pct: float = 0.0
+    # Phase G (mid-price fill wiring): tracks whether the entry was placed as a
+    # mid-price limit and whether it actually filled. For non-mid-price signals
+    # the defaults preserve the legacy semantics (every emitted trade row
+    # represents a real fill). For signals declaring ``ENTRY_ORDER_TYPE ==
+    # "limit_mid"``, an unfilled attempt produces a sentinel row with
+    # ``entry_was_filled=False`` so the report's `signals_attempted` count is
+    # correct and `fill_rate_pct` is meaningful.
+    entry_was_attempted_at_mid: bool = False
+    entry_was_filled: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,6 +108,90 @@ class _OpenPosition:
     stop_price: float
     regime: str
     metadata: dict[str, Any] = field(default_factory=dict)
+    # Phase G (mid-price fill wiring): when the position was opened via a
+    # mid-price limit, remember the placement-time mid + timeout so the
+    # downstream trade row records the fact (and so future logic can avoid
+    # re-mid-pricing each cycle). ``None`` for non-mid-price signals.
+    limit_placement_mid: float | None = None
+    limit_timeout_seconds: int | None = None
+
+
+def _signal_uses_mid_price_fill(signal: object) -> bool:
+    """Return True iff the active signal declares ``ENTRY_ORDER_TYPE == 'limit_mid'``.
+
+    Reads the signal's package config module via importlib so adding a 5th
+    mid-price signal doesn't require code changes here. Looks first on the
+    class's own module, then on a sibling ``config`` submodule of the
+    signal's containing package.
+    """
+
+    module_name: str = signal.__class__.__module__
+    mod = sys.modules.get(module_name)
+    config_attr: object | None = None
+    if mod is not None:
+        config_attr = getattr(mod, "ENTRY_ORDER_TYPE", None)
+    if config_attr is None:
+        # Try the package __init__ -> sibling `config` submodule pattern
+        # (rs_drift_v1.signal -> rs_drift_v1.config).
+        package_name: str = module_name.rsplit(".", 1)[0] if "." in module_name else module_name
+        for candidate in (f"{package_name}.config", f"{module_name}.config"):
+            try:
+                config_mod = importlib.import_module(candidate)
+            except ImportError:
+                # Signals without a `config` submodule are non-mid-price by
+                # convention. Suppression is correct here — there's nothing
+                # to recover from. We just keep looking through the
+                # remaining candidate import paths.
+                continue
+            config_attr = getattr(config_mod, "ENTRY_ORDER_TYPE", None)
+            if config_attr is not None:
+                break
+    return config_attr == "limit_mid"
+
+
+def _make_unfilled_trade(
+    *,
+    symbol: str,
+    placed_at: datetime,
+    timeout_at: datetime,
+    placement_mid: float,
+    regime: str,
+) -> BacktestTrade:
+    """Build a sentinel BacktestTrade for a mid-price limit that never filled.
+
+    The row exists purely so `signals_attempted` (= len(trades)) reflects the
+    attempt; downstream metrics filter on `entry_was_filled` before computing
+    P&L statistics so this zero-quantity row never pollutes winner/loser math.
+    """
+
+    return BacktestTrade(
+        symbol=symbol,
+        entry_at=placed_at,
+        exit_at=timeout_at,
+        quantity=0,
+        entry_reference_price=placement_mid,
+        entry_price=placement_mid,
+        exit_reference_price=placement_mid,
+        exit_price=placement_mid,
+        gross_pnl=0.0,
+        net_pnl=0.0,
+        slippage_cost=0.0,
+        return_pct=0.0,
+        hold_minutes=0,
+        exit_reason="UNFILLED_LIMIT_TIMEOUT",
+        regime=regime,
+        peak_unrealized_pct=0.0,
+        entry_was_attempted_at_mid=True,
+        entry_was_filled=False,
+    )
+
+
+@dataclass(slots=True)
+class _PendingLimit:
+    """A resting mid-price limit order awaiting fill or timeout."""
+
+    order: LimitOrder
+    regime: str
 
 
 def load_parquet_bars(
@@ -466,6 +562,7 @@ def replay_bars(
     settings = settings or DriftPilotSettings()
     signal = get_signal(signal_name or settings.active_signal)
     _validate_signal_compatibility(signal)
+    uses_mid_price: bool = _signal_uses_mid_price_fill(signal)
     # Per refactor plan v1.1 § 6 Task 5.2: collect data-dependency skip events
     # so the report's diagnostics block can surface them. List of (timestamp, reason).
     _data_dependency_skips: list[tuple[datetime, str]] = []
@@ -494,6 +591,7 @@ def replay_bars(
     quotes: dict[str, Quote] = {}
     positions: list[_OpenPosition] = []
     trades: list[BacktestTrade] = []
+    pending_limits: list[_PendingLimit] = []
     equity = settings.paper_capital
     equity_curve: list[tuple[datetime, float]] = []
 
@@ -538,6 +636,67 @@ def replay_bars(
             latest_by_symbol[bar.symbol] = bar
             quotes[bar.symbol] = _row_to_quote(row, bar, modeled=not has_quote_columns)
 
+        # Phase G (mid-price fill wiring): walk pending mid-price limit orders
+        # against the freshly appended bar history. Anything that fills opens
+        # a real position; anything that times out emits a sentinel
+        # BacktestTrade so `signals_attempted` (= len(trades)) reflects the
+        # attempt without polluting winner/loser math.
+        if pending_limits:
+            still_pending: list[_PendingLimit] = []
+            for pending in pending_limits:
+                order = pending.order
+                symbol_history = history.get(order.symbol, [])
+                future_bars: list[MinuteBar] = [
+                    bar for bar in symbol_history if bar.timestamp > order.placed_at
+                ]
+                fill_result: LimitFillResult = attempt_limit_fill(order, future_bars)
+                if fill_result.filled:
+                    fill_bar: MinuteBar | None = None
+                    for bar in symbol_history:
+                        if bar.timestamp == fill_result.filled_at:
+                            fill_bar = bar
+                            break
+                    if fill_bar is None:
+                        # The fill timestamp must correspond to a bar we saw;
+                        # fall back to the latest bar to avoid losing the fill.
+                        fill_bar = symbol_history[-1] if symbol_history else None
+                    if fill_bar is None:
+                        # No history at all — defer to next tick.
+                        still_pending.append(pending)
+                        continue
+                    candidate_position = _open_position_at_limit(
+                        symbol=order.symbol,
+                        bar=fill_bar,
+                        current_time=fill_bar.timestamp,
+                        settings=settings,
+                        regime=pending.regime,
+                        limit_price=order.placement_mid_price,
+                        limit_timeout_seconds=order.timeout_seconds,
+                    )
+                    if candidate_position is not None and any(
+                        p.symbol == candidate_position.symbol for p in positions
+                    ):
+                        # Symbol opened by a different path in the meantime;
+                        # drop the duplicate and skip.
+                        continue
+                    if candidate_position is not None:
+                        positions.append(candidate_position)
+                    continue
+                deadline = order.placed_at + timedelta(seconds=order.timeout_seconds)
+                if current_time >= deadline:
+                    trades.append(
+                        _make_unfilled_trade(
+                            symbol=order.symbol,
+                            placed_at=order.placed_at,
+                            timeout_at=deadline,
+                            placement_mid=order.placement_mid_price,
+                            regime=pending.regime,
+                        )
+                    )
+                    continue
+                still_pending.append(pending)
+            pending_limits = still_pending
+
         exits = _evaluate_exits(
             positions,
             latest_by_symbol,
@@ -575,20 +734,44 @@ def replay_bars(
                 queue = []
                 regime = None
             open_symbols = {position.symbol for position in positions}
+            pending_symbols = {pending.order.symbol for pending in pending_limits}
+            regime_name: str = regime.regime.value if regime is not None else "UNKNOWN"
             for decision in queue:
                 if free_slots <= 0:
                     break
                 if decision.symbol in open_symbols:
                     continue
+                if decision.symbol in pending_symbols:
+                    # Don't double-enqueue a mid-price limit for a symbol that
+                    # already has one resting.
+                    continue
                 entry_bar = latest_by_symbol.get(decision.symbol)
                 if entry_bar is None:
+                    continue
+                if uses_mid_price:
+                    quote = quotes.get(decision.symbol)
+                    if quote is None:
+                        continue
+                    placement_mid: float = (quote.bid + quote.ask) / 2.0
+                    limit_order = LimitOrder(
+                        symbol=decision.symbol,
+                        placed_at=current_time,
+                        placement_mid_price=placement_mid,
+                        placement_bid=quote.bid,
+                        placement_ask=quote.ask,
+                        timeout_seconds=settings.entry_limit_timeout_seconds,
+                        side="buy",
+                    )
+                    pending_limits.append(_PendingLimit(order=limit_order, regime=regime_name))
+                    pending_symbols.add(decision.symbol)
+                    free_slots -= 1
                     continue
                 candidate_position = _open_position(
                     decision.symbol,
                     entry_bar,
                     current_time=current_time,
                     settings=settings,
-                    regime=regime.regime.value if regime is not None else "UNKNOWN",
+                    regime=regime_name,
                 )
                 if candidate_position is None:
                     continue
@@ -597,6 +780,24 @@ def replay_bars(
                 free_slots -= 1
 
         equity_curve.append((current_time, equity + _unrealized_pnl(positions, latest_by_symbol)))
+
+    # Phase G: any pending mid-price limit still resting at end-of-replay is
+    # treated as an unfilled timeout so the attempt is reflected in
+    # `signals_attempted`. Done before closing remaining positions so the
+    # trades list ordering remains chronological-ish.
+    for pending in pending_limits:
+        order = pending.order
+        deadline = order.placed_at + timedelta(seconds=order.timeout_seconds)
+        trades.append(
+            _make_unfilled_trade(
+                symbol=order.symbol,
+                placed_at=order.placed_at,
+                timeout_at=deadline,
+                placement_mid=order.placement_mid_price,
+                regime=pending.regime,
+            )
+        )
+    pending_limits = []
 
     for position in list(positions):
         last_bar = history[position.symbol][-1]
@@ -808,6 +1009,51 @@ def _open_position(
     )
 
 
+def _open_position_at_limit(
+    *,
+    symbol: str,
+    bar: MinuteBar,
+    current_time: datetime,
+    settings: DriftPilotSettings,
+    regime: str,
+    limit_price: float,
+    limit_timeout_seconds: int,
+) -> _OpenPosition | None:
+    """Open a position whose entry price is the placement-time mid (limit fill).
+
+    Mirrors `_open_position` but uses `limit_price` (the placement mid) as the
+    reference instead of the bar close. Slippage from `entry_fill` is still
+    layered on, modelling the real-world fact that even a "filled at the
+    limit" mid-price order incurs commissions / micro-spread costs at
+    execution.
+    """
+
+    fill = entry_fill(
+        symbol=symbol,
+        quantity=1,
+        reference_price=limit_price,
+        filled_at=current_time,
+        metadata={"source": "backtest", "entry_order_type": "limit_mid"},
+    )
+    quantity: int = int(settings.slot_value // fill.price)
+    if quantity <= 0:
+        return None
+    total_slippage: float = fill.slippage * quantity
+    entry_price: float = limit_price + (total_slippage / quantity)
+    return _OpenPosition(
+        symbol=symbol,
+        entry_at=current_time,
+        quantity=quantity,
+        entry_reference_price=limit_price,
+        entry_price=entry_price,
+        target_price=entry_price * (1 + settings.target_pct),
+        stop_price=entry_price * (1 - settings.stop_pct),
+        regime=regime,
+        limit_placement_mid=limit_price,
+        limit_timeout_seconds=limit_timeout_seconds,
+    )
+
+
 def _evaluate_exits(
     positions: Iterable[_OpenPosition],
     latest_by_symbol: dict[str, MinuteBar],
@@ -869,6 +1115,7 @@ def _close_position(
     # evaluate_exit wrote into `position.metadata["peak_unrealized_pct"]` once
     # limit_fill.py wires signal-attempted tracking into replay.
     peak_unrealized_pct: float = float(position.metadata.get("peak_unrealized_pct", 0.0))
+    was_mid_price_attempt: bool = position.limit_placement_mid is not None
     return BacktestTrade(
         symbol=position.symbol,
         entry_at=position.entry_at,
@@ -886,6 +1133,8 @@ def _close_position(
         exit_reason=exit_reason,
         regime=position.regime,
         peak_unrealized_pct=peak_unrealized_pct,
+        entry_was_attempted_at_mid=was_mid_price_attempt,
+        entry_was_filled=True,
     )
 
 
