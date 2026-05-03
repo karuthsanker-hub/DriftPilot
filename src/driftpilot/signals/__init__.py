@@ -20,6 +20,7 @@ from driftpilot.signals.intraday_momentum_v1 import (
 )
 from driftpilot.signals.regime import Regime, RegimeSnapshot, compute_market_regime
 from driftpilot.signals.scoring import ScoredCandidate, score_candidates
+from driftpilot.signals.whale_tail_v1 import WhaleTailV1Signal
 
 
 DEFAULT_SIGNAL = INTRADAY_MOMENTUM_V1_NAME
@@ -52,6 +53,7 @@ def _normalize_signal_name(name: str) -> str:
 
 
 register_signal(DEFAULT_SIGNAL, lambda: IntradayMomentumV1Signal())
+register_signal("whale_tail_v1", lambda: WhaleTailV1Signal())
 
 __all__ = [
     "BarFeatureCache",
