@@ -134,7 +134,12 @@ def load_settings(
         live_equity_buffer=_get_float(values, "LIVE_EQUITY_BUFFER", 1_000.0),
         backtest_expectancy_passed=_get_bool(values, "BACKTEST_EXPECTANCY_PASSED", False),
         paper_trading_gate_passed=_get_bool(values, "PAPER_TRADING_GATE_PASSED", False),
-        alpaca_key_id=_get_str(values, "ALPACA_KEY_ID", ""),
+        # Accept either ALPACA_KEY_ID (canonical) or ALPACA_API_KEY (alpaca-py
+        # docs naming) — both are common in the wild.
+        alpaca_key_id=(
+            _get_str(values, "ALPACA_KEY_ID", "")
+            or _get_str(values, "ALPACA_API_KEY", "")
+        ),
         alpaca_secret_key=_get_str(values, "ALPACA_SECRET_KEY", ""),
         alpaca_paper_base_url=_get_str(
             values,
