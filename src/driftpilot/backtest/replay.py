@@ -512,8 +512,22 @@ def replay_bars(
     # tests and intraday-momentum callers leave it None (preserve old
     # behavior).
     cap: int | None = history_cap_minutes
+    # Per-month progress checkpoints so a silent OOM-kill leaves a trace of
+    # how far the replay got. Only fires when the harness sees real activity
+    # (i.e. `_log` prints to stdout, captured by nohup'd log files).
+    _last_logged_month: tuple[int, int] | None = None
+    _timestamps_seen = 0
     for timestamp, rows in normalized.groupby("timestamp", sort=True):
         current_time = _as_aware_datetime(timestamp)
+        _timestamps_seen += 1
+        month_key = (current_time.year, current_time.month)
+        if month_key != _last_logged_month:
+            _log(
+                f"replay_bars: entering {current_time.date()} "
+                f"({_timestamps_seen:,} bars processed, "
+                f"{len(trades)} trades closed, equity ${equity:,.2f})"
+            )
+            _last_logged_month = month_key
         latest_by_symbol: dict[str, MinuteBar] = {}
         for row in rows.to_dict("records"):
             bar = _row_to_bar(row)
@@ -606,6 +620,14 @@ def _require_vectorized_signal(signal_name: str) -> None:
         )
 
 
+def _log(msg: str) -> None:
+    """Lightweight progress logger. Prints with timestamp + flushes so
+    nohup'd processes show progress in their log files in real time
+    (Python `-u` flag also helps; this belt-and-braces explicit flush).
+    """
+    print(f"[{datetime.now().isoformat(timespec='seconds')}] {msg}", flush=True)
+
+
 def replay_parquet_cache_generic(
     root: str | Path,
     *,
@@ -635,6 +657,9 @@ def replay_parquet_cache_generic(
     if not root_path.exists():
         raise FileNotFoundError(f"parquet bar root does not exist: {root_path}")
 
+    sig_name = signal_name or settings.active_signal
+    _log(f"replay_parquet_cache_generic: signal={sig_name} start={start} end={end} root={root_path}")
+
     spy_file = root_path / "SPY" / f"{start.year}.parquet"
     if not spy_file.exists():
         raise FileNotFoundError(
@@ -644,14 +669,22 @@ def replay_parquet_cache_generic(
     files = sorted(root_path.glob("**/*.parquet"))
     if not files:
         raise FileNotFoundError(f"no parquet bar files found under {root_path}")
+    _log(f"loading bars: {len(files)} parquet files (incl SPY) — this is the memory-heavy step")
 
     frames: list[pd.DataFrame] = [_read_symbol_cache(spy_file, start=start, end=end)]
-    for file in files:
+    progress_every = max(1, len(files) // 10)
+    loaded = 1
+    for idx, file in enumerate(files):
         if file.parent.name.upper() == "SPY":
             continue
         frame = _read_symbol_cache(file, start=start, end=end)
         if not frame.empty:
             frames.append(frame)
+            loaded += 1
+        if idx > 0 and idx % progress_every == 0:
+            _log(f"  parquet load progress: {idx}/{len(files)} files visited, {loaded} non-empty kept")
+
+    _log(f"parquet load done: {loaded} non-empty frames; concatenating...")
 
     if not frames:
         return ReplayResult(
@@ -663,16 +696,28 @@ def replay_parquet_cache_generic(
         )
 
     bars = pd.concat(frames, ignore_index=True)
-    return replay_bars(
+    _log(
+        f"concat done: {len(bars):,} rows in unified frame "
+        f"(memory peak around here — if OOM, this is where it dies)"
+    )
+    # Free the per-symbol frame list so concat'd 'bars' has the only reference.
+    del frames
+
+    result = replay_bars(
         bars,
         settings=settings,
         rvol_lookback=rvol_lookback,
         point_in_time_constituents=point_in_time_constituents,
-        signal_name=signal_name or settings.active_signal,
+        signal_name=sig_name,
         # Phase 6: bound memory for the four new signals' year-long replay.
         # See replay_bars docstring re: why this is opt-in.
         history_cap_minutes=MAX_HISTORY_MINUTES,
     )
+    _log(
+        f"replay_bars done: {len(result.trades)} trades, "
+        f"final equity ${result.ending_capital:,.2f}"
+    )
+    return result
 
 
 def _normalize_bars(bars: pd.DataFrame) -> pd.DataFrame:
