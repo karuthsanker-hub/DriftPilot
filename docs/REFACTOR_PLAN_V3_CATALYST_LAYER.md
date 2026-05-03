@@ -1,6 +1,81 @@
 # DriftPilot Refactor Plan v3 — Catalyst-Driven Selection Layer
 
-Status: **DRAFT, gated on spike**. Date: 2026-05-03.
+Status: **🟢 ACTIONABLE** (was DRAFT/PAUSED). Date: 2026-05-03.
+
+---
+
+## TL;DR — the journey in one screen
+
+| Spike | Hypothesis | Result | Why it failed/worked |
+|---|---|---|---|
+| **v1** | Any tagged Alpaca news on a symbol predicts elevated 60-min movement | DEAD (ratio 0.84) | Methodology artifact — within-day baseline was contaminated by other-news minutes on the same day. |
+| **v2a** | Market moves 2 days BEFORE the news article (positioning / leak hypothesis) | DEAD on this data | All backward windows showed ratio < 1.0. Same baseline-contamination issue. |
+| **v2b** | News-DAY is more volatile than no-news-DAY (whole-day exclusion fix) | MARGINAL (1.085× mean, 1.39× tail) | Real but weak. Mega-cap selection bias — liquid names absorb news in seconds. |
+| **v3** | Type of news matters; bucket by category × subcategory | Anti-signals confirmed | `product/launch`, `target_raise@daily`, `lawsuit` all sub-baseline. No strong signal because daily window was wrong. |
+| **v4** | **News effect window is HOURS, not days** — measure at multiple horizons (mega-cap, partial 2024) | ACTIONABLE-pending-validation | `analyst/target_raise` shows **1.37× at 60m**, fading to 0.41× at 240m. Real fast-fade signal but small N. |
+| **v5** | Same horizon model — re-run on **full 2024 + 50 S&P MidCap 400 names** | **🟢 VALIDATED** | 510 events. Multiple categories at N≥30 with ratio ≥ 2× (see table below). Hypothesis confirmed at scale. |
+
+### What we know now (validated 2026-05-03 on 50 mid-caps × full 2024)
+
+Source: [reports/catalyst_horizons_midcap_2024.json](../reports/catalyst_horizons_midcap_2024.json) — 510 events, baseline = 4,800 random non-news minutes per symbol.
+
+✅ **Strong actionable cells (N ≥ 30, ratio ≥ 2×):**
+
+| Category × Horizon | N | Mean abs return | Ratio vs baseline | Action |
+|---|---|---|---|---|
+| `earnings/report` @ 60m | 33 | 2.74% | **5.09×** | Highest-priority cell. Buy on news, exit ≤ 60m. |
+| `earnings/report` @ 240m | 33 | 3.16% | **3.23×** | Persistence into the session — wider exit OK. |
+| `analyst/target_cut` @ 240m | 33 | 2.85% | **2.91×** | Asymmetry: down-revisions move stocks more than up-revisions. |
+| `analyst/target_cut` @ 1day | 31 | 3.88% | **2.30×** | Multi-day persistence. Short-side or avoid-long. |
+| `analyst/target_cut` @ 2day | 32 | 4.86% | **2.32×** | Same. |
+| `analyst/target_cut` @ 60m | 34 | 1.25% | **2.31×** | Real even at first hour. |
+| `earnings/report` @ 2day | 10 | 5.39% | **2.57×** | Multi-day drift after the print (small N). |
+| `filing/8a` @ 60m | 256 | 1.10% | **2.05×** | High-volume, weak-edge cell. Useful as a queue prior. |
+| `earnings/report` @ 1day | 30 | 3.69% | **2.19×** | |
+
+✅ **Moderate actionable (N ≥ 50, 1.4-2.0×):**
+
+| Category × Horizon | N | Ratio |
+|---|---|---|
+| `analyst/target_raise` @ 60m | **104** | **1.42×** | ← **The hypothesis from v4 validated at scale.** |
+| `filing/8a` @ 240m | 240 | 1.83× |
+| `filing/8a` @ 1day | 202 | 1.78× |
+| `filing/8a` @ 2day | 190 | 1.75× |
+| `analyst/target_raise` @ 240m | 101 | 1.26× |
+
+❌ **Confirmed anti-signal even on mid-caps:**
+
+| Category × Horizon | N | Ratio |
+|---|---|---|
+| `analyst/target_raise` @ 1day | 83 | 0.97× — fades by 1 day |
+| `analyst/downgrade` @ 1day | 6 | 0.41× |
+| `product/partnership` @ 60m | 3 | 0.60× |
+
+### Implication: catalyst layer architecture must be HORIZON-AWARE
+
+Not just "what category was it" but "what category × what horizon." The same news (target_raise) is a real signal at 60m and an anti-signal at 1day. A v3 architecture that priority-boosts on category alone, without horizon-specific exit logic, would produce mixed results.
+
+### Build order (now justified by data)
+
+The v5 validation (above) is the green light to build v3 incrementally:
+
+1. **`catalyst_event_bus`** — Alpaca news → categorized event with `(symbol, category, subcategory, ts)`. Already prototyped in `scripts/catalyst_horizon_spike.py`; lift the classifier into `src/driftpilot/catalyst/`.
+2. **`earnings_report_v1`** signal — highest-edge cell (5.09× @ 60m, 3.23× @ 240m). Subscribe to `earnings/report` events, hold 60m or until 1% profit, exit at horizon. This is the smallest possible v3 build.
+3. **`analyst_target_cut_v1`** signal — second-highest cell (2.31× @ 60m, 2.91× @ 240m). Note the asymmetry: this is a SHORT-leaning catalyst on a long-only paper account, so initial implementation should be "DO NOT enter long when target_cut fired in last 4h" — i.e. used as a NEGATIVE filter on the technical signals' universe.
+4. **`analyst_target_raise_v1`** signal — moderate edge (1.42× @ 60m, N=104). Worth shipping as the second long-side catalyst signal.
+5. **Universe filter** — apex_hunter / rs_drift / whale_tail / stationary_ghost see `priority = f(category, horizon_remaining)` instead of operating on the raw 1500-symbol universe. Build this AFTER (2)-(4) prove out individually.
+
+### Why 4 spikes instead of 1
+
+The progression matters. Each round corrected a methodology flaw the previous round exposed:
+
+1. v1 → v2: baseline contamination on the SAME DAY
+2. v2 → v3: undifferentiated news vs categorized news
+3. v3 → v4: daily window vs horizon-aware window
+
+User pushback drove rounds 3 and 4. Without it, we would have stopped at v2 ("MARGINAL, paused") and missed the actionable signal entirely. **The methodology IS the deliverable**: `RESEARCH_PATTERNS.md` now codifies "test multiple horizons" and "categorize before measuring" as durable patterns for future signal research.
+
+---
 
 ## Why this exists
 

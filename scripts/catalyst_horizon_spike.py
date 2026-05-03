@@ -94,7 +94,38 @@ class HorizonBaselineSample:
 
 def main() -> None:
     args = _parse_args()
-    symbols = list(STOCK_METADATA.keys())
+    if args.symbols_csv:
+        # Load a custom universe (e.g. mid-caps from config/universe.csv).
+        # Symbols outside STOCK_METADATA get defaults so the script can run
+        # without us having to enrich every name.
+        df = pd.read_csv(args.symbols_csv)
+        sym_col = "symbol" if "symbol" in df.columns else df.columns[0]
+        sec_col = "sector" if "sector" in df.columns else None
+        symbols = [s.upper() for s in df[sym_col].astype(str).tolist()]
+        if args.symbol_filter_etf:
+            etf_col = "source_etfs" if "source_etfs" in df.columns else None
+            if etf_col:
+                mask = df[etf_col].astype(str).str.contains(args.symbol_filter_etf, na=False)
+                symbols = [s.upper() for s in df.loc[mask, sym_col].astype(str).tolist()]
+        if args.symbol_limit and len(symbols) > args.symbol_limit:
+            symbols = symbols[: args.symbol_limit]
+        # Build STOCK_METADATA entries for symbols not already known.
+        for i, sym in enumerate(symbols):
+            if sym in STOCK_METADATA:
+                continue
+            sector = (
+                str(df.iloc[i][sec_col]) if sec_col is not None and i < len(df)
+                else "Unknown"
+            )
+            STOCK_METADATA[sym] = {
+                "sector": sector,
+                "cap": "mid",   # caller assumed mid-cap; flag if filtering
+                "seasonality": "even",
+            }
+    elif args.symbols:
+        symbols = [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
+    else:
+        symbols = list(STOCK_METADATA.keys())
     print(f"[horizon-spike] symbols: {len(symbols)}")
     print(f"[horizon-spike] window: {args.start} to {args.end}")
     print(f"[horizon-spike] horizons: {list(HORIZONS)}")
@@ -343,6 +374,27 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--min-samples", type=int, default=3)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--output", default="reports/catalyst_horizons.json")
+    p.add_argument(
+        "--symbols",
+        default=None,
+        help="Comma-separated symbol list. Overrides the default mega-cap universe.",
+    )
+    p.add_argument(
+        "--symbols-csv",
+        default=None,
+        help="Path to a CSV with a 'symbol' column. Use config/universe.csv for the full S&P 1500.",
+    )
+    p.add_argument(
+        "--symbol-filter-etf",
+        default=None,
+        help="When --symbols-csv is given, only keep rows where source_etfs contains this string (e.g. IJH for mid-caps).",
+    )
+    p.add_argument(
+        "--symbol-limit",
+        type=int,
+        default=None,
+        help="Cap the number of symbols (after filtering). Useful for keeping API calls + runtime bounded.",
+    )
     return p.parse_args()
 
 

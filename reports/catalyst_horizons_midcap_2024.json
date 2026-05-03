@@ -1,0 +1,661 @@
+{
+  "meta": {
+    "symbols": [
+      "FLEX",
+      "FTI",
+      "CW",
+      "XPO",
+      "UTHR",
+      "FN",
+      "MTZ",
+      "NVT",
+      "TWLO",
+      "P",
+      "WWD",
+      "ENTG",
+      "CRS",
+      "ATI",
+      "USFD",
+      "BURL",
+      "BWXT",
+      "ILMN",
+      "RBA",
+      "MKSI",
+      "RS",
+      "RBC",
+      "RGLD",
+      "ITT",
+      "MTSI",
+      "NXT",
+      "APG",
+      "EWBC",
+      "SNX",
+      "OVV",
+      "TLN",
+      "WCC",
+      "LSCC",
+      "AA",
+      "NLY",
+      "TTMI",
+      "PR",
+      "WPC",
+      "SGI",
+      "STRL",
+      "CLH",
+      "THC",
+      "WSO",
+      "DKS",
+      "DTM",
+      "MLI",
+      "JLL",
+      "PNFP",
+      "ONTO",
+      "LECO"
+    ],
+    "start": "2024-01-01",
+    "end": "2024-12-31",
+    "horizons": {
+      "60m": 60,
+      "240m": 240,
+      "1day": 1440,
+      "2day": 2880
+    },
+    "n_articles_raw": 510,
+    "n_events": 510,
+    "n_baseline": 4800,
+    "anchor_gap_minutes": 60,
+    "target_gap_minutes": 1440,
+    "baseline_samples_per_symbol": 100,
+    "generated_at": "2026-05-03T14:25:38.013338+00:00"
+  },
+  "by_horizon": {
+    "60m": [
+      {
+        "category": "filing",
+        "subcategory": "8a",
+        "n": 256,
+        "mean_abs_return_pct": 1.1042,
+        "p_gt_1pct": 0.293,
+        "p_gt_2pct": 0.1289,
+        "p_gt_3pct": 0.0898,
+        "ratio_mean": 2.05
+      },
+      {
+        "category": "analyst",
+        "subcategory": "target_raise",
+        "n": 104,
+        "mean_abs_return_pct": 0.7629,
+        "p_gt_1pct": 0.25,
+        "p_gt_2pct": 0.0962,
+        "p_gt_3pct": 0.0288,
+        "ratio_mean": 1.416
+      },
+      {
+        "category": "product",
+        "subcategory": "launch",
+        "n": 1,
+        "mean_abs_return_pct": 1.4464,
+        "p_gt_1pct": 1.0,
+        "p_gt_2pct": 0.0,
+        "p_gt_3pct": 0.0,
+        "ratio_mean": 2.685
+      },
+      {
+        "category": "analyst",
+        "subcategory": "initiates",
+        "n": 12,
+        "mean_abs_return_pct": 0.6125,
+        "p_gt_1pct": 0.25,
+        "p_gt_2pct": 0.0833,
+        "p_gt_3pct": 0.0,
+        "ratio_mean": 1.137
+      },
+      {
+        "category": "product",
+        "subcategory": "partnership",
+        "n": 3,
+        "mean_abs_return_pct": 0.3251,
+        "p_gt_1pct": 0.0,
+        "p_gt_2pct": 0.0,
+        "p_gt_3pct": 0.0,
+        "ratio_mean": 0.603
+      },
+      {
+        "category": "analyst",
+        "subcategory": "reiterates",
+        "n": 11,
+        "mean_abs_return_pct": 0.6705,
+        "p_gt_1pct": 0.1818,
+        "p_gt_2pct": 0.0,
+        "p_gt_3pct": 0.0,
+        "ratio_mean": 1.245
+      },
+      {
+        "category": "analyst",
+        "subcategory": "downgrade",
+        "n": 8,
+        "mean_abs_return_pct": 1.1399,
+        "p_gt_1pct": 0.375,
+        "p_gt_2pct": 0.125,
+        "p_gt_3pct": 0.0,
+        "ratio_mean": 2.116
+      },
+      {
+        "category": "m_and_a",
+        "subcategory": "acquires",
+        "n": 9,
+        "mean_abs_return_pct": 1.1358,
+        "p_gt_1pct": 0.3333,
+        "p_gt_2pct": 0.1111,
+        "p_gt_3pct": 0.1111,
+        "ratio_mean": 2.108
+      },
+      {
+        "category": "other",
+        "subcategory": "generic",
+        "n": 8,
+        "mean_abs_return_pct": 0.6035,
+        "p_gt_1pct": 0.25,
+        "p_gt_2pct": 0.0,
+        "p_gt_3pct": 0.0,
+        "ratio_mean": 1.12
+      },
+      {
+        "category": "analyst",
+        "subcategory": "target_cut",
+        "n": 34,
+        "mean_abs_return_pct": 1.2464,
+        "p_gt_1pct": 0.3824,
+        "p_gt_2pct": 0.2647,
+        "p_gt_3pct": 0.0588,
+        "ratio_mean": 2.314
+      },
+      {
+        "category": "macro",
+        "subcategory": "fomc",
+        "n": 2,
+        "mean_abs_return_pct": 2.0732,
+        "p_gt_1pct": 1.0,
+        "p_gt_2pct": 0.5,
+        "p_gt_3pct": 0.0,
+        "ratio_mean": 3.848
+      },
+      {
+        "category": "analyst",
+        "subcategory": "upgrade",
+        "n": 10,
+        "mean_abs_return_pct": 1.6805,
+        "p_gt_1pct": 0.4,
+        "p_gt_2pct": 0.2,
+        "p_gt_3pct": 0.2,
+        "ratio_mean": 3.119
+      },
+      {
+        "category": "earnings",
+        "subcategory": "report",
+        "n": 33,
+        "mean_abs_return_pct": 2.7436,
+        "p_gt_1pct": 0.697,
+        "p_gt_2pct": 0.5152,
+        "p_gt_3pct": 0.3636,
+        "ratio_mean": 5.093
+      },
+      {
+        "category": "earnings",
+        "subcategory": "beat",
+        "n": 1,
+        "mean_abs_return_pct": 0.7185,
+        "p_gt_1pct": 0.0,
+        "p_gt_2pct": 0.0,
+        "p_gt_3pct": 0.0,
+        "ratio_mean": 1.334
+      },
+      {
+        "category": "earnings",
+        "subcategory": "guidance_down",
+        "n": 1,
+        "mean_abs_return_pct": 1.6044,
+        "p_gt_1pct": 1.0,
+        "p_gt_2pct": 0.0,
+        "p_gt_3pct": 0.0,
+        "ratio_mean": 2.978
+      }
+    ],
+    "240m": [
+      {
+        "category": "filing",
+        "subcategory": "8a",
+        "n": 240,
+        "mean_abs_return_pct": 1.7904,
+        "p_gt_1pct": 0.4917,
+        "p_gt_2pct": 0.2167,
+        "p_gt_3pct": 0.15,
+        "ratio_mean": 1.826
+      },
+      {
+        "category": "analyst",
+        "subcategory": "target_raise",
+        "n": 101,
+        "mean_abs_return_pct": 1.2319,
+        "p_gt_1pct": 0.4455,
+        "p_gt_2pct": 0.1782,
+        "p_gt_3pct": 0.0594,
+        "ratio_mean": 1.256
+      },
+      {
+        "category": "product",
+        "subcategory": "launch",
+        "n": 1,
+        "mean_abs_return_pct": 2.7471,
+        "p_gt_1pct": 1.0,
+        "p_gt_2pct": 1.0,
+        "p_gt_3pct": 0.0,
+        "ratio_mean": 2.801
+      },
+      {
+        "category": "analyst",
+        "subcategory": "initiates",
+        "n": 12,
+        "mean_abs_return_pct": 1.0037,
+        "p_gt_1pct": 0.3333,
+        "p_gt_2pct": 0.1667,
+        "p_gt_3pct": 0.0833,
+        "ratio_mean": 1.023
+      },
+      {
+        "category": "product",
+        "subcategory": "partnership",
+        "n": 3,
+        "mean_abs_return_pct": 0.6979,
+        "p_gt_1pct": 0.3333,
+        "p_gt_2pct": 0.0,
+        "p_gt_3pct": 0.0,
+        "ratio_mean": 0.712
+      },
+      {
+        "category": "analyst",
+        "subcategory": "reiterates",
+        "n": 10,
+        "mean_abs_return_pct": 1.0071,
+        "p_gt_1pct": 0.4,
+        "p_gt_2pct": 0.2,
+        "p_gt_3pct": 0.0,
+        "ratio_mean": 1.027
+      },
+      {
+        "category": "analyst",
+        "subcategory": "downgrade",
+        "n": 8,
+        "mean_abs_return_pct": 0.6904,
+        "p_gt_1pct": 0.25,
+        "p_gt_2pct": 0.0,
+        "p_gt_3pct": 0.0,
+        "ratio_mean": 0.704
+      },
+      {
+        "category": "m_and_a",
+        "subcategory": "acquires",
+        "n": 9,
+        "mean_abs_return_pct": 1.3498,
+        "p_gt_1pct": 0.2222,
+        "p_gt_2pct": 0.1111,
+        "p_gt_3pct": 0.1111,
+        "ratio_mean": 1.376
+      },
+      {
+        "category": "other",
+        "subcategory": "generic",
+        "n": 6,
+        "mean_abs_return_pct": 1.5416,
+        "p_gt_1pct": 0.6667,
+        "p_gt_2pct": 0.3333,
+        "p_gt_3pct": 0.1667,
+        "ratio_mean": 1.572
+      },
+      {
+        "category": "analyst",
+        "subcategory": "target_cut",
+        "n": 33,
+        "mean_abs_return_pct": 2.8545,
+        "p_gt_1pct": 0.5455,
+        "p_gt_2pct": 0.303,
+        "p_gt_3pct": 0.2727,
+        "ratio_mean": 2.911
+      },
+      {
+        "category": "macro",
+        "subcategory": "fomc",
+        "n": 2,
+        "mean_abs_return_pct": 4.7663,
+        "p_gt_1pct": 1.0,
+        "p_gt_2pct": 1.0,
+        "p_gt_3pct": 1.0,
+        "ratio_mean": 4.86
+      },
+      {
+        "category": "analyst",
+        "subcategory": "upgrade",
+        "n": 10,
+        "mean_abs_return_pct": 2.0213,
+        "p_gt_1pct": 0.6,
+        "p_gt_2pct": 0.2,
+        "p_gt_3pct": 0.2,
+        "ratio_mean": 2.061
+      },
+      {
+        "category": "earnings",
+        "subcategory": "report",
+        "n": 33,
+        "mean_abs_return_pct": 3.1649,
+        "p_gt_1pct": 0.7273,
+        "p_gt_2pct": 0.6061,
+        "p_gt_3pct": 0.4242,
+        "ratio_mean": 3.227
+      },
+      {
+        "category": "earnings",
+        "subcategory": "beat",
+        "n": 1,
+        "mean_abs_return_pct": 0.8017,
+        "p_gt_1pct": 0.0,
+        "p_gt_2pct": 0.0,
+        "p_gt_3pct": 0.0,
+        "ratio_mean": 0.817
+      },
+      {
+        "category": "earnings",
+        "subcategory": "guidance_down",
+        "n": 1,
+        "mean_abs_return_pct": 2.1425,
+        "p_gt_1pct": 1.0,
+        "p_gt_2pct": 1.0,
+        "p_gt_3pct": 0.0,
+        "ratio_mean": 2.185
+      }
+    ],
+    "1day": [
+      {
+        "category": "filing",
+        "subcategory": "8a",
+        "n": 202,
+        "mean_abs_return_pct": 2.9922,
+        "p_gt_1pct": 0.6881,
+        "p_gt_2pct": 0.4455,
+        "p_gt_3pct": 0.2871,
+        "ratio_mean": 1.775
+      },
+      {
+        "category": "analyst",
+        "subcategory": "target_raise",
+        "n": 83,
+        "mean_abs_return_pct": 1.6306,
+        "p_gt_1pct": 0.4819,
+        "p_gt_2pct": 0.253,
+        "p_gt_3pct": 0.1566,
+        "ratio_mean": 0.968
+      },
+      {
+        "category": "product",
+        "subcategory": "launch",
+        "n": 1,
+        "mean_abs_return_pct": 2.4048,
+        "p_gt_1pct": 1.0,
+        "p_gt_2pct": 1.0,
+        "p_gt_3pct": 0.0,
+        "ratio_mean": 1.427
+      },
+      {
+        "category": "product",
+        "subcategory": "partnership",
+        "n": 3,
+        "mean_abs_return_pct": 2.0881,
+        "p_gt_1pct": 0.6667,
+        "p_gt_2pct": 0.3333,
+        "p_gt_3pct": 0.3333,
+        "ratio_mean": 1.239
+      },
+      {
+        "category": "analyst",
+        "subcategory": "initiates",
+        "n": 8,
+        "mean_abs_return_pct": 1.3745,
+        "p_gt_1pct": 0.5,
+        "p_gt_2pct": 0.25,
+        "p_gt_3pct": 0.125,
+        "ratio_mean": 0.816
+      },
+      {
+        "category": "analyst",
+        "subcategory": "reiterates",
+        "n": 9,
+        "mean_abs_return_pct": 1.4495,
+        "p_gt_1pct": 0.2222,
+        "p_gt_2pct": 0.2222,
+        "p_gt_3pct": 0.2222,
+        "ratio_mean": 0.86
+      },
+      {
+        "category": "analyst",
+        "subcategory": "downgrade",
+        "n": 6,
+        "mean_abs_return_pct": 0.686,
+        "p_gt_1pct": 0.1667,
+        "p_gt_2pct": 0.1667,
+        "p_gt_3pct": 0.0,
+        "ratio_mean": 0.407
+      },
+      {
+        "category": "other",
+        "subcategory": "generic",
+        "n": 6,
+        "mean_abs_return_pct": 1.7739,
+        "p_gt_1pct": 0.8333,
+        "p_gt_2pct": 0.3333,
+        "p_gt_3pct": 0.1667,
+        "ratio_mean": 1.053
+      },
+      {
+        "category": "m_and_a",
+        "subcategory": "acquires",
+        "n": 6,
+        "mean_abs_return_pct": 1.7537,
+        "p_gt_1pct": 0.6667,
+        "p_gt_2pct": 0.5,
+        "p_gt_3pct": 0.0,
+        "ratio_mean": 1.041
+      },
+      {
+        "category": "analyst",
+        "subcategory": "target_cut",
+        "n": 31,
+        "mean_abs_return_pct": 3.8798,
+        "p_gt_1pct": 0.6774,
+        "p_gt_2pct": 0.3871,
+        "p_gt_3pct": 0.2258,
+        "ratio_mean": 2.302
+      },
+      {
+        "category": "macro",
+        "subcategory": "fomc",
+        "n": 2,
+        "mean_abs_return_pct": 6.5974,
+        "p_gt_1pct": 1.0,
+        "p_gt_2pct": 1.0,
+        "p_gt_3pct": 1.0,
+        "ratio_mean": 3.915
+      },
+      {
+        "category": "analyst",
+        "subcategory": "upgrade",
+        "n": 7,
+        "mean_abs_return_pct": 2.8011,
+        "p_gt_1pct": 0.7143,
+        "p_gt_2pct": 0.5714,
+        "p_gt_3pct": 0.5714,
+        "ratio_mean": 1.662
+      },
+      {
+        "category": "earnings",
+        "subcategory": "report",
+        "n": 30,
+        "mean_abs_return_pct": 3.6906,
+        "p_gt_1pct": 0.7667,
+        "p_gt_2pct": 0.6333,
+        "p_gt_3pct": 0.5667,
+        "ratio_mean": 2.19
+      },
+      {
+        "category": "earnings",
+        "subcategory": "beat",
+        "n": 1,
+        "mean_abs_return_pct": 1.0891,
+        "p_gt_1pct": 1.0,
+        "p_gt_2pct": 0.0,
+        "p_gt_3pct": 0.0,
+        "ratio_mean": 0.646
+      },
+      {
+        "category": "earnings",
+        "subcategory": "guidance_down",
+        "n": 1,
+        "mean_abs_return_pct": 2.4868,
+        "p_gt_1pct": 1.0,
+        "p_gt_2pct": 1.0,
+        "p_gt_3pct": 0.0,
+        "ratio_mean": 1.476
+      }
+    ],
+    "2day": [
+      {
+        "category": "filing",
+        "subcategory": "8a",
+        "n": 190,
+        "mean_abs_return_pct": 3.6716,
+        "p_gt_1pct": 0.7053,
+        "p_gt_2pct": 0.5263,
+        "p_gt_3pct": 0.3474,
+        "ratio_mean": 1.752
+      },
+      {
+        "category": "analyst",
+        "subcategory": "target_raise",
+        "n": 76,
+        "mean_abs_return_pct": 2.3574,
+        "p_gt_1pct": 0.6579,
+        "p_gt_2pct": 0.4079,
+        "p_gt_3pct": 0.2895,
+        "ratio_mean": 1.125
+      },
+      {
+        "category": "product",
+        "subcategory": "launch",
+        "n": 1,
+        "mean_abs_return_pct": 1.5124,
+        "p_gt_1pct": 1.0,
+        "p_gt_2pct": 0.0,
+        "p_gt_3pct": 0.0,
+        "ratio_mean": 0.722
+      },
+      {
+        "category": "analyst",
+        "subcategory": "initiates",
+        "n": 8,
+        "mean_abs_return_pct": 2.169,
+        "p_gt_1pct": 0.625,
+        "p_gt_2pct": 0.625,
+        "p_gt_3pct": 0.25,
+        "ratio_mean": 1.035
+      },
+      {
+        "category": "analyst",
+        "subcategory": "reiterates",
+        "n": 12,
+        "mean_abs_return_pct": 1.3814,
+        "p_gt_1pct": 0.4167,
+        "p_gt_2pct": 0.3333,
+        "p_gt_3pct": 0.0833,
+        "ratio_mean": 0.659
+      },
+      {
+        "category": "analyst",
+        "subcategory": "downgrade",
+        "n": 7,
+        "mean_abs_return_pct": 1.6925,
+        "p_gt_1pct": 0.5714,
+        "p_gt_2pct": 0.4286,
+        "p_gt_3pct": 0.2857,
+        "ratio_mean": 0.808
+      },
+      {
+        "category": "m_and_a",
+        "subcategory": "acquires",
+        "n": 6,
+        "mean_abs_return_pct": 2.508,
+        "p_gt_1pct": 0.6667,
+        "p_gt_2pct": 0.5,
+        "p_gt_3pct": 0.1667,
+        "ratio_mean": 1.197
+      },
+      {
+        "category": "analyst",
+        "subcategory": "target_cut",
+        "n": 32,
+        "mean_abs_return_pct": 4.8564,
+        "p_gt_1pct": 0.625,
+        "p_gt_2pct": 0.5,
+        "p_gt_3pct": 0.375,
+        "ratio_mean": 2.317
+      },
+      {
+        "category": "macro",
+        "subcategory": "fomc",
+        "n": 1,
+        "mean_abs_return_pct": 1.1774,
+        "p_gt_1pct": 1.0,
+        "p_gt_2pct": 0.0,
+        "p_gt_3pct": 0.0,
+        "ratio_mean": 0.562
+      },
+      {
+        "category": "product",
+        "subcategory": "partnership",
+        "n": 2,
+        "mean_abs_return_pct": 1.3117,
+        "p_gt_1pct": 1.0,
+        "p_gt_2pct": 0.0,
+        "p_gt_3pct": 0.0,
+        "ratio_mean": 0.626
+      },
+      {
+        "category": "analyst",
+        "subcategory": "upgrade",
+        "n": 6,
+        "mean_abs_return_pct": 4.4604,
+        "p_gt_1pct": 0.8333,
+        "p_gt_2pct": 0.8333,
+        "p_gt_3pct": 0.6667,
+        "ratio_mean": 2.128
+      },
+      {
+        "category": "earnings",
+        "subcategory": "report",
+        "n": 10,
+        "mean_abs_return_pct": 5.3947,
+        "p_gt_1pct": 0.6,
+        "p_gt_2pct": 0.6,
+        "p_gt_3pct": 0.6,
+        "ratio_mean": 2.574
+      },
+      {
+        "category": "other",
+        "subcategory": "generic",
+        "n": 7,
+        "mean_abs_return_pct": 3.0001,
+        "p_gt_1pct": 1.0,
+        "p_gt_2pct": 0.5714,
+        "p_gt_3pct": 0.5714,
+        "ratio_mean": 1.431
+      }
+    ]
+  }
+}
