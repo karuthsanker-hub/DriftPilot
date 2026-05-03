@@ -75,6 +75,41 @@ The signal is **not regime-conditional** — it loses uniformly. If only one reg
 
 6. **The signal fires far more than designed.** 85,363 trades on 252 trading days = 339 trades/day average. With 5 slots, that's 67 turnovers per slot per day, far above the spec's intent of "stocks selected at 10:00 hold to EOD". The signal is over-firing because slot-recycling lets it re-enter symbols repeatedly; combined with the high TIME-stop / EOD-flat rate, this means transaction-cost drag dominates the result. v2 candidate fix: limit re-entries on the same symbol per session (already in the spec's KNOWN_RISKS as `MAX_TRADES_PER_SYMBOL_PER_DAY` but not enforced in the current backtest harness).
 
+### Counterfactual analysis: would a smaller take-profit have helped?
+
+A common (correct) intuition: "we're a bot, we should be content with 1–2%
+and recycle the slot, not be greedy waiting for 1.5%." We tested this
+hypothesis directly against the existing trade log without re-running
+the backtest. Result: **the take-profit-at-1% variant produces a WORSE
+P&L by ~$9k** ($−145,273 vs the actual $−135,977).
+
+Why: bucketing all 85,363 trades by their peak unrealized gain during the
+trade (the moment the trade was most "in the money"):
+
+| Peak unrealized gain | % of trades | Actual avg realized |
+|---|---|---|
+| ≥ 1.0% | **7.6%** | +1.05% (works as designed) |
+| 0.5% – 1.0% | 8.2% | +0.10% (drifted back down) |
+| 0.25% – 0.5% | 7.5% | −0.22% |
+| **< 0.25%** | **76.8%** | **−0.31%** |
+
+**77% of selected stocks never gain even 0.25% during the trade.** They
+drift sideways or chop down, then exit at EOD flat. There is nothing
+for a take-profit to capture because nothing moves.
+
+Capping winners at +0.9% net (a +1% take-profit minus slippage) would
+shave ~$9k off the total because the 7.6% of trades that DID work
+already realized +1.05% on average — the existing exit logic was already
+slightly better than a 1% cap. The exit philosophy isn't the bottleneck;
+the entry is.
+
+**Lesson 7:** the bot-style "take small gains and recycle" philosophy is
+correct in general, but it requires an entry signal that actually picks
+stocks that move. RS-Drift picks stocks where 77% never move 0.25%. No
+exit-timing logic can save a strategy whose selection is that flat. The
+priority for v2 of this signal is **entry quality** (raise the RS
+threshold, add volume confirmation, sector breadth), not exit philosophy.
+
 ### Recommended next steps for RS-Drift research
 - (a) Deploy Phase G and re-run; capture the realistic `fill_rate_pct`. If <50%, the verdict is FAIL on two criteria and the strategy is dead at this configuration.
 - (b) Sweep the RS threshold on `[1.5, 2.0, 2.5, 3.0]` to see if a more selective entry has positive expectancy.

@@ -84,6 +84,12 @@ Verdict gates per refactor plan v1.1 § Phase 4:
 2. **Break-even trigger collapses asymmetric R:R from 2.0 → 1.38.** Winners decay back to break-even before hitting target. v2 candidate: disable break-even, let target/stop run.
 3. **Harness-default TIME stop leaks through signal's custom `evaluate_exit`** — 22% of trades hit the default 45-min TIME stop, contradicting the spec which says hold to EOD. v2 harness fix: let signals declare "no default TIME stop."
 
+**Counterfactual we tested without re-running:** "what if we took profit
+at +1% instead of +1.5%?" Answer: the variant is *worse* by $9k. 77%
+of selected stocks never gain even 0.25% during the trade — there is
+nothing to take. The entry signal is the bottleneck, not the exit.
+See [`signals/rs_drift_v1/README.md` § Counterfactual analysis](../src/driftpilot/signals/rs_drift_v1/README.md).
+
 Full lesson set + remediation list: [`src/driftpilot/signals/rs_drift_v1/README.md`](../src/driftpilot/signals/rs_drift_v1/README.md) § Lessons learned.
 
 ### `whale_tail_v1` — pending
