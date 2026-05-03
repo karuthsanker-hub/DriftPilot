@@ -84,11 +84,58 @@ def no_exit_decision() -> ExitDecision:
     return ExitDecision(should_exit=False, exit_reason=None, metadata={})
 
 
+class InsufficientDataError(Exception):
+    """Raised by a signal when its declared data dependencies cannot be
+    satisfied at the current backtest cycle.
+
+    Per refactor plan v1.1 § 3 Task 2.2 + 2.3, signals that declare
+    `data_dependencies()` MUST verify them at the start of `scan` /
+    `rank_candidates` and raise `InsufficientDataError` rather than
+    silently returning empty candidates or zero-dividing on a missing
+    SPY bar. The backtest harness catches this, logs a
+    `data_dependency_skip` event in the report's diagnostics block, and
+    returns an empty candidate list for that cycle (without crashing).
+    """
+
+
+def signal_data_dependencies(signal: object) -> tuple[str, ...]:
+    """Read a signal's declared data dependencies, with a permissive default.
+
+    Returns the result of `signal.data_dependencies()` if the method exists,
+    or an empty tuple. Used by the harness validator (Phase 2.1) without
+    requiring every existing signal to immediately implement the method.
+    Signals that genuinely depend on SPY (RS-Drift, Apex Hunter) override.
+    """
+
+    method = getattr(signal, "data_dependencies", None)
+    if method is None:
+        return ()
+    result = method() if callable(method) else method
+    return tuple(result)
+
+
+def signal_required_history_minutes(signal: object) -> int:
+    """Read a signal's declared required-history-minutes, default 0.
+
+    Returns `signal.required_history_minutes()` if defined, else 0.
+    Apex Hunter declares 180 (90-min EWMLR + warm-up); Stationary Ghost
+    declares ~30. Other signals fall back to 0 until they opt in.
+    """
+
+    method = getattr(signal, "required_history_minutes", None)
+    if method is None:
+        return 0
+    return int(method() if callable(method) else method)
+
+
 __all__ = [
     "BlockedReason",
     "Candidate",
     "ExitDecision",
+    "InsufficientDataError",
     "SignalProtocol",
     "CandidateDecisionProtocol",
     "no_exit_decision",
+    "signal_data_dependencies",
+    "signal_required_history_minutes",
 ]

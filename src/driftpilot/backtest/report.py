@@ -1,15 +1,45 @@
 from __future__ import annotations
 
 import json
+from collections import defaultdict
 from dataclasses import asdict
 from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
-from driftpilot.backtest.metrics import BacktestMetrics, compute_metrics
+from driftpilot.backtest.metrics import (
+    BacktestMetrics,
+    compute_locked_spec_metrics,
+    compute_metrics,
+)
 from driftpilot.backtest.replay import ReplayResult
 from driftpilot.settings import DriftPilotSettings
 from driftpilot.signals import get_signal
+
+
+def determine_verdict(
+    metrics: dict[str, float],
+    signal_name: str,
+) -> tuple[str, str]:
+    """Locked Integration Refactor v1.1 verdict logic.
+
+    Returns ``(verdict, fail_reason)``. ``fail_reason`` is the empty string
+    when verdict is PASS or GATED.
+    """
+    edge: float = float(metrics.get("edge_ratio", 0.0))
+    if edge < 1.1:
+        return "FAIL", f"edge_ratio={edge:.3f} below 1.1 threshold"
+    if signal_name == "rs_drift_v1":
+        fill_rate: float = float(metrics.get("fill_rate_pct", 0.0))
+        if fill_rate < 0.50:
+            return "FAIL", f"fill_rate_pct={fill_rate:.3f} below 0.50 threshold"
+    if signal_name == "apex_hunter_v2_2":
+        give_back: float = float(metrics.get("give_back_ratio", 0.0))
+        if give_back < 0.40:
+            return "FAIL", f"give_back_ratio={give_back:.3f} below 0.40 threshold"
+    if 1.10 <= edge < 1.25:
+        return "GATED", ""
+    return "PASS", ""
 
 
 def build_expectancy_report(
@@ -35,11 +65,22 @@ def build_expectancy_report(
         "equity_floor_buffer": False,
         "live_ok_env": settings.live_ok,
     }
-    verdict = "PASS" if all(live_gate.values()) else "GATED"
-    if not live_gate["backtest_expectancy_positive"]:
-        verdict = "FAIL"
+    # Locked Integration Refactor v1.1 (Phase 4): compute the new headline
+    # metrics + verdict logic.
+    # TODO[phase 3.3 wiring]: signals_attempted is approximated as the trade
+    # count until limit_fill.py wires real signal-attempted tracking into the
+    # replay loop. fill_rate_pct will read 1.0 for every signal until then.
+    locked_spec_metrics: dict[str, float] = compute_locked_spec_metrics(
+        replay.trades,
+        len(replay.trades),
+    )
+    headline_metrics: dict[str, Any] = {
+        **_metrics_dict(metrics),
+        **locked_spec_metrics,
+    }
+    verdict, fail_reason = determine_verdict(headline_metrics, signal.name)
 
-    return {
+    report: dict[str, Any] = {
         "schema_version": 1,
         "generated_at": datetime.now(UTC).isoformat(),
         "signal": {
@@ -56,6 +97,7 @@ def build_expectancy_report(
             "signal_version": signal.version,
         },
         "verdict": verdict,
+        "fail_reason": fail_reason,
         "live_gate": live_gate,
         "live_gate_criteria": live_gate,
         "settings": {
@@ -74,7 +116,7 @@ def build_expectancy_report(
         "survivorship_bias_note": survivorship_bias_note,
         "survivorship_bias_text": survivorship_bias_text,
         "metrics": _metrics_dict(metrics),
-        "headline_metrics": _metrics_dict(metrics),
+        "headline_metrics": headline_metrics,
         "slippage_waterfall": {
             "gross_return_pct": metrics.gross_return_pct,
             "slippage_cost_pct": -metrics.slippage_return_pct,
@@ -94,6 +136,64 @@ def build_expectancy_report(
             for timestamp, equity in replay.equity_curve
         ],
         "caveats": _dedupe([*replay.caveats, *([survivorship_bias_text] if survivorship_bias_text else [])]),
+    }
+    # Locked Integration Refactor v1.1 (Phase 5.2): standardized diagnostics
+    # block. Additive — old report consumers continue to work.
+    report["diagnostics"] = build_diagnostics_block(replay, {})
+    return report
+
+
+def build_diagnostics_block(
+    replay_result: ReplayResult,
+    blocked_reason_counts: Mapping[str, int],
+) -> dict[str, Any]:
+    """Return the standardized diagnostics block for an expectancy report.
+
+    Schema (Locked Integration Refactor v1.1 § 6 Task 5.2):
+
+    - ``performance_by_filter_block``: counts of trades blocked per filter
+      reason. Currently passes through ``blocked_reason_counts`` as-is; the
+      replay harness does not yet thread blocked-reason counts here, so the
+      caller hands in ``{}`` until the wiring lands.
+    - ``exit_breakdown_detailed``: per-``exit_reason`` count, mean PnL %, and
+      mean hold minutes derived from ``replay_result.trades``.
+    - ``signal_specific``: reserved for per-signal diagnostics aggregated from
+      per-trade ``signal_state``. Empty until the signal layer wires it.
+    - ``data_dependency_skips``: reserved for InsufficientDataError plumbing
+      (Phase 2.2). Empty list until that wiring lands.
+    """
+    # TODO[phase 5.2 wiring]: replay harness does not yet thread blocked-reason
+    # counts to this builder. Until it does, callers pass ``{}`` and the
+    # ``performance_by_filter_block`` field will be empty even though the
+    # schema field exists.
+    performance_by_filter_block: dict[str, int] = {
+        str(reason): int(count) for reason, count in blocked_reason_counts.items()
+    }
+
+    grouped: dict[str, list[Any]] = defaultdict(list)
+    for trade in replay_result.trades:
+        grouped[trade.exit_reason].append(trade)
+
+    exit_breakdown_detailed: dict[str, dict[str, float | int]] = {}
+    for reason, trades in grouped.items():
+        count = len(trades)
+        avg_pnl_pct = sum(trade.return_pct * 100.0 for trade in trades) / count
+        avg_hold_mins = sum(float(trade.hold_minutes) for trade in trades) / count
+        exit_breakdown_detailed[reason] = {
+            "count": count,
+            "avg_pnl_pct": avg_pnl_pct,
+            "avg_hold_mins": avg_hold_mins,
+        }
+
+    return {
+        "performance_by_filter_block": performance_by_filter_block,
+        "exit_breakdown_detailed": exit_breakdown_detailed,
+        # TODO[phase 5.2 wiring]: signals supply this via per-trade signal_state
+        # aggregation; deferred to a future phase.
+        "signal_specific": {},
+        # TODO[phase 5.2 wiring]: populated when InsufficientDataError plumbing
+        # lands in Phase 2.2.
+        "data_dependency_skips": [],
     }
 
 

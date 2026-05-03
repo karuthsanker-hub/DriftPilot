@@ -11,9 +11,39 @@ import pandas as pd  # type: ignore[import-untyped]
 from driftpilot.clock import require_aware
 from driftpilot.execution.paper_fills import entry_fill, exit_fill
 from driftpilot.settings import DriftPilotSettings
+from driftpilot.backtest.constants import (
+    AVAILABLE_DATA_DEPENDENCIES,
+    MAX_HISTORY_MINUTES,
+)
+from driftpilot.signals.base import (
+    InsufficientDataError,
+    signal_data_dependencies,
+    signal_required_history_minutes,
+)
 from driftpilot.signals.features import MinuteBar, Quote
 from driftpilot.signals import DEFAULT_SIGNAL, get_signal
 from driftpilot.signals.regime import CAUTION_5M_RETURN_FLOOR, GREEN_5M_RETURN_FLOOR, VWAP_ATR_BREAK_MULTIPLE
+
+
+def _validate_signal_compatibility(signal: object) -> None:
+    """Per refactor plan v1.1 § 3 Task 2.1: validate at backtest startup that
+    the signal's declared history requirement and data dependencies are
+    satisfiable by the harness. Cheap fail-fast — runs once.
+    """
+
+    required = signal_required_history_minutes(signal)
+    if required > MAX_HISTORY_MINUTES:
+        raise ValueError(
+            f"Signal {getattr(signal, 'name', '<unknown>')} requires "
+            f"{required} mins of history; harness max is {MAX_HISTORY_MINUTES}"
+        )
+    for dep in signal_data_dependencies(signal):
+        if dep not in AVAILABLE_DATA_DEPENDENCIES:
+            raise ValueError(
+                f"Signal {getattr(signal, 'name', '<unknown>')} requires "
+                f"data dependency {dep!r}, which the harness cannot provide. "
+                f"Available: {sorted(AVAILABLE_DATA_DEPENDENCIES)}"
+            )
 
 
 REQUIRED_BAR_COLUMNS = {"timestamp", "symbol", "open", "high", "low", "close", "volume"}
@@ -37,6 +67,13 @@ class BacktestTrade:
     hold_minutes: int
     exit_reason: str
     regime: str
+    # Locked Integration Refactor v1.1 (Phase 4): peak unrealized return %
+    # observed while the position was open. Sourced from
+    # `position.metadata["peak_unrealized_pct"]` written by signal
+    # `evaluate_exit` implementations (Apex Hunter give-back metric). Default
+    # 0.0 so every existing caller / test that constructs `BacktestTrade`
+    # without this field keeps working.
+    peak_unrealized_pct: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -427,6 +464,10 @@ def replay_bars(
 ) -> ReplayResult:
     settings = settings or DriftPilotSettings()
     signal = get_signal(signal_name or settings.active_signal)
+    _validate_signal_compatibility(signal)
+    # Per refactor plan v1.1 § 6 Task 5.2: collect data-dependency skip events
+    # so the report's diagnostics block can surface them. List of (timestamp, reason).
+    _data_dependency_skips: list[tuple[datetime, str]] = []
     if bars.empty:
         return ReplayResult(
             trades=[],
@@ -491,6 +532,12 @@ def replay_bars(
                     history["SPY"],
                     rvol_lookback=rvol_lookback,
                 )
+            except InsufficientDataError as exc:
+                # Per plan § 3 Task 2.2: log a non-trading "data dependency
+                # skip" event and return empty for this cycle. Don't crash.
+                _data_dependency_skips.append((current_time, str(exc)))
+                queue = []
+                regime = None
             except ValueError:
                 queue = []
                 regime = None
@@ -751,6 +798,10 @@ def _close_position(
     net_pnl = (fill.price - position.entry_price) * position.quantity
     slippage_cost = gross_pnl - net_pnl
     hold_minutes = int((exit_bar.timestamp - position.entry_at).total_seconds() // 60)
+    # TODO[phase 3.3 wiring]: replace this fallback with the value the signal's
+    # evaluate_exit wrote into `position.metadata["peak_unrealized_pct"]` once
+    # limit_fill.py wires signal-attempted tracking into replay.
+    peak_unrealized_pct: float = float(position.metadata.get("peak_unrealized_pct", 0.0))
     return BacktestTrade(
         symbol=position.symbol,
         entry_at=position.entry_at,
@@ -767,6 +818,7 @@ def _close_position(
         hold_minutes=hold_minutes,
         exit_reason=exit_reason,
         regime=position.regime,
+        peak_unrealized_pct=peak_unrealized_pct,
     )
 
 

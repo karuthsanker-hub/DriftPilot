@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import date
 from math import sqrt
 from statistics import fmean
+from typing import Sequence
 
 from driftpilot.backtest.replay import BacktestTrade
 
@@ -59,6 +60,103 @@ def compute_metrics(trades: list[BacktestTrade], *, starting_capital: float) -> 
         daily_pnl={day.isoformat(): pnl for day, pnl in sorted(daily_pnl.items())},
         monthly_returns=_monthly_returns(daily_pnl, starting_capital),
     )
+
+
+def compute_locked_spec_metrics(
+    trades: Sequence[BacktestTrade],
+    signals_attempted: Sequence[object] | int,
+) -> dict[str, float]:
+    """Compute the Locked Integration Refactor v1.1 verdict metrics.
+
+    Returns a dict with keys: actual_win_rate, breakeven_win_rate, edge_ratio,
+    give_back_ratio, fill_rate_pct, realized_avg_winner_pct,
+    realized_avg_loser_pct, realized_rr.
+
+    Edge cases:
+    - No trades: every numeric field is 0.0 (does not raise).
+    - No losers: realized_rr = +inf -> breakeven_win_rate = 0.0 (per plan
+      formula 1/(1+rr)) -> edge_ratio = 0.0 via the breakeven_win_rate>0
+      guard.
+    - No winners: actual_win_rate = 0.0 -> edge_ratio = 0.0.
+    - signals_attempted empty / zero: fill_rate_pct = 0.0.
+    """
+    if isinstance(signals_attempted, int):
+        attempted_count: int = signals_attempted
+    else:
+        attempted_count = len(signals_attempted)
+
+    total_trades: int = len(trades)
+    if total_trades == 0:
+        return {
+            "actual_win_rate": 0.0,
+            "breakeven_win_rate": 0.0,
+            "edge_ratio": 0.0,
+            "give_back_ratio": 0.0,
+            "fill_rate_pct": 0.0,
+            "realized_avg_winner_pct": 0.0,
+            "realized_avg_loser_pct": 0.0,
+            "realized_rr": 0.0,
+        }
+
+    winners: list[BacktestTrade] = [trade for trade in trades if trade.net_pnl > 0]
+    losers: list[BacktestTrade] = [trade for trade in trades if trade.net_pnl < 0]
+
+    actual_win_rate: float = len(winners) / total_trades
+
+    realized_avg_winner_pct: float = (
+        fmean(trade.return_pct for trade in winners) if winners else 0.0
+    )
+    realized_avg_loser_pct: float = (
+        fmean(trade.return_pct for trade in losers) if losers else 0.0
+    )
+
+    if losers and winners:
+        realized_rr: float = abs(realized_avg_winner_pct) / abs(realized_avg_loser_pct)
+    elif winners and not losers:
+        realized_rr = float("inf")
+    else:
+        realized_rr = 0.0
+
+    if realized_rr > 0:
+        breakeven_win_rate: float = 1.0 / (1.0 + realized_rr)
+    else:
+        breakeven_win_rate = 1.0
+
+    if breakeven_win_rate > 0:
+        edge_ratio: float = actual_win_rate / breakeven_win_rate
+    else:
+        edge_ratio = 0.0
+
+    peak_pcts: list[float] = [
+        trade.peak_unrealized_pct
+        for trade in trades
+        if getattr(trade, "peak_unrealized_pct", 0.0) > 0
+    ]
+    if peak_pcts:
+        avg_realized_pct: float = fmean(trade.return_pct for trade in trades)
+        avg_peak_unrealized_pct: float = fmean(peak_pcts)
+        give_back_ratio: float = (
+            avg_realized_pct / avg_peak_unrealized_pct
+            if avg_peak_unrealized_pct > 0
+            else 0.0
+        )
+    else:
+        give_back_ratio = 0.0
+
+    fill_rate_pct: float = (
+        total_trades / attempted_count if attempted_count > 0 else 0.0
+    )
+
+    return {
+        "actual_win_rate": actual_win_rate,
+        "breakeven_win_rate": breakeven_win_rate,
+        "edge_ratio": edge_ratio,
+        "give_back_ratio": give_back_ratio,
+        "fill_rate_pct": fill_rate_pct,
+        "realized_avg_winner_pct": realized_avg_winner_pct,
+        "realized_avg_loser_pct": realized_avg_loser_pct,
+        "realized_rr": realized_rr,
+    }
 
 
 def _daily_pnl(trades: list[BacktestTrade]) -> dict[date, float]:
