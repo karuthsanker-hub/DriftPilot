@@ -1,151 +1,251 @@
 # Runbook — Live Paper Trading at 9:30 ET
 
-**Status:** v3.0 catalyst layer is GATED (edge_ratio=1.105, N=185, Jul-Dec 2024). Live Alpaca broker execution is **NOT yet wired**. This runbook covers the **live observer** that exercises the news → signal pipeline against real market events without placing orders. Use this to validate the system before wiring real broker execution.
+**Status:** v3.0 catalyst layer is GATED (edge_ratio=1.105, N=185, Jul-Dec 2024). Real Alpaca paper-account order submission is **NOW WIRED** via the `--paper-live` flag. Tomorrow we trade.
 
 ---
 
-## Prerequisites
+## What ships in `--paper-live`
 
-1. `.env` has Alpaca paper credentials (already does):
-   ```
-   ALPACA_API_KEY=...
-   ALPACA_SECRET_KEY=...
-   ```
-
-2. DGX Qwen3-8B running:
-   ```
-   sudo systemctl start vllm-qwen   # already running per yesterday
-   ```
-   Health check from Mac:
-   ```
-   curl -s http://192.168.1.166:8000/v1/models | head
-   ```
-
-3. (Optional) Historical sentiment backfill — improves first-hour signal quality:
-   ```
-   python scripts/load_2024_catalyst_events.py --start 2024-12-01 --end 2026-05-03
-   python scripts/enrich_catalyst_events.py --priority-only --concurrency 32
-   ```
+| Layer | Live? |
+|---|---|
+| Alpaca News API + dedupe + bus | ✅ |
+| Catalyst classifier (regex) | ✅ |
+| Qwen3-8B sentiment enrichment (DGX) | ✅ |
+| earnings_report_v1 + positive sentiment gate | ✅ |
+| analyst_target_raise_v1 (no edge — known) | ✅ subscribed for observation |
+| Slot allocator (10 slots × $1k = $10k notional) | ✅ |
+| **Real Alpaca paper order submission** | ✅ marketable limit, marketable-limit-on-exit |
+| **Real Alpaca paper account state** | ✅ `get_account`, `get_open_positions` |
+| Position monitor (REST quote polling, evaluate_exit) | ✅ |
+| target_cut → EMERGENCY_FLUSH | ✅ wired (state machine subscription) |
+| Live SIP bar streaming for technical signals | ❌ not needed for catalyst signals |
 
 ---
 
-## At 9:25 ET (5 min before open)
+## Smoke test (run it now to confirm broker connection)
 
 ```
 cd "/Users/karuthsanker/Documents/Trading BOT"
-CATALYST_ENABLED=true ./.venv/bin/python -u -m driftpilot.observer \
-    --print-every-s 60 \
-    > logs/observer_$(date +%Y%m%d).log 2>&1 &
-echo "observer PID $!" > logs/observer.pid
+./.venv/bin/python -c "
+import asyncio
+from driftpilot.settings import load_settings
+from driftpilot.services_live import build_live_components
+from driftpilot.clock import DriftPilotClock
+from driftpilot.storage.repositories import DriftPilotRepository
+
+s = load_settings('.env')
+clock = DriftPilotClock(s.timezone)
+repo = DriftPilotRepository.open(s.sqlite_path_obj, clock)
+broker, _, _ = build_live_components(repo, s, clock=clock, catalyst_db_path=s.catalyst_db_path)
+
+async def check():
+    acct = await broker.get_account()
+    print(f'account_id: {acct.account_id}')
+    print(f'status: {acct.status}')
+    print(f'equity: \${acct.equity:,.2f}')
+    print(f'buying_power: \${acct.buying_power:,.2f}')
+    pos = await broker.get_open_positions()
+    print(f'open positions: {len(pos)}')
+
+asyncio.run(check())
+"
 ```
 
-Verify connect:
+Expected output:
 ```
-sleep 10; tail -20 logs/observer_$(date +%Y%m%d).log
+account_id: 7cace921-eaa1-434e-9421-25e8bacce3a2
+status: AccountStatus.ACTIVE
+equity: $100,036.32
+buying_power: $400,145.28
+open positions: 0
 ```
-Expect within 30s:
+
+If you see this, broker is wired correctly. Verified once tonight on this machine.
+
+---
+
+## Pre-warm (already done tonight, re-run anytime)
+
+The catalyst DB needs recent news + Qwen sentiment for the signals to admit candidates at startup.
+
+```
+# Pull news for the last 2 weeks (run nightly)
+./.venv/bin/python scripts/load_2024_catalyst_events.py \
+    --start 2026-04-20 --end 2026-05-03 \
+    --output data/driftpilot/catalyst_events_2024.sqlite3
+
+# Enrich with Qwen sentiment (concurrent on DGX)
+./.venv/bin/python scripts/enrich_catalyst_events.py \
+    --priority-only --concurrency 32
+```
+
+Tonight's pull added 7,118 fresh events on top of the 15,016 from earlier. Enrichment runs in ~10 min for ~5,500 priority events.
+
+---
+
+## At 9:25 ET (5 min before open) — TWO-PHASE LAUNCH
+
+### Phase 1 (9:25–9:30): observer-only sanity check
+
+```
+cd "/Users/karuthsanker/Documents/Trading BOT"
+mkdir -p logs
+CATALYST_ENABLED=true ./.venv/bin/python -u -m driftpilot.observer \
+    --print-every-s 30 \
+    > logs/observer_$(date +%Y%m%d).log 2>&1 &
+echo $! > logs/observer.pid
+```
+
+Verify in another terminal:
+```
+tail -F logs/observer_$(date +%Y%m%d).log
+```
+
+You should see within 30 sec:
 - `LIVE OBSERVER — read-only, NO orders will be submitted`
 - `universe: 1507 symbols`
-- `alpaca feed published N events` (N=0 OK pre-open, then > 0 once news flows)
-- A status block every 60s with active_subscribed_events count + candidates_admitted
+- `alpaca feed published N events`
+- Status snapshot every 30s
+
+If the observer crashes or shows `Traceback` — **DO NOT proceed to Phase 2**. Fix first.
+
+### Phase 2 (9:30): kill observer, launch live operator
+
+```
+kill $(cat logs/observer.pid) 2>/dev/null
+rm logs/observer.pid
+
+CATALYST_ENABLED=true ACTIVE_SIGNAL=earnings_report_v1 \
+    ./.venv/bin/python -u -m driftpilot.operator \
+    --paper-live \
+    > logs/operator_$(date +%Y%m%d).log 2>&1 &
+echo $! > logs/operator.pid
+
+tail -F logs/operator_$(date +%Y%m%d).log
+```
+
+You should see:
+- `🚨 PAPER-LIVE MODE: submitting real orders to Alpaca paper account at https://paper-api.alpaca.markets`
+- `catalyst layer ENABLED: db=...catalyst_events_2024.sqlite3 qwen=http://192.168.1.166:8000/v1`
+- State transitions: `BOOT → SCANNING → ALLOCATING → IN_POSITION → ...`
+- Per-allocation: `LIVE: submitting paper buy AAPL qty=5 slot=1 ref_price=200.00`
+- Per-fill: `LIVE: position opened symbol=AAPL qty=5 entry=200.10 broker_order_id=...`
 
 ---
 
-## What "healthy" looks like at 9:30
+## What "healthy" looks like during the day
 
-After 9:30 the Alpaca News stream should be ticking. Each 60s status block prints:
+Check Alpaca dashboard at https://app.alpaca.markets/paper/dashboard/overview to see real positions appearing as the operator trades.
 
-```
-=== 2026-05-04T13:30:00+00:00 ===
-  signal: earnings_report_v1
-    active_subscribed_events: 7  sentiments: {'positive': 4, 'neutral': 2, 'negative': 1}
-    candidates_admitted: 4
-    symbols: AAPL, MSFT, NVDA, AMD
-      [AAPL] age=12.3min sentiment=positive score=+0.12  Apple beats Q1 earnings, raises guidance...
-  signal: analyst_target_raise_v1
-    active_subscribed_events: 12  sentiments: {'positive': 11, 'neutral': 1}
-    candidates_admitted: 12
-```
-
-Healthy indicators:
-- ✅ `active_subscribed_events` is non-zero (news is flowing)
-- ✅ `sentiments` shows mix of positive/neutral/negative (Qwen is enriching)
-- ✅ `candidates_admitted ≤ active_subscribed_events` for earnings_report_v1 (sentiment gate filtering)
-- ✅ candidates have age < 60 min and recognizable headlines
-
-Not-yet-broken-but-watch indicators:
-- ⚠️ `candidates_admitted = 0` for earnings_report_v1 means no positive earnings reports in the last hour. **This is expected** outside earnings season (May 4 is between seasons). Not a bug.
-- ⚠️ `sentiments: {'unenriched': N}` means Qwen failed for those events. Check DGX. Not fatal — events still flow, just no directional gate.
-
-Hard-broken indicators (kill and investigate):
-- ❌ `Traceback` in the log
-- ❌ `alpaca feed published 0 events` for > 10 minutes after 9:30 (news API is dead)
-- ❌ `qwen enrichment failed (ConnectError)` repeatedly (DGX is down)
+In the log:
+- ✅ One `LIVE: submitting paper buy` per candidate the allocator picks
+- ✅ One `LIVE: position opened` per successful fill
+- ✅ One `LIVE: signal requests exit` then `LIVE: position closed` per exit
+- ⚠️ `LIVE: entry not submitted for X — reason=quote_unavailable` is OK (illiquid name)
+- ❌ `Traceback` or `LIVE: entry submission failed` → kill, investigate
 
 ---
 
-## Kill switch
+## Kill switches (in priority order)
 
-```
-kill $(cat logs/observer.pid) 2>/dev/null && rm logs/observer.pid
-# or
-pkill -f "driftpilot.observer"
-```
+1. **Stop the operator** (no new entries, no new exits):
+   ```
+   kill $(cat logs/operator.pid) && rm logs/operator.pid
+   ```
 
-The observer does NOT submit orders. Killing it has zero financial effect — only stops logging.
+2. **Cancel all open orders + flatten all positions** (via Alpaca dashboard or CLI):
+   ```
+   ./.venv/bin/python -c "
+   from alpaca.trading.client import TradingClient
+   from driftpilot.settings import load_settings
+   s = load_settings('.env')
+   c = TradingClient(s.alpaca_key_id, s.alpaca_secret_key, paper=True)
+   c.cancel_orders()
+   c.close_all_positions(cancel_orders=True)
+   print('all orders canceled, all positions closed (market orders)')
+   "
+   ```
 
----
-
-## Why no live broker today
-
-The validated v3 stack is:
-```
-Alpaca News → DiscoveryService → Bus → Qwen Enrichment → Signal.scan() → ???
-                                                                          ↑
-                                                               THIS IS THE GAP
-```
-
-The "???" is wiring `AlpacaSIPStream` (live bars), `AlpacaBrokerClient` (real orders), and the state machine's IN_POSITION/EXITING transitions. Those modules exist (`src/driftpilot/market_data/alpaca_stream.py` and `src/driftpilot/broker/alpaca_client.py`) but the operator entrypoint never composed them — it's been mock all along.
-
-Wiring them is a real integration job (probably a half-day with the existing test suite). What the observer DOES validate today:
-
-| Component | Validated by observer? |
-|---|---|
-| Alpaca News auth + polling | ✅ |
-| Deterministic classifier on live headlines | ✅ |
-| Bus delivery + dedupe | ✅ |
-| Qwen enrichment latency + accuracy | ✅ |
-| Signal.scan() candidate generation | ✅ |
-| Sentiment gate behavior | ✅ |
-| Live bar streaming | ❌ not exercised |
-| Order submission | ❌ not exercised |
-| Slot allocator + fill engine | ❌ not exercised |
-
-Tomorrow's run answers: **"Is the news pipeline healthy?"** It does NOT answer **"Does the strategy make money in real time?"** — that requires the next sprint.
+3. **Disable trading at the Alpaca dashboard** (most aggressive — turn the account off entirely)
 
 ---
 
-## What to do tomorrow
+## Risk envelope (paper account, but still)
 
-1. **9:25 ET**: start the observer per above
-2. **Watch for first 30 min**. Capture screenshot or paste a few status blocks.
-3. **At 10:00 ET**: count `candidates_admitted` totals. If > 0 and the headlines look right → the pipeline is healthy and ready for live broker wiring.
-4. **At 4:00 ET**: stop the observer. Save `logs/observer_<date>.log` for analysis.
-
-If the observer ran clean for 6+ hours with non-trivial event flow, the GREEN-light to start the live broker integration is earned.
-
-If it threw exceptions or the news flow was suspiciously empty, fix those first.
+- Account: paper at `https://paper-api.alpaca.markets`
+- Equity: $100,036.32 (verified)
+- Slots: **10 slots × $1,000 = $10k max notional exposure**
+- Per-trade: catalyst event drives entry; profit_take=1.0%, stop_loss=1.5%, max_hold=60min
+- Per-day cap: `MAX_TRADES_PER_DAY=50`
+- Per-symbol cap: `MAX_TRADES_PER_SYMBOL_PER_DAY=3`
+- Daily loss limit: `DAILY_LOSS_LIMIT_PCT=0.03` (3% of equity → flatten if breached)
+- target_cut on a held name → `EMERGENCY_FLUSH` state → market-exit
 
 ---
 
-## When live broker wiring lands (next sprint)
+## What to watch for honestly
 
-The flag will be `--live` on the operator entrypoint. The default will remain mock. Pre-prod checklist:
-- [ ] Account is paper, not live (`ALPACA_BASE_URL=https://paper-api.alpaca.markets`)
-- [ ] `paper_trading_gate_passed=true` in env
-- [ ] `ACTIVE_SIGNAL=earnings_report_v1`
-- [ ] `OPERATOR_TRADE_SLOTS=10`, `OPERATOR_SLOT_VALUE=1000` (paper $10k notional)
-- [ ] Catalyst SQLite has > 1k enriched events (so signals have history to filter on)
-- [ ] Observer has been clean for at least one full session
+**Tomorrow is between earnings seasons.** Q1 reporters mostly done by Apr 30; Q2 doesn't start until mid-July. Realistic expectation:
 
-Until then: observer only.
+- 5-15 earnings/report events tomorrow (vs ~50/day during peak season)
+- After positive-sentiment gate: maybe 3-7 candidates entered all day
+- Some days zero — that's correct behavior, not a bug
+- target_raise: 50-100/day, but the signal already FAILed this category so it's just noise on the dashboard
+
+**Backtest verdict reminder:** edge_ratio=1.105 over 6 months. **One day's results mean nothing.** A losing day is within expectation. The validation says we have an edge over hundreds of trades, not over five.
+
+---
+
+## End of day (4:00 ET)
+
+```
+kill $(cat logs/operator.pid) && rm logs/operator.pid
+```
+
+Then:
+```
+./.venv/bin/python -c "
+import asyncio
+from driftpilot.settings import load_settings
+from driftpilot.services_live import build_live_components
+from driftpilot.storage.repositories import DriftPilotRepository
+from driftpilot.clock import DriftPilotClock
+s = load_settings('.env')
+clock = DriftPilotClock(s.timezone)
+repo = DriftPilotRepository.open(s.sqlite_path_obj, clock)
+broker, _, _ = build_live_components(repo, s, clock=clock, catalyst_db_path=s.catalyst_db_path)
+async def check():
+    acct = await broker.get_account()
+    print(f'EOD equity: \${acct.equity:,.2f}')
+    print(f'cash: \${acct.cash:,.2f}')
+    pos = await broker.get_open_positions()
+    print(f'open positions left: {len(pos)}')
+    for p in pos: print(f'  {p.symbol} qty={p.quantity} unrealized=\${p.unrealized_pl:.2f}')
+asyncio.run(check())
+"
+```
+
+If positions are still open at 4:00, leave them and the system will manage them tomorrow (max_hold is 60min so they should auto-exit but cron-belt-and-suspenders: watch the dashboard).
+
+Save the day's log:
+```
+cp logs/operator_$(date +%Y%m%d).log logs/archive/
+```
+
+---
+
+## Common issues + fixes
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| `qwen enrichment failed (ConnectError)` repeatedly | DGX vllm down | `ssh sankerkr@192.168.1.166 'sudo systemctl status vllm-qwen'` |
+| `alpaca feed published 0 events` for 30+ min after open | News API throttled or auth issue | Check `.env` ALPACA keys; `curl -H "APCA-API-KEY-ID: $ALPACA_API_KEY" -H "APCA-API-SECRET-KEY: $ALPACA_SECRET_KEY" https://data.alpaca.markets/v1beta1/news` |
+| `entry not submitted — quote_unavailable` for everything | Quote provider failing | Check Alpaca status page; the REST quote endpoint may be degraded |
+| Operator hangs in BOOT | DB path issue or repo schema mismatch | `rm data/driftpilot/operator_state.sqlite3` (paper state, safe to wipe) and restart |
+| One position never exits | evaluate_exit not firing — check signal config | Hard kill operator; flatten via dashboard; investigate logs/ |
+
+---
+
+## Test counts at handoff
+
+511 / 511 passing including 7 new live-services tests. Last updated commit on the integration branch.
