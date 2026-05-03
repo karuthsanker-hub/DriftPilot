@@ -196,6 +196,78 @@ def test_event_age_cap_skips_stale_events(catalyst_db, bar_root):
     assert any("too_late" in c or "max_event_age" in c for c in result.caveats)
 
 
+def test_require_sentiment_filters_events(catalyst_db, bar_root):
+    """Two events on same symbol — one tagged positive, one negative.
+    With require_sentiment='positive', only the positive event produces a trade."""
+    event_pos = datetime(2024, 10, 14, 14, 35, tzinfo=timezone.utc)
+    event_neg = datetime(2024, 10, 16, 14, 35, tzinfo=timezone.utc)
+    bars = []
+    base = datetime(2024, 10, 14, 14, 30, tzinfo=timezone.utc)
+    for i in range(60 * 24 * 5):
+        ts = base + timedelta(minutes=i)
+        # rising 0.3% per minute (so both events would profit if entered)
+        price = 100.0 + 0.05 * (i % 100)
+        bars.append({"timestamp": ts, "open": price, "high": price, "low": price, "close": price, "volume": 1000})
+    _write_bars(bar_root, "AAPL", 2024, bars)
+    insert_event(catalyst_db, _event("AAPL", "earnings", "report", event_pos))
+    insert_event(catalyst_db, _event("AAPL", "earnings", "report", event_neg))
+    # Update sentiment column directly (simulating Qwen enrichment)
+    conn = sqlite3.connect(catalyst_db)
+    conn.execute(
+        "UPDATE catalyst_events SET sentiment = ? WHERE event_ts = ?",
+        ("positive", event_pos.isoformat()),
+    )
+    conn.execute(
+        "UPDATE catalyst_events SET sentiment = ? WHERE event_ts = ?",
+        ("negative", event_neg.isoformat()),
+    )
+    conn.commit()
+    conn.close()
+
+    # Without filter — both events generate trades
+    result_all = replay_catalyst_signal(
+        catalyst_db_path=catalyst_db, bar_root=bar_root, signal_factory=lambda: None,
+        category="earnings", subcategory="report",
+        start=datetime(2024, 10, 1, tzinfo=timezone.utc),
+        end=datetime(2024, 10, 31, tzinfo=timezone.utc),
+        max_hold_minutes=60, profit_take_pct=1.0, stop_loss_pct=1.5,
+        max_event_age_minutes=60,
+    )
+    assert len(result_all.trades) == 2
+
+    # With positive-only filter — one trade
+    result_pos = replay_catalyst_signal(
+        catalyst_db_path=catalyst_db, bar_root=bar_root, signal_factory=lambda: None,
+        category="earnings", subcategory="report",
+        start=datetime(2024, 10, 1, tzinfo=timezone.utc),
+        end=datetime(2024, 10, 31, tzinfo=timezone.utc),
+        max_hold_minutes=60, profit_take_pct=1.0, stop_loss_pct=1.5,
+        max_event_age_minutes=60,
+        require_sentiment="positive",
+    )
+    assert len(result_pos.trades) == 1
+
+
+def test_require_sentiment_excludes_null_sentiment(catalyst_db, bar_root):
+    """Events with NULL sentiment (un-enriched) should be excluded by the filter."""
+    event_ts = datetime(2024, 10, 15, 14, 35, tzinfo=timezone.utc)
+    bars = [{"timestamp": event_ts + timedelta(minutes=i+1), "open": 100.0, "high": 100.0, "low": 100.0, "close": 100.0, "volume": 1000} for i in range(60)]
+    _write_bars(bar_root, "MSFT", 2024, bars)
+    insert_event(catalyst_db, _event("MSFT", "earnings", "report", event_ts))
+    # Do NOT update sentiment — leave it NULL
+
+    result = replay_catalyst_signal(
+        catalyst_db_path=catalyst_db, bar_root=bar_root, signal_factory=lambda: None,
+        category="earnings", subcategory="report",
+        start=datetime(2024, 10, 1, tzinfo=timezone.utc),
+        end=datetime(2024, 10, 31, tzinfo=timezone.utc),
+        max_hold_minutes=60, profit_take_pct=1.0, stop_loss_pct=1.5,
+        max_event_age_minutes=60,
+        require_sentiment="positive",
+    )
+    assert result.trades == []
+
+
 def test_query_filters_by_category_and_subcategory(catalyst_db, bar_root):
     """Inserted target_raise event should NOT match an earnings/report query."""
     event_ts = datetime(2024, 10, 15, 14, 35, tzinfo=timezone.utc)
