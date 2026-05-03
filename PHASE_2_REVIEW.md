@@ -1,3 +1,9 @@
+> 📜 **HISTORICAL — review artifact.** Phase 2 was approved on 2026-05-01.
+> Kept as record. For current architecture see
+> [docs/PROJECT_OVERVIEW.md](docs/PROJECT_OVERVIEW.md).
+
+---
+
 # Phase 2 Review
 
 Status: APPROVED

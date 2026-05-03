@@ -1,3 +1,11 @@
+> ❌ **STALE — kept for archaeology.** This file predates the DriftPilot refactor.
+> It describes the legacy `src/trading_bot/` workflow with Supabase as primary DB,
+> APScheduler-driven jobs, and a 6-position cap. The current authoritative plan
+> is [REFACTOR_PLAN.md](REFACTOR_PLAN.md). Do not act on this file's instructions.
+> See [docs/DOCS_INDEX.md](docs/DOCS_INDEX.md) for the full doc-status table.
+
+---
+
 # Trading Bot v4 Implementation Plan
 
 ## Summary

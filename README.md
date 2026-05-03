@@ -159,17 +159,23 @@ The script performs a Databento cost check before the real pull.
 
 ## Signal Registry
 
-Signals live under `src/driftpilot/signals/`.
-
-The active signal is selected with:
+Signals live under `src/driftpilot/signals/`. The active signal is selected with:
 
 ```env
 ACTIVE_SIGNAL=intraday_momentum_v1
 ```
 
-Current signal:
+Currently registered (5):
 
-- `intraday_momentum_v1`
+| Name | Thesis | Slot model | Custom exit |
+|---|---|---|---|
+| `intraday_momentum_v1` | RVOL > 2 + above VWAP + 15-min return — reference signal, **FAIL** verdict on 2024 backtest | 10×$1k | Default TARGET/STOP/TIME |
+| `stationary_ghost_v1` | 2.5σ below 15-bar mean reverts in 20 min when ADX < 20 | 10×$1k | Default |
+| `whale_tail_v1` | RVOL > 3 + compression + upper-range = absorption breakout (Variant B baseline) | 10×$1k | ATR-scaled + distribution-trap |
+| `rs_drift_v1` | Strength vs SPY 9:30-10:00 drifts through midday | 5×$2k | Break-even trigger + EOD time + SPY-heat tightening |
+| `apex_hunter_v2_2` | EWMLR institutional drift, 90-min window, three-stage Ratchet stop | 10×$1k | Three-stage Ratchet + hard exit at 15:45 ET |
+
+Each signal package carries a `README.md` (thesis + parameters + verdict log) and a `KNOWN_RISKS.md` (validation concerns from the locked spec). See [docs/PROJECT_OVERVIEW.md](docs/PROJECT_OVERVIEW.md) for the registry diagram and contract details.
 
 Adding a new signal should not change the operator, allocator, broker, or dashboard contract. Implement `SignalProtocol`, register it, and run the same backtest harness with `--signal`.
 
@@ -199,10 +205,10 @@ uvx ruff check src/driftpilot src/trading_bot/dashboard tests
 PYTHONPATH=src uv run --with mypy mypy src/driftpilot src/trading_bot/dashboard
 ```
 
-Last verified locally:
+Last verified locally on integration branch `refactor/driftpilot-operator`:
 
 ```text
-173 passed, 1 warning
+334 passed, 1 warning
 ```
 
 ## Important Caveats
@@ -215,7 +221,11 @@ Last verified locally:
 
 ## Key Docs
 
-- [REFACTOR_PLAN.md](REFACTOR_PLAN.md): authoritative operator/refactor plan.
+- [docs/PROJECT_OVERVIEW.md](docs/PROJECT_OVERVIEW.md): one-page orientation with mermaid diagrams (component map, state machine, signal registry, backtest pipeline, ER schema, deploy topology). **Read this first.**
+- [docs/DOCS_INDEX.md](docs/DOCS_INDEX.md): status of every `.md` in the repo (current / partial / historical / stale).
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): runtime detail, state ownership, signal boundary.
+- [docs/OPERATIONS.md](docs/OPERATIONS.md): practical runbook.
+- [REFACTOR_PLAN.md](REFACTOR_PLAN.md): authoritative operator/refactor plan (1500+ lines).
 - [MIGRATION.md](MIGRATION.md): what changed from the legacy workflow.
-- [refactor.plan](refactor.plan): signal/algorithm swap plan.
-- [AGENTS.md](AGENTS.md): agent instructions for future implementation work.
+- [AGENTS.md](AGENTS.md): rules for any future code-generating agent.
+- [scripts/README.md](scripts/README.md): operational scripts catalogue (Databento pull + DGX migrate/deploy).

@@ -1,3 +1,11 @@
+> 📜 **HISTORICAL — review snapshot.** Captures Phases 0–4 status during a
+> parallel-agent overnight run. Phases 5–16 plus the four-signal registry have
+> all landed since this snapshot. Current state: see
+> [docs/PROJECT_OVERVIEW.md](docs/PROJECT_OVERVIEW.md) and
+> [docs/DOCS_INDEX.md](docs/DOCS_INDEX.md).
+
+---
+
 # DriftPilot Overnight Summary
 
 Run scope: Phases 0-4 only.

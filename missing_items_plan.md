@@ -1,3 +1,10 @@
+> 📜 **HISTORICAL — closed.** This is a pre-refactor punch list against the legacy
+> `src/trading_bot/` workflow. Every item is marked Done by its own writeup, but
+> the v1 it describes is the legacy path, not DriftPilot. Kept for archaeology.
+> Current plan: [REFACTOR_PLAN.md](REFACTOR_PLAN.md).
+
+---
+
 # Missing Items Execution Plan
 
 ## Immediate Execution Order

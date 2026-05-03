@@ -1,3 +1,9 @@
+> 📜 **HISTORICAL — review artifact.** Phase 3 (Signal Layer) approved.
+> Kept as record. For current signal registry see
+> [docs/PROJECT_OVERVIEW.md](docs/PROJECT_OVERVIEW.md) § Signal Registry.
+
+---
+
 # Phase 3 Review: Signal Layer
 
 Branch: `refactor/phase-3-signals`
