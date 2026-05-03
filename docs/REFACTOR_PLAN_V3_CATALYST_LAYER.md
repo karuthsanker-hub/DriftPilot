@@ -238,6 +238,93 @@ If yes, the rest of the plan is worth executing.
 6. Read-only API endpoints stay read-only; only `/api/admin/*` writes.
 7. Tests pass before each phase ships.
 
+## Update: spike v3 — categorized analysis (correct framing)
+
+User pushback on the v2 daily-granularity result: "you can't say 'I have
+a signal' then look for price changes; map it to category of news this
+way we know which one to act." Correct framing — bucket by **stock
+metadata × news category × subcategory** before computing price impact.
+
+`scripts/catalyst_category_spike.py` runs exactly that:
+
+- Stock dimension: sector, cap_bucket, seasonality (a-priori per sector)
+- News dimension: category (earnings/analyst/m_and_a/product/regulatory/
+  legal/insider/macro/filing/other) + priority-ordered subcategory rules
+  (e.g. earnings → beat / miss / guidance_up / guidance_down /
+  preannounce / report)
+- For each (sector, category, subcategory) bucket with N >= min samples:
+  compute mean daily |return|, Pr(>1%/>2%/>3%) on news days; compare to
+  no-news-day baseline.
+
+### Result on the 20-symbol mega-cap × 2024-Q1 sample
+
+```
+category     subcategory       n   mean%    >2%    ratio
+filing       8a                64  1.46%    27%    1.12x   ← largest bucket; weak uplift
+m_and_a      acquires           4  1.40%     0%    1.07x
+product      launch             7  0.64%    14%    0.49x   ← anti-signal
+analyst      target_raise       5  0.41%     0%    0.32x   ← anti-signal
+legal        lawsuit            3  0.41%     0%    0.31x   ← anti-signal
+                                       (no other bucket cleared n>=3)
+```
+
+(baseline no-news mean |daily return| = 1.30%)
+
+### Three real findings
+
+1. **The categorized framework is the right approach.** Don't return to
+   blanket "news vs no-news" testing. Per-category ratios surface both
+   signals and anti-signals.
+
+2. **Some categories are clearly anti-signals on mega-caps** —
+   `product/launch`, `analyst/target_raise`, `legal/lawsuit` all show
+   ratios < 0.5×. On liquid names these events are already priced in
+   by article-publication time; trading them post-publication is
+   buying the reversal. v3 should treat these as "do NOT priority
+   boost" categories.
+
+3. **No category shows actionable strong signal on this sample.**
+   Strongest is `filing/8a` at 1.12× (boilerplate SEC filings).
+   Real high-impact categories (FDA approval, earnings beat,
+   M&A_acquired, guidance_up) have N=0-2 in this sample — too thin
+   to draw conclusions.
+
+### What the sample is missing
+
+- **Wider universe** — 20 mega-caps means most news flow is
+  commentary + filings; the high-volatility categories are rare on
+  these names.
+- **Longer window** — Q1 only = 3 months; need full 2024 to capture
+  4 earnings cycles per name.
+- **Better categorization** — current keyword rules drop 60%+ of
+  articles to "other/generic" or "filing/8a". LLM-based
+  categorization would recover those.
+
+### Refined recommendation
+
+The v3 catalyst layer is still **PAUSED**, but with a clearer pivot:
+
+1. **Re-run the categorized spike on a broader universe + longer
+   window** — full 2024, 100-200 mid/small-caps. This is a 1-2 hour
+   investment to determine if any category clears the >=1.5× ratio
+   bar with N>=10.
+
+2. **If ratios materialize** (e.g., earnings_beat shows 2× on mid-caps
+   with N=50), build v3 with the categorization layer FIRST — the
+   keyword rules ship in the codebase and signals subscribe by
+   category, not by raw article presence.
+
+3. **If ratios stay marginal**, the architecture stays paused. Two
+   anti-signals are surfaced (lawsuits / target raises / product
+   launches) and the v3 doc records them as "categories to never
+   priority-boost," but the full layer doesn't ship.
+
+This structure honors the user's design ("categorize first, then
+analyze") and stops the team from confusing "news exists" with
+"actionable catalyst."
+
+---
+
 ## Update: spike v2 — corrected methodology, partial signal
 
 The original spike (within-minute, ±30 min baseline exclusion) returned
