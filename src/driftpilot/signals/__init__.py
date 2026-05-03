@@ -19,6 +19,7 @@ from driftpilot.signals.intraday_momentum_v1 import (
     build_intraday_momentum_queue,
 )
 from driftpilot.signals.regime import Regime, RegimeSnapshot, compute_market_regime
+from driftpilot.signals.rs_drift_v1 import RsDriftV1Signal
 from driftpilot.signals.scoring import ScoredCandidate, score_candidates
 
 
@@ -52,6 +53,7 @@ def _normalize_signal_name(name: str) -> str:
 
 
 register_signal(DEFAULT_SIGNAL, lambda: IntradayMomentumV1Signal())
+register_signal("rs_drift_v1", lambda: RsDriftV1Signal())
 
 __all__ = [
     "BarFeatureCache",
