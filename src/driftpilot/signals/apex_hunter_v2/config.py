@@ -1,0 +1,72 @@
+"""Apex Hunter v2.2 — locked strategy parameters.
+
+Values come VERBATIM from the locked spec. Do not tune within a single
+backtest dataset (overfitting). No 9-cell sweep at this stage — baseline only.
+"""
+
+from __future__ import annotations
+
+
+SIGNAL_NAME = "apex_hunter_v2_2"
+SIGNAL_VERSION = "2.2.0"
+
+# Universe
+UNIVERSE_SOURCE = "config/universe.csv"
+MIN_ADV_SHARES = 1_500_000
+PRICE_MIN = 10.00
+PRICE_MAX = 500.00
+
+# Slot model
+SLOT_COUNT = 10
+SLOT_NOTIONAL = 1000
+SECTOR_CAP = 2
+
+# Trend / EWMLR window
+WINDOW_MINS = 90
+HALF_LIFE_MINS = 15
+DEFAULT_R2_THRESHOLD = 0.35
+DEFAULT_CORR_MIN = 0.3
+RELATIVE_ALPHA_MIN = 1.5
+
+# Time gates (ET)
+SCAN_START_TIME_ET = "10:30"
+SCAN_END_TIME_ET = "14:30"
+HARD_EXIT_TIME_ET = "15:45"
+
+# ATR + Ratchet exit
+ATR_PERIOD = 14
+RATCHET_STAGE_1_ATR_MULT = 2.0
+RATCHET_STAGE_2_ATR_MULT = 1.0
+RATCHET_STAGE_3_ATR_MULT = 0.5
+
+RATCHET_STAGE_2_TRIGGER_PCT = 0.01
+RATCHET_STAGE_3_TRIGGER_PCT = 0.02
+RATCHET_STAGE_3_TRIGGER_TIME_ET = "15:00"
+
+
+__all__ = [
+    "SIGNAL_NAME",
+    "SIGNAL_VERSION",
+    "UNIVERSE_SOURCE",
+    "MIN_ADV_SHARES",
+    "PRICE_MIN",
+    "PRICE_MAX",
+    "SLOT_COUNT",
+    "SLOT_NOTIONAL",
+    "SECTOR_CAP",
+    "WINDOW_MINS",
+    "HALF_LIFE_MINS",
+    "DEFAULT_R2_THRESHOLD",
+    "DEFAULT_CORR_MIN",
+    "RELATIVE_ALPHA_MIN",
+    "SCAN_START_TIME_ET",
+    "SCAN_END_TIME_ET",
+    "HARD_EXIT_TIME_ET",
+    "ATR_PERIOD",
+    "RATCHET_STAGE_1_ATR_MULT",
+    "RATCHET_STAGE_2_ATR_MULT",
+    "RATCHET_STAGE_3_ATR_MULT",
+    "RATCHET_STAGE_2_TRIGGER_PCT",
+    "RATCHET_STAGE_3_TRIGGER_PCT",
+    "RATCHET_STAGE_3_TRIGGER_TIME_ET",
+]
