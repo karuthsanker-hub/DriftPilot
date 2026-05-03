@@ -12,6 +12,7 @@ from driftpilot.signals.base import (
     no_exit_decision,
 )
 from driftpilot.signals.features import BarFeatureCache, MinuteBar, Quote, SignalFeatures
+from driftpilot.signals.apex_hunter_v2 import ApexHunterV22Signal
 from driftpilot.signals.intraday_momentum_v1 import (
     SIGNAL_NAME as INTRADAY_MOMENTUM_V1_NAME,
     CandidateDecision,
@@ -61,6 +62,7 @@ register_signal(DEFAULT_SIGNAL, lambda: IntradayMomentumV1Signal())
 register_signal(STATIONARY_GHOST_V1_NAME, lambda: StationaryGhostV1Signal())
 register_signal("whale_tail_v1", lambda: WhaleTailV1Signal())
 register_signal("rs_drift_v1", lambda: RsDriftV1Signal())
+register_signal("apex_hunter_v2_2", lambda: ApexHunterV22Signal())
 
 __all__ = [
     "BarFeatureCache",
