@@ -99,6 +99,45 @@ flowchart LR
 
 ---
 
+## Phase 0.5 — Type-safe `signal_state` keys  (0.5 days)
+
+### Goal
+The opaque `_OpenPosition.metadata: dict[str, Any]` design (refactor v1.1
+§ 3.1) works at runtime but lets typos slip through silently — e.g.
+`metadata["rachet_stage"]` returns `None` instead of raising. Each signal
+should declare its own `signal_state` keys as a `TypedDict` so mypy and
+runtime helpers can catch the typos.
+
+### Backend
+- New per-signal `signal_state.py` module (one per signal that uses it):
+  ```python
+  # signals/apex_hunter_v2/signal_state.py
+  from typing import TypedDict
+  class ApexHunterState(TypedDict, total=False):
+      ratchet_stage: int               # 1 | 2 | 3
+      current_atr_mult: float
+      trailing_stop_price: float
+      peak_price: float
+      peak_unrealized_pct: float
+      atr_at_entry: float
+  ```
+- Each signal's `evaluate_exit` accepts and returns the typed dict via
+  `cast(ApexHunterState, position.metadata)`. Runtime payload is the
+  same `dict[str, Any]` — typing only.
+- New helper `signals/base.py:typed_signal_state(position, signal_state_cls)`
+  that returns the TypedDict-cast view + sets reasonable defaults on
+  first access.
+
+### Acceptance
+- mypy catches `metadata["rachet_stage"]` (typo) as a key error.
+- Existing tests still pass — runtime behavior unchanged.
+- Each of the 4 new signals has a `signal_state.py` with its own
+  TypedDict declared.
+- Plan v1.1 § 3.1 contract preserved: harness still treats metadata as
+  opaque.
+
+---
+
 ## Phase A — Live Trade Tape & Event Bus  (1–1.5 days)
 
 ### Goal
@@ -281,19 +320,51 @@ the raw label.
 
 ---
 
-## Phase D — Signal Router  (1 day)
+## Phase D — Signal Router with three modes  (Manual now, Auto-deterministic v2, Auto-LLM v3)
 
 ### Goal
-Given current regime + each signal's "operating envelope" (which regimes
-historically had positive expectancy in its backtest reports), pick the
-active signal automatically. Operator can override.
+Operator picks one of three routing modes. **MANUAL is the only mode
+that ships in v2.** Auto-deterministic ships when the four backtests'
+`operating_envelope` blocks are populated (ETA: tonight). Auto-LLM
+defers to v3.
 
-### Inputs
+### The three modes
+
+```python
+class RoutingMode(StrEnum):
+    MANUAL              = "manual"               # v2 — ships now
+    AUTO_DETERMINISTIC  = "auto_deterministic"   # v2 stretch
+    AUTO_LLM            = "auto_llm"             # v3 (deferred)
+```
+
+**MANUAL** (v2 — ships now):
+- Frontend dropdown lists every signal in `list_signals()` (currently 5).
+- Operator selects one; backend writes `routing_mode=MANUAL` and the
+  active signal name to SQLite.
+- Active signal stays exactly that until operator changes it.
+- This is the "I want full control" mode.
+
+**AUTO_DETERMINISTIC** (v2 stretch — ships if Phase C's regime detector
++ tonight's reports' operating envelopes are ready):
+- Router runs every 5 minutes, picks signal whose `operating_envelope`
+  best matches current regime.
+- 5-minute dwell time before switching (anti-thrash).
+- Operator can switch to MANUAL at any time and override.
+
+**AUTO_LLM** (v3 — placeholder, not implemented in v2):
+- Frontend shows the option **disabled** with a tooltip "available in v3
+  — Qwen-based market reasoning". Operator selects → toast "not
+  available yet, using AUTO_DETERMINISTIC instead".
+- Listed in the UI now so the eventual ship is non-disruptive (no new
+  control to discover).
+
+### Inputs (when in AUTO_DETERMINISTIC)
 1. Current `RegimeSnapshot` (Phase C).
 2. Each signal's `expectancy_report.json` carries an
    `operating_envelope` block (NEW — Phase D adds the field) listing
    regimes where edge_ratio was > 1.1 in that signal's backtest.
-3. Operator override (manual signal selection takes precedence).
+3. Operator override (a manual signal pick during AUTO mode = drop
+   straight into MANUAL mode with that signal locked).
 4. Last routing decision (avoid thrashing — minimum 5-minute dwell time
    before switching).
 
@@ -302,16 +373,17 @@ active signal automatically. Operator can override.
 @dataclass(frozen=True)
 class RoutingDecision:
     timestamp_et: datetime
-    active_signal: str | None        # None = NO_SIGNAL_FITS_REGIME
+    routing_mode: RoutingMode        # MANUAL | AUTO_DETERMINISTIC | AUTO_LLM
+    active_signal: str | None        # None = NO_SIGNAL_FITS_REGIME (auto only)
     confidence_score: float
     regime: MarketRegime
-    reasoning: str                   # human-readable
+    reasoning: str                   # "Operator selected" / "Best fit for RANGE_BOUND" / etc.
     alternatives_considered: list[tuple[str, float]]   # (signal_name, score)
-    override_active: bool
-    routing_method: str              # "deterministic" | "operator_override" | "no_fit"
+    operator: str | None             # set when routing_mode == MANUAL
+    routing_method: str              # "manual" | "deterministic" | "llm" | "no_fit"
 ```
 
-### Algorithm v1 (deterministic, no LLM)
+### Algorithm — AUTO_DETERMINISTIC (deterministic, no LLM)
 1. Hard filters first: drop signals whose `verdict == FAIL`, drop signals
    whose `data_dependencies` aren't currently satisfied (missing SPY
    bars, etc.), drop signals outside their scan window.
@@ -328,18 +400,34 @@ class RoutingDecision:
   confidence, regime, reasoning, alternatives_json, routing_method,
   override_active)`.
 
-### Override API
+### Routing Mode API
 ```
-POST /api/admin/signal-override        { "signal": "...", "operator": "...", "reason": "..." }
-DELETE /api/admin/signal-override      (resume automatic routing)
+GET  /api/operator/routing               -> current mode + active signal + reasoning
+POST /api/admin/routing/manual           { "signal": "...", "operator": "...", "reason": "..." }
+POST /api/admin/routing/auto             { "operator": "...", "reason": "..." }   # AUTO_DETERMINISTIC
+POST /api/admin/routing/auto-llm         { "operator": "...", "reason": "..." }   # v3, currently 501
 ```
 
+### Frontend control
+- Dropdown on Operator tab top strip:
+  - **Manual** — submenu lists every registered signal name + version
+  - **Auto (deterministic)** — picks based on regime + operating envelope
+  - **Auto (LLM)** — disabled with tooltip "available in v3"
+- Selection writes through the appropriate POST endpoint above.
+- Currently-active option highlighted; reasoning text shown beneath
+  ("Operator selected at 10:14" / "Best fit for RANGE_BOUND" / etc.).
+
 ### Acceptance
-- Deterministic test fixture: synthetic regime stream + signal envelopes
-  → expected sequence of routing decisions.
+- MANUAL mode: dropdown switch from one signal to another takes effect
+  on the next scanner cycle (within `SCAN_INTERVAL_SECONDS`).
+- MANUAL mode: when in AUTO and operator picks a specific signal,
+  routing_mode flips to MANUAL and stays there until operator
+  re-selects Auto.
+- AUTO_DETERMINISTIC: deterministic test fixture (synthetic regime
+  stream + signal envelopes) → expected sequence of routing decisions.
 - 5-minute dwell test: rapid regime flicker → router does NOT thrash.
-- Override test: operator override survives across regime changes
-  until explicitly cleared.
+- AUTO_LLM endpoint returns 501 Not Implemented with a clear message;
+  frontend shows tooltip "available in v3".
 - `NO_SIGNAL_FITS_REGIME` halts new entries but does NOT trigger the
   kill switch (existing positions exit normally).
 
@@ -386,6 +474,60 @@ report.
 - Tape latency from event publish to render: < 500ms.
 - Disconnected banner appears within 6s of WS drop and disappears
   within 1s of recovery.
+
+---
+
+## Phase G — Mid-price fill model wiring  (0.5–1 day)
+
+### Goal
+v1.1 shipped `src/driftpilot/backtest/limit_fill.py` with the corrected
+placement-time-mid logic and 7 regression tests (including the
+bar-derived-mid bug catcher). The module is **not yet wired into the
+per-bar replay loop**, so `RS-Drift v1.1`'s `fill_rate_pct` reports as
+`1.0` (every signal assumed to fill). Phase G wires it in so reports
+for `ENTRY_ORDER_TYPE = "limit_mid"` signals reflect realistic fill
+rates of 30–60%.
+
+### Backend
+- Extend `BacktestTrade` with two new fields (additive, default `True`
+  so existing trade construction stays valid):
+  - `entry_was_attempted_at_mid: bool = True`
+  - `entry_was_filled: bool = True`
+- In `replay_bars`, when the active signal's config declares
+  `ENTRY_ORDER_TYPE == "limit_mid"`:
+  - On entry-eligible cycle, instead of immediately constructing the
+    open position via `_open_position`, build a `LimitOrder` with
+    `placement_mid_price = (latest_bar_quote.bid + latest_bar_quote.ask) / 2`
+    and `timeout_seconds = settings.entry_limit_timeout_seconds`.
+  - Add the `LimitOrder` to a `pending_limits: list[LimitOrder]` queue.
+  - Each tick, walk the queue: call
+    `attempt_limit_fill(order, future_bars=upcoming_bars_for_symbol)`.
+    On `Fill(filled=True)`, open the position. On `timeout`, record an
+    "attempted but unfilled" trade row (qty=0, P&L=0, but accounted in
+    `signals_attempted` for `fill_rate_pct`).
+- Update `compute_locked_spec_metrics` so `signals_attempted` counts
+  filled + unfilled trade rows; today it counts only filled.
+
+### Tests
+- Synthetic test: 60 bars of monotonically rising SPY (no pullback to
+  placement_mid). RS-Drift run produces `fill_rate_pct == 0.0` (zero
+  fills out of N signals). The current code returns 1.0; this test
+  catches the regression.
+- Synthetic test: 60 bars of pullback-then-rally. RS-Drift run produces
+  `fill_rate_pct ∈ (0.4, 0.7)` (realistic).
+- Existing `test_limit_fill.py` (7 tests) still passes — no changes to
+  the module itself.
+- RS-Drift verdict gate: `fill_rate_pct < 0.50` → FAIL works against
+  real data not just synthetic.
+
+### Acceptance
+- After wiring, RS-Drift `expectancy_report.json` `fill_rate_pct` is
+  no longer always `1.0`.
+- Existing 4 backtests' results are unchanged for non-`limit_mid`
+  signals.
+- The 7 `test_limit_fill.py` tests pass unchanged (module API stable).
+- `BacktestTrade.entry_was_filled = False` rows are filtered out of
+  P&L calculations but counted in `signals_attempted`.
 
 ---
 
@@ -436,16 +578,36 @@ Sequential by dependency:
 
 | Phase | Description | Effort | Depends on |
 |---|---|---|---|
+| 0.5 | Type-safe `signal_state` TypedDicts | 0.5d | — |
 | A | Event bus + Live Trade Tape | 1–1.5d | — |
 | B | Emergency Stop | 0.5d | — (parallel to A) |
 | C | Multi-feature regime detector | 1d | — (parallel to A/B) |
-| D | Signal router | 1d | C |
-| E | Frontend integration | 0.5–1d | A, B, C, D |
+| D | Signal router (3 modes; MANUAL ships in v2) | 1d | C (for AUTO); MANUAL has no deps |
+| E | Frontend integration (incl. signal-mode dropdown) | 0.5–1d | A, B, C, D |
 | F | Documentation | 0.5d | A–E |
-| **Total** | | **3–5 days** | |
+| G | Mid-price fill model wiring | 0.5–1d | — (independent of A–F) |
+| **Total** | | **4–6 days** | |
 
-A and B are parallelizable from day 1. C runs in parallel.
-D depends on C. E depends on all of A, B, C, D. F at the end.
+Parallelism map:
+- Day 1: 0.5 + A + B + C + G all parallelizable (different file scopes).
+- Day 2: D (depends on C). Frontend prep can begin against mock router
+  data.
+- Day 3: E (frontend integration). G should be wrapping up by here.
+- Day 4: F (documentation, runbook).
+
+**v2 ship priority** (highest operator value first):
+1. **Phase B (Emergency Stop)** — half a day, biggest anxiety relief.
+2. **Phase D MANUAL mode + signal dropdown** — half a day, gives
+   operator full control without waiting on regime detector.
+3. **Phase A (Live Trade Tape)** — full operator visibility.
+4. **Phase 0.5 (TypedDicts)** — quiet hardening, ships in parallel.
+5. **Phase G (Mid-price fill wiring)** — fixes RS-Drift `fill_rate_pct`.
+6. **Phase C + D AUTO_DETERMINISTIC** — needs operating-envelope data
+   from the four backtests landing tonight.
+7. **Phase E + F** — wraps everything up.
+
+Phases B + D-MANUAL + A together = ~2 days for "operator can see
+everything and stop anything", which is the user's stated minimum.
 
 ---
 
@@ -455,12 +617,18 @@ D depends on C. E depends on all of A, B, C, D. F at the end.
 - Every entry/exit/transition surfaces on the live tape within 500ms.
 - Operator can read the current market regime + active signal at a
   glance from the top strip.
-- Active signal switches automatically when regime changes (with 5-min
-  dwell), and the switch reasoning is visible.
-- Operator can override signal selection and the override persists
-  until cleared.
+- **Operator can pick any registered signal manually from a dropdown**
+  and the bot uses that signal exclusively until told otherwise.
+- AUTO_DETERMINISTIC mode switches signal automatically when regime
+  changes (with 5-min dwell), and the switch reasoning is visible.
+- AUTO_LLM mode is visible-but-disabled with a v3 tooltip — no new
+  control to discover when LLM routing eventually ships.
 - All four 2024 backtest reports' `operating_envelope` populated and
-  used by the router.
+  used by the router (when running in AUTO).
+- RS-Drift's `fill_rate_pct` reflects realistic mid-price fill rates
+  (~30–60%) instead of the placeholder 1.0.
+- `mypy` catches typos in signal_state keys (e.g. `metadata["rachet_stage"]`)
+  thanks to per-signal TypedDict casts.
 - Existing read-only data flow remains functional (the WebSocket
   augments rather than replaces `/api/operator/state`).
 
