@@ -63,9 +63,16 @@ class EarningsReportSignal:
             now = datetime.now(timezone.utc)
         candidates: list[Candidate] = []
         max_age = self._config.max_event_age_minutes
+        require_sentiment = self._config.require_sentiment
         for symbol, event in self._active_events.items():
             age = event_age_minutes(event.ts, now)
             if age > max_age:
+                continue
+            # Directional gate (v3 GATED config): only admit events whose
+            # Qwen-enriched sentiment matches the configured filter.
+            # Events not yet enriched (sentiment=None) are excluded when
+            # the filter is active — Qwen IS the gate.
+            if require_sentiment is not None and event.sentiment != require_sentiment:
                 continue
             candidates.append(
                 Candidate(
