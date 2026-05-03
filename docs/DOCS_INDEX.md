@@ -23,6 +23,9 @@
 | [docs/PROJECT_OVERVIEW.md](PROJECT_OVERVIEW.md) | ✅ CURRENT | One-page orientation with mermaid diagrams (component map, state machine, signal registry, backtest pipeline, ER schema, deploy topology) | **Read this first.** |
 | [docs/ARCHITECTURE.md](ARCHITECTURE.md) | ✅ CURRENT | Runtime flow detail, state ownership, signal boundary, persistence, live gate, dashboard contract | Mermaid runtime flow diagram included. Slightly older than PROJECT_OVERVIEW (signal boundary now also covers `evaluate_exit`). |
 | [docs/OPERATIONS.md](OPERATIONS.md) | ✅ CURRENT | Practical runbook: start services, expected dashboard states, paper reset, troubleshooting | All commands still work. |
+| [docs/RESEARCH_PATTERNS.md](RESEARCH_PATTERNS.md) | ✅ CURRENT | Analytical patterns for testing exit-tweak / stop-tweak / regime / cross-signal counterfactuals against existing reports without re-running. Includes a worked example from RS-Drift's FAIL run. | Read before queueing a re-run. |
+| [docs/REFACTOR_PLAN_V2_LIVE_OPERATOR.md](REFACTOR_PLAN_V2_LIVE_OPERATOR.md) | ✅ CURRENT | The v2 plan adding live trade tape, emergency stop, regime detection, signal router with three modes. 7 phases, multi-agent orchestration model. |
+| [reports/STATUS.md](../reports/STATUS.md) | ✅ CURRENT | Live aggregator showing all 4 backtests' status + per-signal cards + how-to-read-a-report. The single page to land on when checking 'are the backtests done?' |
 | [docs/DOCS_INDEX.md](DOCS_INDEX.md) | ✅ CURRENT | This file. |
 
 ## Phase review artifacts (archive)
