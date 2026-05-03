@@ -56,20 +56,29 @@ def _query_events(
     subcategory: str,
     start: datetime,
     end: datetime,
+    require_sentiment: str | None = None,
 ) -> list[tuple[str, str, str, str, str, int]]:
     """Pull events sorted by event_ts ascending. Tuple matches insert order:
     (symbol, category, subcategory, event_ts, headline, horizon_minutes).
+
+    If `require_sentiment` is set (e.g. "positive"), filter to events whose
+    Qwen-enriched sentiment matches. Events with NULL sentiment are EXCLUDED
+    when this filter is active — Qwen is the directional gate.
     """
     conn = sqlite3.connect(db_path)
     try:
-        cur = conn.execute(
+        sql = (
             "SELECT symbol, category, subcategory, event_ts, headline, horizon_minutes "
             "FROM catalyst_events "
             "WHERE category = ? AND subcategory = ? "
-            "AND event_ts >= ? AND event_ts <= ? "
-            "ORDER BY event_ts ASC",
-            (category, subcategory, start.isoformat(), end.isoformat()),
+            "AND event_ts >= ? AND event_ts <= ?"
         )
+        params: list = [category, subcategory, start.isoformat(), end.isoformat()]
+        if require_sentiment:
+            sql += " AND sentiment = ?"
+            params.append(require_sentiment)
+        sql += " ORDER BY event_ts ASC"
+        cur = conn.execute(sql, params)
         return cur.fetchall()
     finally:
         conn.close()
@@ -122,6 +131,7 @@ def replay_catalyst_signal(
     slot_value: float = 1_000.0,
     starting_capital: float = 10_000.0,
     progress_every: int = 50,
+    require_sentiment: str | None = None,
 ) -> ReplayResult:
     """Simulate a catalyst signal trading 2024 events.
 
@@ -149,10 +159,12 @@ def replay_catalyst_signal(
         catalyst_db_path,
         category=category, subcategory=subcategory,
         start=start, end=end,
+        require_sentiment=require_sentiment,
     )
+    sentiment_tag = f" sentiment={require_sentiment}" if require_sentiment else ""
     logger.info(
-        "catalyst replay: %d events for %s/%s in [%s, %s]",
-        len(rows), category, subcategory, start.date(), end.date(),
+        "catalyst replay: %d events for %s/%s%s in [%s, %s]",
+        len(rows), category, subcategory, sentiment_tag, start.date(), end.date(),
     )
     if not rows:
         return ReplayResult(

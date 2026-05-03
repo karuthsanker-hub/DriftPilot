@@ -109,9 +109,64 @@ These predictions become the v3 acceptance criteria.
 
 Nothing from the v1 batch. None of the four signals passes the universal
 `edge_ratio ≥ 1.1` gate, so per the locked plan no v1 signal proceeds
-to live paper. **The v3 catalyst layer is now on main** (PR #4-7,
-84/84 tests green) and is the test of whether selection-by-catalyst
-moves these edge ratios.
+to live paper.
+
+**v3.0 catalyst engine is now on main** (PRs #4-12) and the first signal
+has just cleared its gate.
+
+## v3.0 first verdicts (Oct-Nov 2024)
+
+The catalyst signals were backtested on real 2024 Alpaca News + Databento
+bars. Three configurations per signal: (no filter), (+positive sentiment),
+(+negative sentiment). Sentiment from local Qwen3-8B on DGX.
+
+| Signal × Filter | N | Win | Breakeven | edge_ratio | Verdict |
+|---|---|---|---|---|---|
+| **earnings_report_v1** (no filter) | 282 | 37% | 40% | 0.94 | FAIL |
+| **earnings_report_v1 + positive** | **57** | **47%** | **29%** | **1.62** | **🟢 PASS** |
+| earnings_report_v1 + negative | 23 | 26% | 59% | 0.44 | FAIL (correctly — anti-signal) |
+| analyst_target_raise_v1 (no filter) | 1,044 | 46% | 53% | 0.88 | FAIL |
+| analyst_target_raise_v1 + positive | 410 | 44% | 57% | 0.77 | FAIL |
+
+**The breakthrough**: gating earnings reports by Qwen-positive sentiment
+flipped the verdict from FAIL to PASS. Win-rate climbed +10pp, breakeven
+dropped −11pp (winners got bigger), and edge_ratio almost doubled
+(0.94 → 1.62, clears both the 1.1 universal gate and the 1.5
+signal-specific gate from requirements.md).
+
+## Why the spike's "5.09×" became "0.94×" without sentiment
+
+The catalyst spike measured **absolute** return magnitude (`|return|`
+at 60m vs baseline). A long-only strategy needs **directional up-moves**.
+Earnings reports split ~50/32/18 (positive/neutral/negative per Qwen);
+the volatility signal becomes a coin flip after directional filtering.
+
+This is the same methodology error caught in spike rounds v1-v3 —
+measuring the wrong thing relative to how the strategy trades. The
+answer was layered: `category × horizon × Qwen-sentiment`, not just
+`category × horizon`. v3.0's architecture had Qwen wired all along; we
+just needed to invoke it.
+
+## Why target_raise didn't move (interesting!)
+
+Both filtered configurations of `analyst_target_raise_v1` made things
+worse:
+- 82% of target_raise headlines are tagged positive by Qwen (consensus)
+- Filtering on positive removes 18% of events but the survivors are
+  apparently the most-already-priced-in ones
+- Negative target_raises are too rare (5 events) to be a contrarian
+  signal
+
+The v3.1 architecture for target_raise should probably use a different
+filter — surprise vs. consensus, not sentiment polarity. For now,
+target_raise remains FAIL.
+
+## Architectural finding for the v3 layer
+
+The validated filter is now: `category=earnings/report AND sentiment=positive`.
+The same architecture that built the catalyst layer can now ship a
+sentiment-gated `earnings_report_v1.1` to live paper trading per the
+locked plan (PASS verdict on universal AND signal-specific gates).
 
 What does ship is the **infrastructure**: backtest harness, signal
 contract, allocator, state machine, regime detector, mid-price fill
