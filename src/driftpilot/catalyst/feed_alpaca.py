@@ -163,6 +163,15 @@ class AlpacaNewsFeed:
             )
             await self._bus.publish(enriched)
             published += 1
+            # Audit log — one structured line per published event so we can
+            # reconstruct every signal/order chain post-hoc by grep alone.
+            logger.info(
+                "EVENT %s %s/%s sentiment=%s priority=%+.2f horizon=%dm hash=%s | %s",
+                enriched.symbol, enriched.category, enriched.subcategory,
+                enriched.sentiment or "NONE", enriched.priority_modifier,
+                enriched.horizon_minutes, enriched.headline_hash,
+                (enriched.headline or "")[:120],
+            )
 
         return published
 

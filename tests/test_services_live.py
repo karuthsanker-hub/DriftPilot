@@ -137,6 +137,143 @@ async def test_live_allocator_skips_when_broker_rejects(settings, repo):
 
 
 @pytest.mark.asyncio
+async def test_catalyst_scanner_emits_candidates_with_event_chain(settings, repo):
+    """CatalystScannerService translates signal Candidates → AllocationCandidates,
+    carrying the catalyst event chain into metadata."""
+    from driftpilot.catalyst.event import CatalystEvent
+    from driftpilot.catalyst.event_bus import CatalystEventBus
+    from driftpilot.clock import DriftPilotClock
+    from driftpilot.services_live import CatalystScannerService
+    from driftpilot.signals.earnings_report_v1 import (
+        EarningsReportConfig,
+        EarningsReportSignal,
+    )
+
+    bus = CatalystEventBus()
+    sig = EarningsReportSignal(EarningsReportConfig(require_sentiment="positive"), bus)
+    await sig.subscribe()
+
+    fake_qp = MagicMock(spec=AlpacaRestQuoteProvider)
+    fake_qp.latest_quote = MagicMock(return_value=MarketQuote(
+        symbol="AAPL", timestamp=datetime.now(timezone.utc),
+        bid_price=199.95, ask_price=200.05,
+    ))
+
+    scanner = CatalystScannerService(
+        signal=sig,
+        quote_provider=fake_qp,
+        clock=DriftPilotClock(settings.timezone),
+    )
+
+    # Publish a positive earnings event; signal admits it
+    ev = CatalystEvent(
+        symbol="AAPL", category="earnings", subcategory="report", pillar="micro",
+        ts=datetime.now(timezone.utc),
+        headline="Apple beats Q1 earnings, raises guidance",
+        source="alpaca", horizon_minutes=240, headline_hash="aapl_q1_beat",
+        sentiment="positive", priority_modifier=0.15,
+    )
+    await bus.publish(ev)
+
+    result = await scanner.scan()
+    assert len(result.candidates) == 1
+    ac = result.candidates[0]
+    assert ac.symbol == "AAPL"
+    assert ac.metadata["sentiment"] == "positive"
+    assert ac.metadata["headline_hash"] == "aapl_q1_beat"
+    assert "Apple beats" in ac.metadata["headline"]
+    assert ac.metadata["reference_price"] == pytest.approx(200.0, rel=1e-3)
+
+
+@pytest.mark.asyncio
+async def test_catalyst_scanner_skips_when_no_quote(settings, repo):
+    """No live quote → skip the candidate (don't pass garbage to broker)."""
+    from driftpilot.catalyst.event import CatalystEvent
+    from driftpilot.catalyst.event_bus import CatalystEventBus
+    from driftpilot.clock import DriftPilotClock
+    from driftpilot.services_live import CatalystScannerService
+    from driftpilot.signals.earnings_report_v1 import (
+        EarningsReportConfig,
+        EarningsReportSignal,
+    )
+
+    bus = CatalystEventBus()
+    sig = EarningsReportSignal(EarningsReportConfig(require_sentiment="positive"), bus)
+    await sig.subscribe()
+
+    fake_qp = MagicMock(spec=AlpacaRestQuoteProvider)
+    fake_qp.latest_quote = MagicMock(return_value=None)  # no quote
+
+    scanner = CatalystScannerService(
+        signal=sig,
+        quote_provider=fake_qp,
+        clock=DriftPilotClock(settings.timezone),
+    )
+
+    await bus.publish(CatalystEvent(
+        symbol="ILLIQ", category="earnings", subcategory="report", pillar="micro",
+        ts=datetime.now(timezone.utc), headline="x", source="t",
+        horizon_minutes=240, headline_hash="z", sentiment="positive",
+    ))
+
+    result = await scanner.scan()
+    assert result.candidates == []
+
+
+@pytest.mark.asyncio
+async def test_live_allocator_records_catalyst_metadata_on_position(settings, repo):
+    """Audit contract: the position record must include catalyst event chain
+    metadata so the EOD audit script can reconstruct the trade."""
+    from driftpilot.execution.slot_allocator import (
+        AllocationCandidate, AllocationResult, SlotAllocation,
+    )
+
+    fake_broker = MagicMock(spec=AlpacaBrokerClient)
+    fake_broker.submit_entry_order = AsyncMock(return_value=OrderSubmissionResult(
+        submitted=True, broker_order_id="ord-789", symbol="AAPL", side="buy",
+        quantity=5, order_type="limit", limit_price=200.10, reason="filled",
+    ))
+
+    allocator = LiveAlpacaAllocator(repo, settings, fake_broker)
+    fake_alloc_result = AllocationResult(
+        allocations=(SlotAllocation(
+            symbol="AAPL", slot_id=1, slot_value=1000.0, sector="Tech",
+            rank=1, score=0.15, reserved_at=datetime.now(timezone.utc),
+        ),),
+        rejections=(),
+    )
+    allocator.allocator = MagicMock()
+    allocator.allocator.allocate = AsyncMock(return_value=fake_alloc_result)
+
+    repo.slots.upsert(1, status="OPEN", symbol="AAPL", slot_value=1000, updated_at=datetime.now(timezone.utc))
+    catalyst_ts = datetime(2026, 5, 4, 13, 35, 0, tzinfo=timezone.utc)
+    candidates = [AllocationCandidate(
+        symbol="AAPL", score=0.15, sector="Tech",
+        latest_bar_at=datetime.now(timezone.utc),
+        metadata={
+            "reference_price": 200.0,
+            "catalyst_event_ts": catalyst_ts,
+            "headline": "Apple beats Q1 earnings, raises guidance for FY26",
+            "headline_hash": "abc12345def67890",
+            "sentiment": "positive",
+            "event_age_minutes": 12.5,
+        },
+    )]
+    await allocator.allocate(candidates)
+
+    # The position record must carry the catalyst chain metadata
+    open_positions = repo.positions.list_open()
+    assert len(open_positions) == 1
+    pos = open_positions[0]
+    md = pos.metadata or {}
+    assert md.get("catalyst_sentiment") == "positive"
+    assert md.get("catalyst_headline_hash") == "abc12345def67890"
+    assert "Apple beats" in (md.get("catalyst_headline") or "")
+    assert md.get("catalyst_event_age_min_at_entry") == 12.5
+    assert md.get("broker_order_id") == "ord-789"
+
+
+@pytest.mark.asyncio
 async def test_live_monitor_calls_signal_evaluate_exit(settings, repo, monkeypatch):
     """Monitor pulls quote, calls signal.evaluate_exit; if close=True, submits exit."""
     from dataclasses import dataclass

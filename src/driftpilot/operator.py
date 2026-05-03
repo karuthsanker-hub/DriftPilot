@@ -149,28 +149,59 @@ async def _run(once: bool, mock_stream: bool, env_file: str, paper_live: bool = 
     settings = load_settings(env_file)
     clock = DriftPilotClock(settings.timezone)
     repository = DriftPilotRepository.open(settings.sqlite_path_obj, clock)
-    scanner = SyntheticScannerService(
-        repository, settings, clock=clock, universe_file=settings.universe_file
-    )
 
     catalyst_bus, universe_filter, discovery_service = _build_catalyst_layer(settings)
     catalyst_db_path = settings.catalyst_db_path if settings.catalyst_enabled else None
 
     if paper_live:
-        from driftpilot.services_live import build_live_components
+        from driftpilot.services_live import (
+            CatalystScannerService,
+            build_live_components,
+        )
+        from driftpilot.signals.earnings_report_v1 import (
+            EarningsReportConfig,
+            EarningsReportSignal,
+        )
+
+        if catalyst_bus is None:
+            raise RuntimeError(
+                "--paper-live requires CATALYST_ENABLED=true (catalyst signals are "
+                "the only ones wired for live order submission today)"
+            )
+
         broker, allocator_service, monitor_service = build_live_components(
             repository, settings, clock=clock, catalyst_db_path=catalyst_db_path,
+        )
+
+        # Wire the catalyst signal directly to the bus + REST quotes for scanning.
+        # NB: this signal is constructed here AND will be constructed again later
+        # by the position monitor via get_signal(). Both share the same bus, so
+        # both see the same events. The scanner instance is the one whose scan()
+        # produces candidates; the get_signal() instance evaluates_exits.
+        live_signal = EarningsReportSignal(
+            EarningsReportConfig(require_sentiment="positive"),
+            catalyst_bus,
+        )
+        await live_signal.subscribe()
+
+        scanner = CatalystScannerService(
+            signal=live_signal,
+            quote_provider=allocator_service.broker.quote_provider,
+            clock=clock,
         )
         logger.warning(
             "🚨 PAPER-LIVE MODE: submitting real orders to Alpaca paper account at %s",
             settings.alpaca_paper_base_url,
         )
-        # Note: AlpacaBrokerClient is the broker reconciler in live mode too,
-        # but the existing state machine expects the BrokerReconciler protocol
-        # (get_account/get_open_positions). AlpacaBrokerClient implements those,
-        # so we can pass it directly.
+        logger.info(
+            "live signal: earnings_report_v1 (require_sentiment=positive); "
+            "scanner: CatalystScannerService (event-driven)"
+        )
         broker_for_machine = broker
     else:
+        scanner = SyntheticScannerService(
+            repository, settings, clock=clock, universe_file=settings.universe_file
+        )
         broker_for_machine = MockBrokerReconciler(repository, settings)
         allocator_service = PaperExecutionAllocator(
             repository, settings, clock=clock, catalyst_db_path=catalyst_db_path,
