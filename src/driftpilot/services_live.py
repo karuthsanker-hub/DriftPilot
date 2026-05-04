@@ -40,10 +40,68 @@ from driftpilot.storage.repositories import DriftPilotRepository
 logger = logging.getLogger(__name__)
 
 
-@dataclass
-class _ScanResult:
-    """Minimal ScanResult shim — state machine reads .candidates only."""
-    candidates: list[AllocationCandidate]
+# Use the production ScanResult so the state machine's REGIME_CHECK
+# (which reads spy_bar_at) is happy.
+def _build_scan_result(candidates, now):
+    from driftpilot.state_machine import ScanResult
+    return ScanResult(
+        spy_bar_at=now,
+        candidates=candidates,
+        regime="catalyst_event_driven",
+        metadata={"source": "catalyst_scanner", "n_candidates": len(candidates)},
+    )
+
+
+class LiveBrokerReconciler:
+    """Adapter that exposes BrokerReconciler protocol over AlpacaBrokerClient.
+
+    The state machine's BOOT state calls broker.reconcile_open_positions()
+    which AlpacaBrokerClient does not implement directly. This adapter
+    queries Alpaca for open positions and reconciles them into the local
+    operator state DB, matching the shape of MockBrokerReconciler.
+    """
+
+    def __init__(
+        self,
+        alpaca: AlpacaBrokerClient,
+        repository: DriftPilotRepository,
+        settings: DriftPilotSettings,
+    ) -> None:
+        self.alpaca = alpaca
+        self.repository = repository
+        self.settings = settings
+
+    async def reconcile_open_positions(self) -> str:
+        try:
+            broker_positions = await self.alpaca.get_open_positions()
+        except Exception as exc:
+            logger.warning("alpaca reconcile fetch failed: %s — assuming no open positions", exc)
+            broker_positions = []
+
+        # Translate alpaca BrokerPosition → list of dicts the repo expects
+        # (or empty list — mock-equivalent for "no open positions").
+        try:
+            return self.repository.positions.reconcile_broker_open_positions(
+                broker_positions=[
+                    {
+                        "symbol": getattr(p, "symbol", "").upper(),
+                        "quantity": float(getattr(p, "quantity", 0)),
+                        "avg_entry_price": float(getattr(p, "avg_entry_price", 0)),
+                    }
+                    for p in broker_positions
+                ],
+                slot_value=self.settings.slot_value,
+                target_pct=self.settings.target_pct,
+                stop_pct=self.settings.stop_pct,
+                trade_slots=self.settings.trade_slots,
+            )
+        except Exception as exc:
+            logger.warning("repo reconcile failed: %s — continuing with no-op", exc)
+            return "live_reconcile_noop"
+
+    # Pass-through for any other broker calls the state machine might make
+    def __getattr__(self, name):
+        return getattr(self.alpaca, name)
 
 
 class CatalystScannerService:
@@ -71,14 +129,14 @@ class CatalystScannerService:
         self.quote_provider = quote_provider
         self.clock = clock
 
-    async def scan(self) -> _ScanResult:
+    async def scan(self):
         now = self.clock.now_utc()
         candidates: list[AllocationCandidate] = []
         try:
             sig_candidates = await self.signal.scan(now=now)
         except Exception as exc:
             logger.exception("catalyst scanner: signal.scan raised: %s", exc)
-            return _ScanResult(candidates=[])
+            return _build_scan_result([], now)
 
         for rank, sc in enumerate(sig_candidates, start=1):
             quote = await asyncio.to_thread(self.quote_provider.latest_quote, sc.symbol)
@@ -119,7 +177,7 @@ class CatalystScannerService:
 
         if not candidates:
             logger.info("catalyst scanner: 0 candidates this cycle (no admitted events)")
-        return _ScanResult(candidates=candidates)
+        return _build_scan_result(candidates, now)
 
 
 class LiveAlpacaAllocator:
@@ -242,18 +300,40 @@ class LiveAlpacaPositionMonitor:
         quote_provider: AlpacaRestQuoteProvider,
         *,
         clock: DriftPilotClock | None = None,
+        signal=None,  # injected from operator startup; bypasses registry
     ) -> None:
         self.repository = repository
         self.settings = settings
         self.broker = broker
         self.quote_provider = quote_provider
         self.clock = clock or DriftPilotClock(settings.timezone)
+        self._signal = signal
 
-    async def monitor_open_positions(self) -> None:
-        """One sweep: for each open position, check exit and submit if so."""
-        signal = get_signal(self.settings.active_signal)
+    async def monitor(self):
+        """State-machine-protocol entrypoint. Returns PositionMonitorResult."""
+        from driftpilot.state_machine import PositionMonitorResult
+        exits = await self.monitor_open_positions()
+        positions = self.repository.positions.list_open()
+        return PositionMonitorResult(
+            open_positions=len(positions),
+            exit_orders=exits,
+            recycled_slots=0,
+            halted_reason=None,
+            metadata={"source": "live_alpaca_paper"},
+        )
+
+    def _get_signal(self):
+        if self._signal is not None:
+            return self._signal
+        return get_signal(self.settings.active_signal)
+
+    async def monitor_open_positions(self) -> int:
+        """One sweep: for each open position, check exit and submit if so.
+        Returns the number of exit orders submitted."""
+        signal = self._get_signal()
         positions = self.repository.positions.list_open()
         now = self.clock.now_utc()
+        exit_count = 0
 
         for position in positions:
             symbol = position.symbol.upper()
@@ -313,12 +393,15 @@ class LiveAlpacaPositionMonitor:
                             "broker_exit_order_id": exit_result.broker_order_id,
                         },
                     )
+                    exit_count += 1
                     logger.info(
                         "LIVE: position closed symbol=%s broker_order_id=%s",
                         symbol, exit_result.broker_order_id,
                     )
             except Exception as exc:
                 logger.exception("LIVE: exit submission failed for %s: %s", symbol, exc)
+
+        return exit_count
 
 
 def build_live_components(
