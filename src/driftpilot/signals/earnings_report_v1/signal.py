@@ -164,6 +164,12 @@ class EarningsReportSignal:
         metadata = getattr(position, "metadata", {}) or {}
         entry_ts = metadata.get("entry_ts")
         entry_price = metadata.get("entry_price")
+        # Persisted JSON makes datetimes round-trip as ISO strings — coerce.
+        if isinstance(entry_ts, str):
+            try:
+                entry_ts = datetime.fromisoformat(entry_ts.replace("Z", "+00:00"))
+            except ValueError:
+                entry_ts = None
         if entry_ts is None or entry_price is None:
             return None
         entry_price_f = float(entry_price)
