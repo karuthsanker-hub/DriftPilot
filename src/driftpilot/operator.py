@@ -209,6 +209,7 @@ async def _run(once: bool, mock_stream: bool, env_file: str, paper_live: bool = 
             signal=live_signal,
             quote_provider=allocator_service.broker.quote_provider,
             clock=clock,
+            universe_path=settings.universe_file,
         )
         # Inject the same signal instance into the monitor so it skips the registry
         monitor_service._signal = live_signal
