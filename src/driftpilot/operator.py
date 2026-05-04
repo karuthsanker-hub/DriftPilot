@@ -141,7 +141,16 @@ def main() -> None:
         "(event-driven signals; no SIP bar stream wired yet).",
     )
     parser.add_argument("--env-file", default=".env")
+    parser.add_argument("--log-level", default="INFO", help="DEBUG, INFO, WARNING, ERROR")
     args = parser.parse_args()
+    logging.basicConfig(
+        format="[%(asctime)s] %(levelname)s %(name)s: %(message)s",
+        level=getattr(logging, args.log_level.upper(), logging.INFO),
+    )
+    # Silence chatty libraries
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
     asyncio.run(_run(args.once, args.mock_stream, args.env_file, args.paper_live))
 
 
@@ -156,6 +165,7 @@ async def _run(once: bool, mock_stream: bool, env_file: str, paper_live: bool = 
     if paper_live:
         from driftpilot.services_live import (
             CatalystScannerService,
+            LiveBrokerReconciler,
             build_live_components,
         )
         from driftpilot.signals.earnings_report_v1 import (
@@ -174,6 +184,8 @@ async def _run(once: bool, mock_stream: bool, env_file: str, paper_live: bool = 
         )
 
         # Wire the catalyst signal directly to the bus + REST quotes for scanning.
+        # Same instance is also injected into the position monitor below — both
+        # SCANNING and IN_POSITION share state via the bus subscription.
         # NB: this signal is constructed here AND will be constructed again later
         # by the position monitor via get_signal(). Both share the same bus, so
         # both see the same events. The scanner instance is the one whose scan()
@@ -189,6 +201,8 @@ async def _run(once: bool, mock_stream: bool, env_file: str, paper_live: bool = 
             quote_provider=allocator_service.broker.quote_provider,
             clock=clock,
         )
+        # Inject the same signal instance into the monitor so it skips the registry
+        monitor_service._signal = live_signal
         logger.warning(
             "🚨 PAPER-LIVE MODE: submitting real orders to Alpaca paper account at %s",
             settings.alpaca_paper_base_url,
@@ -197,7 +211,10 @@ async def _run(once: bool, mock_stream: bool, env_file: str, paper_live: bool = 
             "live signal: earnings_report_v1 (require_sentiment=positive); "
             "scanner: CatalystScannerService (event-driven)"
         )
-        broker_for_machine = broker
+        # Wrap the broker so it satisfies the BrokerReconciler protocol the
+        # state machine expects. AlpacaBrokerClient doesn't implement
+        # reconcile_open_positions directly.
+        broker_for_machine = LiveBrokerReconciler(broker, repository, settings)
     else:
         scanner = SyntheticScannerService(
             repository, settings, clock=clock, universe_file=settings.universe_file
