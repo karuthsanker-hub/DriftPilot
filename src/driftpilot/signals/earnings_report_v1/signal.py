@@ -58,6 +58,66 @@ class EarningsReportSignal:
         await self._bus.unsubscribe(self._sub_id)
         self._sub_id = None
 
+    def bootstrap_from_db(self, db_path: str, lookback_minutes: int | None = None) -> int:
+        """Populate _active_events from the catalyst SQLite for events <
+        max_event_age_minutes old at startup.
+
+        Without this, a freshly-restarted operator only sees events
+        published AFTER startup. Events that landed before startup but
+        within the signal's age window are invisible until they are
+        re-published — which never happens (UNIQUE constraint dedups
+        the source).
+
+        Returns the number of events loaded.
+        """
+        import sqlite3
+        from datetime import datetime, timedelta, timezone
+
+        from driftpilot.catalyst.event import CatalystEvent
+
+        max_age = lookback_minutes or self._config.max_event_age_minutes
+        cutoff = (datetime.now(timezone.utc) - timedelta(minutes=max_age)).isoformat()
+
+        conn = sqlite3.connect(db_path)
+        try:
+            cur = conn.execute(
+                "SELECT symbol, category, subcategory, pillar, event_ts, headline, "
+                "source, horizon_minutes, headline_hash, sentiment, priority_modifier "
+                "FROM catalyst_events "
+                "WHERE category = 'earnings' AND subcategory = 'report' "
+                "AND event_ts >= ? "
+                "ORDER BY event_ts ASC",
+                (cutoff,),
+            )
+            rows = cur.fetchall()
+        finally:
+            conn.close()
+
+        loaded = 0
+        for row in rows:
+            try:
+                ts = datetime.fromisoformat(row[4])
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                event = CatalystEvent(
+                    symbol=row[0],
+                    category=row[1],
+                    subcategory=row[2],
+                    pillar=row[3] or "micro",  # type: ignore[arg-type]
+                    ts=ts,
+                    headline=row[5] or "",
+                    source=row[6] or "db_bootstrap",
+                    horizon_minutes=int(row[7] or 60),
+                    headline_hash=row[8] or "",
+                    sentiment=row[9],
+                    priority_modifier=float(row[10] or 0.0),
+                )
+                self._active_events[event.symbol.upper()] = event
+                loaded += 1
+            except (ValueError, TypeError):
+                continue
+        return loaded
+
     async def scan(self, now: datetime | None = None) -> list[Candidate]:
         if now is None:
             now = datetime.now(timezone.utc)
@@ -104,6 +164,12 @@ class EarningsReportSignal:
         metadata = getattr(position, "metadata", {}) or {}
         entry_ts = metadata.get("entry_ts")
         entry_price = metadata.get("entry_price")
+        # Persisted JSON makes datetimes round-trip as ISO strings — coerce.
+        if isinstance(entry_ts, str):
+            try:
+                entry_ts = datetime.fromisoformat(entry_ts.replace("Z", "+00:00"))
+            except ValueError:
+                entry_ts = None
         if entry_ts is None or entry_price is None:
             return None
         entry_price_f = float(entry_price)

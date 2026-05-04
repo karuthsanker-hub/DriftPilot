@@ -26,7 +26,25 @@ TAXONOMY_RULES: tuple[CategoryRule, ...] = (
     CategoryRule("earnings", "guidance_up",  ("raises guidance", "raises outlook", "lifts forecast", "raises q1 forecast", "boosts forecast")),
     CategoryRule("earnings", "guidance_down",("cuts guidance", "lowers guidance", "lowers outlook", "warns", "guidance below")),
     CategoryRule("earnings", "preannounce",  ("preannounces", "pre-announce", "preliminary q", "preliminary results")),
-    CategoryRule("earnings", "report",       ("earnings report", " q1 report", " q2 report", " q3 report", " q4 report", " eps ", "reports earnings", "earnings results", "fourth-quarter results", "third-quarter results", "first-quarter results")),
+    CategoryRule("earnings", "report",       (
+        # Original strict rules — produced the validated 5.09x cell.
+        "earnings report", " q1 report", " q2 report", " q3 report", " q4 report",
+        " eps ", "reports earnings", "earnings results",
+        "fourth-quarter results", "third-quarter results", "first-quarter results",
+        # 2026-05-04 LIVE-PAPER ADDITION: modern Benzinga/PR-newswire wording.
+        # Documented mod — re-validate via spike before comparing post-mod
+        # backtest results to the 5.09x cell.
+        "earnings call transcript", "earnings call:", "q1 earnings call",
+        "q2 earnings call", "q3 earnings call", "q4 earnings call",
+        "q1 2026 earnings", "q2 2026 earnings", "q3 2026 earnings", "q4 2026 earnings",
+        "q1 2025 earnings", "q4 2025 earnings",
+        "posts upbeat earnings", "posts weak earnings", "beats earnings",
+        "misses earnings", "tops earnings",
+        "q1 2026 results", "q2 2026 results", "q3 2026 results", "q4 2026 results",
+        "q1 results", "q2 results", "q3 results", "q4 results",
+        "reports first-quarter", "reports second-quarter",
+        "reports third-quarter", "reports fourth-quarter",
+    )),
     # ---- analyst ----
     CategoryRule("analyst", "target_raise",  ("raises price target", "raises target", "boosts price target", "lifts price target", "increases price target")),
     CategoryRule("analyst", "target_cut",    ("cuts price target", "lowers price target", "reduces price target")),
