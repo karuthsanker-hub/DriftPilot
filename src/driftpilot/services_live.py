@@ -21,7 +21,7 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from driftpilot.broker.alpaca_client import AlpacaBrokerClient
+from driftpilot.broker.alpaca_client import AlpacaBrokerClient, OrderSubmissionResult
 from driftpilot.clock import DriftPilotClock
 from driftpilot.execution.slot_allocator import (
     AllocationCandidate,
@@ -148,6 +148,10 @@ class CatalystScannerService:
                 continue
             ref_price = (quote.bid_price + quote.ask_price) / 2.0
             features = sc.features or {}
+            cat_ts_val = features.get("catalyst_event_ts")
+            cat_ts_str = (
+                cat_ts_val.isoformat() if hasattr(cat_ts_val, "isoformat") else cat_ts_val
+            )
             ac = AllocationCandidate(
                 symbol=sc.symbol,
                 score=float(sc.score),
@@ -156,7 +160,7 @@ class CatalystScannerService:
                 rank=rank,
                 metadata={
                     "reference_price": ref_price,
-                    "catalyst_event_ts": features.get("catalyst_event_ts"),
+                    "catalyst_event_ts": cat_ts_str,
                     "headline": features.get("headline"),
                     "headline_hash": features.get("headline_hash"),
                     "sentiment": features.get("sentiment"),
@@ -237,12 +241,43 @@ class LiveAlpacaAllocator:
                 logger.exception("LIVE: entry submission failed for %s: %s", allocation.symbol, exc)
                 continue
 
+            # Reconcile with Alpaca's actual position state. The broker's
+            # _wait_for_fill can race-lose to a fast fill: order submitted →
+            # immediately filled before our poll caught up → wait_for_fill
+            # times out and cancel returns "order already in filled state".
+            # Treat that as a successful fill if Alpaca actually has the position.
             if not submission.submitted:
-                logger.warning(
-                    "LIVE: entry not submitted for %s — reason=%s",
-                    allocation.symbol, submission.reason,
+                try:
+                    open_positions = await self.broker.get_open_positions()
+                except Exception:
+                    open_positions = []
+                actual = next(
+                    (p for p in open_positions if p.symbol.upper() == allocation.symbol.upper()),
+                    None,
                 )
-                continue
+                if actual is not None:
+                    logger.warning(
+                        "LIVE: broker reported submitted=False (reason=%s) but alpaca shows "
+                        "real position %s qty=%s entry=%.2f — treating as filled",
+                        submission.reason, actual.symbol, actual.quantity,
+                        float(actual.average_entry_price),
+                    )
+                    submission = OrderSubmissionResult(
+                        submitted=True,
+                        broker_order_id=submission.broker_order_id or actual.broker_position_id,
+                        symbol=actual.symbol,
+                        side="buy",
+                        quantity=float(actual.quantity),
+                        order_type="reconciled",
+                        limit_price=float(actual.average_entry_price),
+                        reason="reconciled_from_alpaca_position",
+                    )
+                else:
+                    logger.warning(
+                        "LIVE: entry not submitted for %s — reason=%s",
+                        allocation.symbol, submission.reason,
+                    )
+                    continue
 
             # Order submitted AND filled (broker waited). Record the position
             # locally so the monitor can track it for exit.

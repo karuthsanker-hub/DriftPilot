@@ -195,6 +195,15 @@ async def _run(once: bool, mock_stream: bool, env_file: str, paper_live: bool = 
             catalyst_bus,
         )
         await live_signal.subscribe()
+        # Bootstrap _active_events from DB so events that landed before this
+        # process started (or were just reclassified) are visible to the
+        # signal without waiting for re-publication on the bus.
+        if catalyst_db_path:
+            n_loaded = live_signal.bootstrap_from_db(catalyst_db_path)
+            logger.info(
+                "live signal bootstrapped %d earnings/report events from DB (within max_event_age=%dmin)",
+                n_loaded, EarningsReportConfig().max_event_age_minutes,
+            )
 
         scanner = CatalystScannerService(
             signal=live_signal,
