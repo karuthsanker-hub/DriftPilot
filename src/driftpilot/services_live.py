@@ -597,10 +597,24 @@ class LiveAlpacaPositionMonitor:
                         "exit_close_path": close_reason_label,
                     },
                 )
+                # Free the slot so the allocator can reuse it.
+                # Without this, slots stay RESERVED across position closes,
+                # eventually starving allocation and capping notional far below
+                # the configured slot_value × trade_slots.
+                slot_id = getattr(position, "slot_id", None)
+                if slot_id is not None:
+                    try:
+                        self.repository.slots.upsert(
+                            slot_id, status="EMPTY", symbol=None,
+                            slot_value=self.settings.slot_value,
+                            updated_at=self.clock.now_utc(),
+                        )
+                    except Exception as slot_exc:
+                        logger.warning("LIVE: slot %s free failed: %s", slot_id, slot_exc)
                 exit_count += 1
                 logger.info(
-                    "LIVE: position closed symbol=%s broker_order_id=%s reason=%s realized=$%.2f path=%s",
-                    symbol, broker_oid, exit_reason, realized, close_reason_label,
+                    "LIVE: position closed symbol=%s broker_order_id=%s reason=%s realized=$%.2f path=%s slot=%s freed",
+                    symbol, broker_oid, exit_reason, realized, close_reason_label, slot_id,
                 )
             except Exception as close_exc:
                 logger.warning(
