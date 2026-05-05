@@ -125,10 +125,14 @@ class CatalystScannerService:
         quote_provider: AlpacaRestQuoteProvider,
         clock: DriftPilotClock,
         universe_path: str | None = None,
+        runtime_config_path: str | None = None,
     ) -> None:
         self.signal = signal
         self.quote_provider = quote_provider
         self.clock = clock
+        # Hot-reload tracking — only re-read the file when its mtime changes.
+        self._runtime_config_path = runtime_config_path
+        self._runtime_config_mtime: float = 0.0
         # Lazy-load real sectors so catalyst candidates spread across the
         # allocator's per-sector cap. Otherwise all our candidates end up in
         # "Unknown" and cap fires after 3.
@@ -147,7 +151,45 @@ class CatalystScannerService:
             except FileNotFoundError:
                 logger.warning("universe path not found: %s — sector cap will fire on Unknown", universe_path)
 
+    def _maybe_hot_reload(self) -> None:
+        """If the runtime_config.json file changed since last check, swap
+        the signal's _config. Caller-driven so it runs once per scan cycle.
+        """
+        if not self._runtime_config_path:
+            return
+        try:
+            from pathlib import Path
+            p = Path(self._runtime_config_path)
+            if not p.exists():
+                return
+            mtime = p.stat().st_mtime
+            if mtime == self._runtime_config_mtime:
+                return
+            from driftpilot.runtime_config import load_runtime_config
+            from driftpilot.signals.earnings_report_v1.config import EarningsReportConfig
+            cfg = load_runtime_config(p)
+            require_sent = cfg.earnings_require_sentiment
+            new_signal_cfg = EarningsReportConfig(
+                max_hold_minutes=cfg.earnings_max_hold_minutes,
+                profit_take_pct=cfg.earnings_profit_take_pct,
+                stop_loss_pct=cfg.earnings_stop_loss_pct,
+                max_event_age_minutes=cfg.earnings_max_event_age_minutes,
+                require_sentiment=None if require_sent == "any" else require_sent,
+            )
+            self.signal._config = new_signal_cfg  # type: ignore[attr-defined]
+            self._runtime_config_mtime = mtime
+            logger.info(
+                "🔄 hot-reloaded signal config: max_hold=%dm profit=%.2f%% stop=%.2f%% "
+                "max_age=%dm sentiment=%s",
+                cfg.earnings_max_hold_minutes, cfg.earnings_profit_take_pct,
+                cfg.earnings_stop_loss_pct, cfg.earnings_max_event_age_minutes,
+                require_sent,
+            )
+        except Exception as exc:
+            logger.warning("hot-reload failed: %s", exc)
+
     async def scan(self):
+        self._maybe_hot_reload()
         now = self.clock.now_utc()
         candidates: list[AllocationCandidate] = []
         try:

@@ -330,6 +330,34 @@ def create_app(env_path: Path | str = ".env") -> FastAPI:
         except Exception as exc:
             _raise_api_error(exc, "admin_state")
 
+    @app.get("/api/admin/runtime-config")
+    def get_runtime_config():
+        try:
+            from driftpilot.runtime_config import field_specs, load_runtime_config
+            cfg = load_runtime_config()
+            return {"values": cfg.to_dict(), "fields": field_specs()}
+        except Exception as exc:
+            _raise_api_error(exc, "get_runtime_config")
+
+    @app.post("/api/admin/runtime-config")
+    async def post_runtime_config(payload: dict):
+        try:
+            from driftpilot.runtime_config import save_runtime_config
+            cfg = save_runtime_config(payload)
+            return {
+                "ok": True,
+                "values": cfg.to_dict(),
+                "note": (
+                    "Signal config (max_age/profit/stop/hold/sentiment) "
+                    "hot-reloads on next scan cycle (~30s). slot_value and "
+                    "max_trades_per_symbol_per_day require operator restart."
+                ),
+            }
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        except Exception as exc:
+            _raise_api_error(exc, "post_runtime_config")
+
     @app.post("/api/admin/override/{action}")
     def admin_override(action: str):
         allowed = {

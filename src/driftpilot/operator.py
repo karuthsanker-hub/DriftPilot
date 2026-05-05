@@ -190,11 +190,29 @@ async def _run(once: bool, mock_stream: bool, env_file: str, paper_live: bool = 
         # by the position monitor via get_signal(). Both share the same bus, so
         # both see the same events. The scanner instance is the one whose scan()
         # produces candidates; the get_signal() instance evaluates_exits.
+        # Build signal config from runtime config (hot-reloadable from /admin)
+        # falling back to .env defaults.
+        from driftpilot.runtime_config import load_runtime_config
+        rcfg = load_runtime_config()
+        require_sent = rcfg.earnings_require_sentiment
         live_signal = EarningsReportSignal(
-            EarningsReportConfig(require_sentiment="positive"),
+            EarningsReportConfig(
+                max_hold_minutes=rcfg.earnings_max_hold_minutes,
+                profit_take_pct=rcfg.earnings_profit_take_pct,
+                stop_loss_pct=rcfg.earnings_stop_loss_pct,
+                max_event_age_minutes=rcfg.earnings_max_event_age_minutes,
+                require_sentiment=None if require_sent == "any" else require_sent,
+            ),
             catalyst_bus,
         )
         await live_signal.subscribe()
+        logger.info(
+            "live signal config: max_hold=%dm profit_take=%.2f%% stop_loss=%.2f%% "
+            "max_age=%dm require_sentiment=%s (hot-reloadable from /admin)",
+            rcfg.earnings_max_hold_minutes, rcfg.earnings_profit_take_pct,
+            rcfg.earnings_stop_loss_pct, rcfg.earnings_max_event_age_minutes,
+            require_sent,
+        )
         # Bootstrap _active_events from DB so events that landed before this
         # process started (or were just reclassified) are visible to the
         # signal without waiting for re-publication on the bus.
@@ -210,6 +228,7 @@ async def _run(once: bool, mock_stream: bool, env_file: str, paper_live: bool = 
             quote_provider=allocator_service.broker.quote_provider,
             clock=clock,
             universe_path=settings.universe_file,
+            runtime_config_path="data/driftpilot/runtime_config.json",
         )
         # Inject the same signal instance into the monitor so it skips the registry
         monitor_service._signal = live_signal
