@@ -178,11 +178,19 @@ class EarningsReportSignal:
         current_price = float(getattr(position, "current_price", entry_price_f))
         unrealized_pct = (current_price - entry_price_f) / entry_price_f * 100.0
 
+        # Trailing stop needs the running peak. The position monitor maintains
+        # peak_unrealized_pct in the position's metadata before calling here.
+        peak_unrealized_pct = max(
+            float(metadata.get("peak_unrealized_pct", 0.0)),
+            unrealized_pct,  # cover the case where metadata wasn't updated yet
+        )
+
         should_close, reason = evaluate_all(
             now=now,
             entry_ts=entry_ts,
             unrealized_pct=unrealized_pct,
             cfg=self._config,
+            peak_unrealized_pct=peak_unrealized_pct,
         )
         if should_close:
             return ExitDecision(
