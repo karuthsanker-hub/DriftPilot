@@ -128,6 +128,11 @@ class SlotAllocator:
                 for slot in slots
                 if slot.symbol is not None and _slot_status(slot) in ACTIVE_SLOT_STATUSES
             }
+            # Day-cap: count today's trades per symbol (open + closed) so
+            # the same symbol doesn't re-buy after exit on the same news.
+            symbol_day_counts = self._closed_today_symbol_counts()
+            for sym in active_symbols:
+                symbol_day_counts[sym] = symbol_day_counts.get(sym, 0) + 1
             sector_counts = self._active_sector_counts(slots)
             allocations: list[SlotAllocation] = []
             rejections: list[AllocationRejection] = []
@@ -180,6 +185,14 @@ class SlotAllocator:
 
                 if symbol in active_symbols:
                     rejections.append(AllocationRejection(symbol, "duplicate_symbol"))
+                    continue
+
+                day_count = symbol_day_counts.get(symbol, 0)
+                if day_count >= self.settings.max_trades_per_symbol_per_day:
+                    rejections.append(AllocationRejection(
+                        symbol, "max_trades_per_symbol_per_day_reached",
+                        {"day_count": day_count, "cap": self.settings.max_trades_per_symbol_per_day},
+                    ))
                     continue
 
                 sector = candidate.sector
@@ -240,6 +253,26 @@ class SlotAllocator:
             sector = (slot.metadata or {}).get("sector")
             if isinstance(sector, str) and sector:
                 counts[sector] = counts.get(sector, 0) + 1
+        return counts
+
+    def _closed_today_symbol_counts(self) -> dict[str, int]:
+        """Count today-closed positions per symbol so the day-cap gate
+        knows about exits earlier in the session."""
+        from datetime import datetime, timezone
+        today_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        counts: dict[str, int] = {}
+        try:
+            cur = self.repository.connection.execute(
+                "SELECT symbol, COUNT(*) FROM positions "
+                "WHERE status = 'closed' AND closed_at >= ? GROUP BY symbol",
+                (today_iso,),
+            )
+            for row in cur.fetchall():
+                sym = (row[0] or "").upper()
+                if sym:
+                    counts[sym] = int(row[1] or 0)
+        except Exception:
+            pass  # best-effort — fall back to active-only check
         return counts
 
     def _persist_allocator_state(self, status: str, timestamp: datetime, metadata: dict[str, Any]) -> None:
