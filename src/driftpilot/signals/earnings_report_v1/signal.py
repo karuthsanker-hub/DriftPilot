@@ -175,7 +175,16 @@ class EarningsReportSignal:
         entry_price_f = float(entry_price)
         if entry_price_f <= 0:
             return None
-        current_price = float(getattr(position, "current_price", entry_price_f))
+        # PositionRecord has no current_price attribute; the live monitor
+        # stores it in metadata['current_price']. Without this fallback,
+        # signal computes unrealized_pct=0 always — trailing_stop then
+        # fires whenever peak >= activation + distance (regardless of
+        # actual price), which masks intra-position price movement.
+        current_price = float(
+            getattr(position, "current_price", None)
+            or metadata.get("current_price")
+            or entry_price_f
+        )
         unrealized_pct = (current_price - entry_price_f) / entry_price_f * 100.0
 
         # Trailing stop needs the running peak. The position monitor maintains
