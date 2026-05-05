@@ -166,8 +166,9 @@
         document.getElementById("session-time").textContent = new Date(data.session?.time || Date.now()).toLocaleTimeString();
         document.getElementById("cycle").textContent = `cycle ${data.session?.cycle_seconds || 30}s`;
         document.getElementById("equity").textContent = fmtMoney(data.equity?.value);
+        const src = data.equity?.source === "alpaca_live" ? "alpaca live" : "local sim";
         document.getElementById("floor").textContent = data.equity?.deployed !== undefined
-          ? `deployed ${fmtMoney(data.equity?.deployed)} · avail ${fmtMoney(data.equity?.available)}`
+          ? `deployed ${fmtMoney(data.equity?.deployed)} · avail ${fmtMoney(data.equity?.available)} · ${src}`
           : `floor ${fmtMoney(data.equity?.floor)}`;
         // Today's realized P&L (since UTC midnight)
         const todayPnl = data.equity?.today_pnl ?? data.equity?.daily_pnl ?? 0;

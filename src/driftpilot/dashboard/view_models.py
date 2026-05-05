@@ -110,27 +110,45 @@ def _payload_from_repo(repo: DriftPilotRepository, settings: DriftPilotSettings)
     realized_total = _realized_pnl(repo)
     realized_today = _realized_pnl_today(repo)
     today_trades = _trade_count_today(repo)
-    deployed = sum(position.entry_price * position.quantity for position in positions.values())
+    deployed_local = sum(position.entry_price * position.quantity for position in positions.values())
+
+    # Prefer live Alpaca account data when creds are configured. The local
+    # paper_capital is a fallback estimate that doesn't reflect the real
+    # account size and breaks "deployed > equity" displays at scale.
+    live = _live_alpaca_equity(settings)
+    if live is not None:
+        equity_value = live["equity"]
+        deployed = live["positions_mv"]  # broker-truth deployed (incl. drift)
+        available = live["buying_power"]
+        equity_source = "alpaca_live"
+        # P&L percentages computed against actual account equity, not the
+        # capped local paper_capital.
+        pnl_baseline = max(equity_value, 1.0)
+    else:
+        equity_value = settings.paper_capital + realized_total
+        deployed = deployed_local
+        available = max(0, settings.paper_capital - deployed_local)
+        equity_source = "local_simulated"
+        pnl_baseline = settings.paper_capital if settings.paper_capital else 1.0
+
     payload["equity"] = {
-        # value = simulated equity (paper_capital baseline + cumulative realized).
-        # For Alpaca-paper-live mode, the operator log carries the broker-truth
-        # equity; this dashboard value is the local-DB approximation.
-        "value": settings.paper_capital + realized_total,
+        "value": equity_value,
+        "source": equity_source,
         "floor": settings.equity_floor,
         # cumulative_pnl: realized lifetime across all closed trades
         "cumulative_pnl": realized_total,
-        "cumulative_pnl_pct": realized_total / settings.paper_capital if settings.paper_capital else 0,
+        "cumulative_pnl_pct": realized_total / pnl_baseline,
         # today_pnl: realized just for today's session (UTC date)
         "today_pnl": realized_today,
-        "today_pnl_pct": realized_today / settings.paper_capital if settings.paper_capital else 0,
+        "today_pnl_pct": realized_today / pnl_baseline,
         # daily_pnl kept for back-compat but now means today's realized
         "daily_pnl": realized_today,
-        "daily_pnl_pct": realized_today / settings.paper_capital if settings.paper_capital else 0,
+        "daily_pnl_pct": realized_today / pnl_baseline,
         "daily_trade_count": today_trades,
         "win_rate": _win_rate(repo),
         "win_rate_today": _win_rate_today(repo),
         "deployed": deployed,
-        "available": max(0, settings.paper_capital - deployed),
+        "available": available,
     }
     # New panel: last 20 closed trades with full chain (entry, exit, PnL,
     # hold, catalyst headline). Lets the UI show what got bought, what got
@@ -283,6 +301,45 @@ def _win_rate_today(repo: DriftPilotRepository) -> float:
     total = int(rows["total"] if rows is not None else 0)
     wins = int(rows["wins"] or 0) if rows is not None else 0
     return wins / total if total else 0.0
+
+
+_ALPACA_CACHE: dict[str, Any] = {"ts": 0.0, "equity": None, "buying_power": None, "positions_mv": 0.0}
+_ALPACA_CACHE_TTL = 30.0  # seconds
+
+
+def _live_alpaca_equity(settings: DriftPilotSettings) -> dict[str, Any] | None:
+    """Best-effort live Alpaca equity + buying_power + total mv. None if
+    creds missing or call fails. Cached to avoid hammering the API on
+    every dashboard poll.
+    """
+    import time
+    if not settings.alpaca_key_id or not settings.alpaca_secret_key:
+        return None
+    now_t = time.time()
+    if _ALPACA_CACHE["equity"] is not None and (now_t - _ALPACA_CACHE["ts"]) < _ALPACA_CACHE_TTL:
+        return {
+            "equity": _ALPACA_CACHE["equity"],
+            "buying_power": _ALPACA_CACHE["buying_power"],
+            "positions_mv": _ALPACA_CACHE["positions_mv"],
+        }
+    try:
+        from alpaca.trading.client import TradingClient
+        client = TradingClient(
+            settings.alpaca_key_id, settings.alpaca_secret_key,
+            paper=settings.mode != "live",
+        )
+        acct = client.get_account()
+        positions = client.get_all_positions()
+        total_mv = sum(float(p.market_value or 0) for p in positions)
+        result = {
+            "equity": float(acct.equity or 0),
+            "buying_power": float(acct.buying_power or 0),
+            "positions_mv": total_mv,
+        }
+        _ALPACA_CACHE.update({"ts": now_t, **result})
+        return result
+    except Exception:
+        return None
 
 
 def _recent_trades(repo: DriftPilotRepository, limit: int = 20) -> list[dict[str, Any]]:
