@@ -107,18 +107,35 @@ def _payload_from_repo(repo: DriftPilotRepository, settings: DriftPilotSettings)
         "market_clock": (current.metadata or {}).get("feed", "sqlite") if current else "sqlite",
         "cycle_seconds": settings.scan_interval_seconds,
     }
-    realized = _realized_pnl(repo)
+    realized_total = _realized_pnl(repo)
+    realized_today = _realized_pnl_today(repo)
+    today_trades = _trade_count_today(repo)
     deployed = sum(position.entry_price * position.quantity for position in positions.values())
     payload["equity"] = {
-        "value": settings.paper_capital + realized,
+        # value = simulated equity (paper_capital baseline + cumulative realized).
+        # For Alpaca-paper-live mode, the operator log carries the broker-truth
+        # equity; this dashboard value is the local-DB approximation.
+        "value": settings.paper_capital + realized_total,
         "floor": settings.equity_floor,
-        "daily_pnl": realized,
-        "daily_pnl_pct": realized / settings.paper_capital if settings.paper_capital else 0,
-        "daily_trade_count": repo.get_daily_counter(date_et=repo.clock.date_et(), counter_name="trades"),
+        # cumulative_pnl: realized lifetime across all closed trades
+        "cumulative_pnl": realized_total,
+        "cumulative_pnl_pct": realized_total / settings.paper_capital if settings.paper_capital else 0,
+        # today_pnl: realized just for today's session (UTC date)
+        "today_pnl": realized_today,
+        "today_pnl_pct": realized_today / settings.paper_capital if settings.paper_capital else 0,
+        # daily_pnl kept for back-compat but now means today's realized
+        "daily_pnl": realized_today,
+        "daily_pnl_pct": realized_today / settings.paper_capital if settings.paper_capital else 0,
+        "daily_trade_count": today_trades,
         "win_rate": _win_rate(repo),
+        "win_rate_today": _win_rate_today(repo),
         "deployed": deployed,
         "available": max(0, settings.paper_capital - deployed),
     }
+    # New panel: last 20 closed trades with full chain (entry, exit, PnL,
+    # hold, catalyst headline). Lets the UI show what got bought, what got
+    # sold, and the result, in chronological order.
+    payload["recent_trades"] = _recent_trades(repo, limit=20)
     payload["slots"] = [
         _slot_payload(slot, positions)
         for slot in slots
@@ -156,7 +173,7 @@ def _payload_from_repo(repo: DriftPilotRepository, settings: DriftPilotSettings)
         }
         for transition in transitions
     ]
-    payload["equity_curve"] = _equity_curve(settings.paper_capital, realized)
+    payload["equity_curve"] = _equity_curve(settings.paper_capital, realized_total)
     return payload
 
 
@@ -218,17 +235,98 @@ def _halt_banner(state: str, reason: str | None, backtest_failed: bool) -> str:
 
 
 def _realized_pnl(repo: DriftPilotRepository) -> float:
+    """Cumulative realized P&L across all closed positions (lifetime)."""
     rows = repo.connection.execute("SELECT COALESCE(SUM(realized_pnl), 0) AS pnl FROM positions WHERE status = 'closed'").fetchone()
     return float(rows["pnl"] if rows is not None else 0.0)
 
 
+def _realized_pnl_today(repo: DriftPilotRepository) -> float:
+    """Realized P&L from positions closed since UTC midnight today.
+    For paper trading, the operator runs in UTC so this maps to a single
+    trading session.
+    """
+    today_iso = datetime.now(UTC).strftime("%Y-%m-%d")
+    rows = repo.connection.execute(
+        "SELECT COALESCE(SUM(realized_pnl), 0) AS pnl FROM positions "
+        "WHERE status = 'closed' AND closed_at >= ?",
+        (today_iso,),
+    ).fetchone()
+    return float(rows["pnl"] if rows is not None else 0.0)
+
+
+def _trade_count_today(repo: DriftPilotRepository) -> int:
+    today_iso = datetime.now(UTC).strftime("%Y-%m-%d")
+    rows = repo.connection.execute(
+        "SELECT COUNT(*) AS n FROM positions WHERE status = 'closed' AND closed_at >= ?",
+        (today_iso,),
+    ).fetchone()
+    return int(rows["n"] if rows is not None else 0)
+
+
 def _win_rate(repo: DriftPilotRepository) -> float:
+    """Win rate across ALL closed positions (lifetime)."""
     rows = repo.connection.execute(
         "SELECT COUNT(*) AS total, SUM(CASE WHEN realized_pnl > 0 THEN 1 ELSE 0 END) AS wins FROM positions WHERE status = 'closed'"
     ).fetchone()
     total = int(rows["total"] if rows is not None else 0)
     wins = int(rows["wins"] or 0) if rows is not None else 0
     return wins / total if total else 0.0
+
+
+def _win_rate_today(repo: DriftPilotRepository) -> float:
+    today_iso = datetime.now(UTC).strftime("%Y-%m-%d")
+    rows = repo.connection.execute(
+        "SELECT COUNT(*) AS total, SUM(CASE WHEN realized_pnl > 0 THEN 1 ELSE 0 END) AS wins "
+        "FROM positions WHERE status = 'closed' AND closed_at >= ?",
+        (today_iso,),
+    ).fetchone()
+    total = int(rows["total"] if rows is not None else 0)
+    wins = int(rows["wins"] or 0) if rows is not None else 0
+    return wins / total if total else 0.0
+
+
+def _recent_trades(repo: DriftPilotRepository, limit: int = 20) -> list[dict[str, Any]]:
+    """Last N closed positions with full trade chain — symbol, qty, entry,
+    exit, P&L, hold time, exit reason, catalyst headline if available.
+    Powers the dashboard's RECENT TRADES panel.
+    """
+    rows = repo.connection.execute(
+        "SELECT id, symbol, quantity, entry_price, opened_at, closed_at, "
+        "exit_reason, realized_pnl, metadata_json "
+        "FROM positions WHERE status = 'closed' "
+        "ORDER BY closed_at DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        try:
+            md = json.loads(r["metadata_json"] or "{}")
+        except (TypeError, json.JSONDecodeError):
+            md = {}
+        try:
+            opened = datetime.fromisoformat(r["opened_at"].replace("Z", "+00:00"))
+            closed = datetime.fromisoformat(r["closed_at"].replace("Z", "+00:00"))
+            hold_min = (closed - opened).total_seconds() / 60.0
+        except Exception:
+            hold_min = 0.0
+        entry = float(r["entry_price"] or 0)
+        exit_price = float(md.get("exit_price") or 0)
+        return_pct = ((exit_price - entry) / entry * 100.0) if entry > 0 and exit_price > 0 else 0.0
+        out.append({
+            "id": r["id"],
+            "symbol": r["symbol"],
+            "quantity": float(r["quantity"] or 0),
+            "entry_price": entry,
+            "exit_price": exit_price,
+            "return_pct": return_pct,
+            "realized_pnl": float(r["realized_pnl"] or 0),
+            "hold_minutes": round(hold_min, 1),
+            "exit_reason": r["exit_reason"] or "?",
+            "closed_at": r["closed_at"],
+            "catalyst_headline": (md.get("catalyst_headline") or "")[:100],
+            "catalyst_sentiment": md.get("catalyst_sentiment"),
+        })
+    return out
 
 
 def _equity_curve(starting_capital: float, realized: float) -> list[dict[str, float]]:
