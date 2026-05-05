@@ -421,7 +421,9 @@ class LiveAlpacaPositionMonitor:
                     slot = s
                     break
             if slot is None:
-                logger.warning(
+                # Alpaca position outside our slot system (manual test trade,
+                # leftover from prior session, etc). Expected — not noise.
+                logger.debug(
                     "monitor reconcile: alpaca has %s qty=%s but no matching slot — skipping",
                     sym, ap.quantity,
                 )

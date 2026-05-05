@@ -63,6 +63,10 @@
       th, td { padding: 10px 6px; border-bottom: 1px solid var(--line-soft); text-align: left; }
       th { color: var(--dim); text-transform: uppercase; font: 700 10px "JetBrains Mono"; letter-spacing: .1em; }
       .queue tr.blocked { opacity: .45; }
+      .trades-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+      .trades-table th { text-align: left; padding: 6px 8px; color: #888; font-weight: 500; border-bottom: 1px solid #2a2a2a; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
+      .trades-table td { padding: 6px 8px; border-bottom: 1px solid #1a1a1a; }
+      .trades-table tr:hover { background: #161616; }
       .tag { border-radius: 4px; padding: 2px 6px; background: var(--panel-2); color: var(--muted); font: 700 10px "JetBrains Mono"; }
       .tag.cap { color: var(--amber); }
       .tag.res { color: var(--purple); }
@@ -91,8 +95,9 @@
       <div class="metric"><div class="label">Regime</div><div id="regime" class="value mono amber">...</div><div id="regime-detail" class="sub">Waiting for SPY tape</div></div>
       <div class="metric"><div class="label">Session</div><div id="session-time" class="value mono">--:--:--</div><div id="cycle" class="sub mono">cycle --s</div></div>
       <div class="metric"><div class="label">Equity</div><div id="equity" class="value mono">$0.00</div><div id="floor" class="sub mono">floor $26,000</div></div>
-      <div class="metric"><div class="label">Daily P&L</div><div id="pnl" class="value mono">$0.00</div><div id="pnl-pct" class="sub mono">0.00%</div></div>
-      <div class="metric"><div class="label">Today</div><div id="trades" class="value mono">0</div><div id="winrate" class="sub mono">win --%</div></div>
+      <div class="metric"><div class="label">Today P&L</div><div id="pnl" class="value mono">$0.00</div><div id="pnl-pct" class="sub mono">0.00%</div></div>
+      <div class="metric"><div class="label">Cumulative P&L</div><div id="cum-pnl" class="value mono">$0.00</div><div id="cum-pnl-pct" class="sub mono">0.00%</div></div>
+      <div class="metric"><div class="label">Today Trades</div><div id="trades" class="value mono">0</div><div id="winrate" class="sub mono">win --%</div></div>
     </section>
     <main>
       <section class="left">
@@ -103,6 +108,13 @@
         <section class="panel">
           <div class="section-title"><span>Equity Curve · Today</span><span id="curve-summary" class="mono"></span></div>
           <div id="curve" class="curve"></div>
+        </section>
+        <section class="panel">
+          <div class="section-title"><span>Recent Trades</span><span id="trades-summary" class="mono">last 20 closed</span></div>
+          <table class="trades-table">
+            <thead><tr><th>Time</th><th>Symbol</th><th>Qty</th><th>Entry</th><th>Exit</th><th>Hold</th><th>P&L</th><th>Reason</th></tr></thead>
+            <tbody id="recent-trades"></tbody>
+          </table>
         </section>
         <section class="panel">
           <div class="section-title"><span>Recycle Log</span><span class="mono">last events</span></div>
@@ -157,11 +169,48 @@
         document.getElementById("floor").textContent = data.equity?.deployed !== undefined
           ? `deployed ${fmtMoney(data.equity?.deployed)} · avail ${fmtMoney(data.equity?.available)}`
           : `floor ${fmtMoney(data.equity?.floor)}`;
-        document.getElementById("pnl").textContent = fmtMoney(data.equity?.daily_pnl);
-        document.getElementById("pnl").className = `value mono ${Number(data.equity?.daily_pnl || 0) < 0 ? "red" : "green"}`;
-        document.getElementById("pnl-pct").textContent = fmtPct(data.equity?.daily_pnl_pct);
+        // Today's realized P&L (since UTC midnight)
+        const todayPnl = data.equity?.today_pnl ?? data.equity?.daily_pnl ?? 0;
+        const todayPnlPct = data.equity?.today_pnl_pct ?? data.equity?.daily_pnl_pct ?? 0;
+        document.getElementById("pnl").textContent = fmtMoney(todayPnl);
+        document.getElementById("pnl").className = `value mono ${Number(todayPnl) < 0 ? "red" : "green"}`;
+        document.getElementById("pnl-pct").textContent = fmtPct(todayPnlPct);
+        // Cumulative realized P&L (lifetime)
+        const cumPnl = data.equity?.cumulative_pnl ?? 0;
+        const cumPnlPct = data.equity?.cumulative_pnl_pct ?? 0;
+        const cumEl = document.getElementById("cum-pnl");
+        if (cumEl) {
+          cumEl.textContent = fmtMoney(cumPnl);
+          cumEl.className = `value mono ${Number(cumPnl) < 0 ? "red" : "green"}`;
+          document.getElementById("cum-pnl-pct").textContent = fmtPct(cumPnlPct);
+        }
         document.getElementById("trades").textContent = data.equity?.daily_trade_count ?? 0;
-        document.getElementById("winrate").textContent = `win ${fmtPct(data.equity?.win_rate)}`;
+        const winToday = data.equity?.win_rate_today ?? data.equity?.win_rate ?? 0;
+        document.getElementById("winrate").textContent = `win ${fmtPct(winToday)} today`;
+        // Recent trades panel
+        const trades = data.recent_trades || [];
+        const tradesBody = document.getElementById("recent-trades");
+        if (tradesBody) {
+          tradesBody.innerHTML = trades.map(t => {
+            const pnlClass = Number(t.realized_pnl) >= 0 ? "green" : "red";
+            const pnlSign = Number(t.realized_pnl) >= 0 ? "+" : "";
+            const time = t.closed_at ? new Date(t.closed_at).toLocaleTimeString() : "--";
+            return `<tr>
+              <td class="mono">${time}</td>
+              <td><strong class="mono">${t.symbol}</strong></td>
+              <td class="mono">${Number(t.quantity).toFixed(0)}</td>
+              <td class="mono">$${Number(t.entry_price).toFixed(2)}</td>
+              <td class="mono">$${Number(t.exit_price).toFixed(2)}</td>
+              <td class="mono">${t.hold_minutes}m</td>
+              <td class="mono ${pnlClass}">${pnlSign}${fmtMoney(t.realized_pnl)}</td>
+              <td class="mono"><span class="tag">${t.exit_reason || "?"}</span></td>
+            </tr>`;
+          }).join("") || `<tr><td colspan="8" class="mono sub">No closed trades yet</td></tr>`;
+          const totalPnl = trades.reduce((s, t) => s + Number(t.realized_pnl || 0), 0);
+          const wins = trades.filter(t => Number(t.realized_pnl) > 0).length;
+          document.getElementById("trades-summary").textContent =
+            `${trades.length} shown · ${wins}W ${trades.length - wins}L · ${fmtMoney(totalPnl)}`;
+        }
         document.getElementById("slots").innerHTML = (data.slots || []).map(slotCard).join("");
         document.getElementById("queue-count").textContent = `${(data.candidate_queue || []).length} shown`;
         document.getElementById("queue").innerHTML = (data.candidate_queue || []).map(row => `<tr class="${row.status === "CAP" ? "blocked" : ""}">
