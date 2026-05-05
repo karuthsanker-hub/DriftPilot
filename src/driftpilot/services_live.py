@@ -446,7 +446,14 @@ class LiveAlpacaPositionMonitor:
         """
         from datetime import datetime, timezone
         import json
-        alpaca_positions = await self.broker.get_open_positions()
+        try:
+            alpaca_positions = await asyncio.wait_for(
+                self.broker.get_open_positions(),
+                timeout=8.0,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("monitor reconcile: alpaca get_open_positions timed out — skipping")
+            return 0
         local_open = self.repository.positions.list_open()
         local_symbols = {(p.symbol or "").upper() for p in local_open}
 
@@ -537,7 +544,17 @@ class LiveAlpacaPositionMonitor:
 
         for position in positions:
             symbol = position.symbol.upper()
-            quote = await asyncio.to_thread(self.quote_provider.latest_quote, symbol)
+            # Hard timeout on the per-symbol quote call so one stuck network
+            # request can't block the whole monitor cycle. We have 9+ positions;
+            # without this, a single hang freezes all exits.
+            try:
+                quote = await asyncio.wait_for(
+                    asyncio.to_thread(self.quote_provider.latest_quote, symbol),
+                    timeout=5.0,
+                )
+            except asyncio.TimeoutError:
+                logger.warning("monitor: quote fetch for %s timed out — skipping cycle", symbol)
+                continue
             if quote is None:
                 logger.debug("monitor: no quote for %s — skipping", symbol)
                 continue
