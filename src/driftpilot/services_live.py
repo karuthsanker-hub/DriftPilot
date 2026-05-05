@@ -175,6 +175,9 @@ class CatalystScannerService:
                 stop_loss_pct=cfg.earnings_stop_loss_pct,
                 max_event_age_minutes=cfg.earnings_max_event_age_minutes,
                 require_sentiment=None if require_sent == "any" else require_sent,
+                trailing_enabled=str(cfg.earnings_trailing_enabled).lower() == "true",
+                trailing_activation_pct=cfg.earnings_trailing_activation_pct,
+                trailing_distance_pct=cfg.earnings_trailing_distance_pct,
             )
             self.signal._config = new_signal_cfg  # type: ignore[attr-defined]
             self._runtime_config_mtime = mtime
@@ -419,6 +422,10 @@ class LiveAlpacaPositionMonitor:
         self.quote_provider = quote_provider
         self.clock = clock or DriftPilotClock(settings.timezone)
         self._signal = signal
+        # Track peak unrealized% per position across monitor cycles. Survives
+        # within one operator session; operator restart loses it (acceptable —
+        # the position's first cycle after restart starts fresh peak).
+        self._peak_by_position_id: dict[int, float] = {}
 
     async def monitor(self):
         """State-machine-protocol entrypoint. Returns PositionMonitorResult."""
@@ -534,19 +541,13 @@ class LiveAlpacaPositionMonitor:
             return self._signal
         return get_signal(self.settings.active_signal)
 
-    async def monitor_open_positions(self) -> int:
-        """One sweep: for each open position, check exit and submit if so.
-        Returns the number of exit orders submitted."""
-        signal = self._get_signal()
-        positions = self.repository.positions.list_open()
-        now = self.clock.now_utc()
-        exit_count = 0
-
-        for position in positions:
-            symbol = position.symbol.upper()
-            # Hard timeout on the per-symbol quote call so one stuck network
-            # request can't block the whole monitor cycle. We have 9+ positions;
-            # without this, a single hang freezes all exits.
+    async def _process_one_position(self, position, signal, now) -> int:
+        """Evaluate and (if needed) submit an exit for a single position.
+        Returns 1 if an exit was completed, 0 otherwise. Exceptions are
+        caught and logged so a single bad position can't kill the batch.
+        """
+        symbol = position.symbol.upper()
+        try:
             try:
                 quote = await asyncio.wait_for(
                     asyncio.to_thread(self.quote_provider.latest_quote, symbol),
@@ -554,23 +555,34 @@ class LiveAlpacaPositionMonitor:
                 )
             except asyncio.TimeoutError:
                 logger.warning("monitor: quote fetch for %s timed out — skipping cycle", symbol)
-                continue
+                return 0
             if quote is None:
                 logger.debug("monitor: no quote for %s — skipping", symbol)
-                continue
+                return 0
 
             mid = (quote.bid_price + quote.ask_price) / 2.0
             entry_price = float(getattr(position, "entry_price", 0.0))
             unrealized_pct = ((mid - entry_price) / entry_price * 100.0) if entry_price > 0 else 0.0
 
-            # Set current_price on the position object so the signal sees fresh data
+            # Set current_price + peak_unrealized_pct on the position so the
+            # signal's evaluate_exit can compute trailing stop correctly.
             try:
                 position_metadata = dict(getattr(position, "metadata", {}) or {})
             except Exception:
                 position_metadata = {}
+            position_id = getattr(position, "id", None)
+            prev_peak = self._peak_by_position_id.get(position_id, unrealized_pct)
+            new_peak = max(prev_peak, unrealized_pct)
+            if position_id is not None:
+                self._peak_by_position_id[position_id] = new_peak
             position_metadata["current_price"] = mid
-            # In-memory shim — repository persistence is best-effort for live mode
-            object.__setattr__(position, "current_price", mid) if hasattr(position, "current_price") else None
+            position_metadata["peak_unrealized_pct"] = new_peak
+            try:
+                object.__setattr__(position, "metadata", position_metadata)
+                if hasattr(position, "current_price"):
+                    object.__setattr__(position, "current_price", mid)
+            except Exception:
+                pass
 
             try:
                 decision = signal.evaluate_exit(position, now)
@@ -578,19 +590,17 @@ class LiveAlpacaPositionMonitor:
                     decision = await decision
             except Exception as exc:
                 logger.exception("monitor: evaluate_exit raised for %s: %s", symbol, exc)
-                continue
+                return 0
 
-            # ExitDecision protocol uses should_exit / exit_reason — match it.
             should_close = getattr(decision, "should_exit", None)
             if should_close is None:
-                # Backward-compat for any signal that returns close/reason instead.
                 should_close = getattr(decision, "close", False)
             if decision is None or not should_close:
-                continue
+                return 0
 
             quantity = float(getattr(position, "quantity", 0))
             if quantity <= 0:
-                continue
+                return 0
 
             exit_reason = (
                 getattr(decision, "exit_reason", None)
@@ -598,8 +608,8 @@ class LiveAlpacaPositionMonitor:
                 or "unknown"
             )
             logger.info(
-                "LIVE: signal requests exit symbol=%s reason=%s unrealized=%.3f%%",
-                symbol, exit_reason, unrealized_pct,
+                "LIVE: signal requests exit symbol=%s reason=%s unrealized=%.3f%% peak=%.3f%%",
+                symbol, exit_reason, unrealized_pct, new_peak,
             )
             exit_result = None
             broker_race_filled = False
@@ -612,20 +622,18 @@ class LiveAlpacaPositionMonitor:
             except Exception as exc:
                 msg = str(exc).lower()
                 if "already" in msg and "filled" in msg:
-                    logger.info(
-                        "LIVE: broker race on exit %s (cancel after fast-fill)",
-                        symbol,
-                    )
+                    logger.info("LIVE: broker race on exit %s (cancel after fast-fill)", symbol)
                     broker_race_filled = True
                 else:
                     logger.exception("LIVE: exit submission failed for %s: %s", symbol, exc)
-                    continue
+                    return 0
 
-            # If exit submitted OK OR broker raced on fill, the position is gone
-            # at Alpaca. Verify and close locally so we don't double-sell next cycle.
+            # Verify position is gone at Alpaca (with timeout to prevent hang)
             position_gone = False
             try:
-                live_positions = await self.broker.get_open_positions()
+                live_positions = await asyncio.wait_for(
+                    self.broker.get_open_positions(), timeout=5.0,
+                )
                 position_gone = not any(
                     p.symbol.upper() == symbol for p in live_positions
                 )
@@ -641,7 +649,7 @@ class LiveAlpacaPositionMonitor:
                 broker_oid = None
                 close_reason_label = "reconciled_after_race"
             else:
-                continue
+                return 0
 
             realized = (exit_price - entry_price) * quantity
             try:
@@ -654,12 +662,9 @@ class LiveAlpacaPositionMonitor:
                         "exit_price": exit_price,
                         "broker_exit_order_id": broker_oid,
                         "exit_close_path": close_reason_label,
+                        "peak_unrealized_pct": new_peak,
                     },
                 )
-                # Free the slot so the allocator can reuse it.
-                # Without this, slots stay RESERVED across position closes,
-                # eventually starving allocation and capping notional far below
-                # the configured slot_value × trade_slots.
                 slot_id = getattr(position, "slot_id", None)
                 if slot_id is not None:
                     try:
@@ -670,17 +675,41 @@ class LiveAlpacaPositionMonitor:
                         )
                     except Exception as slot_exc:
                         logger.warning("LIVE: slot %s free failed: %s", slot_id, slot_exc)
-                exit_count += 1
+                # Clean up in-memory peak tracker
+                self._peak_by_position_id.pop(getattr(position, "id", None), None)
                 logger.info(
-                    "LIVE: position closed symbol=%s broker_order_id=%s reason=%s realized=$%.2f path=%s slot=%s freed",
-                    symbol, broker_oid, exit_reason, realized, close_reason_label, slot_id,
+                    "LIVE: position closed symbol=%s broker_order_id=%s reason=%s realized=$%.2f path=%s slot=%s peak=%.3f%% freed",
+                    symbol, broker_oid, exit_reason, realized, close_reason_label, slot_id, new_peak,
                 )
+                return 1
             except Exception as close_exc:
                 logger.warning(
                     "LIVE: position closed at broker but local close failed for %s: %s",
                     symbol, close_exc,
                 )
+                return 0
+        except Exception as exc:
+            logger.exception("monitor: unexpected error processing %s: %s", symbol, exc)
+            return 0
 
+    async def monitor_open_positions(self) -> int:
+        """Process every open position in PARALLEL within one cycle.
+
+        Previously serialized: 9 positions × ~15s broker call = 2+ min per
+        cycle, by which time positions aged past time_stop and never got
+        the chance to fire profit_take/stop_loss. Now: each position is its
+        own task; all complete within ~10s regardless of count.
+        """
+        signal = self._get_signal()
+        positions = self.repository.positions.list_open()
+        if not positions:
+            return 0
+        now = self.clock.now_utc()
+        results = await asyncio.gather(
+            *(self._process_one_position(p, signal, now) for p in positions),
+            return_exceptions=True,
+        )
+        exit_count = sum(r for r in results if isinstance(r, int))
         return exit_count
 
 

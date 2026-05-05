@@ -73,6 +73,26 @@ EDITABLE_FIELDS: dict[str, dict[str, Any]] = {
         "label": "Require Qwen sentiment",
         "help": "'positive' (validated GATED config), 'any' = no gate.",
     },
+    "earnings_trailing_enabled": {
+        "type": str,
+        "choices": ["true", "false"],
+        "label": "Trailing stop enabled",
+        "help": "True = use trailing stop instead of fixed profit_take. Recommended.",
+    },
+    "earnings_trailing_activation_pct": {
+        "type": float,
+        "min": 0.1,
+        "max": 5.0,
+        "label": "Trailing activation %",
+        "help": "Peak must reach this before trailing kicks in. e.g. 1.0 = stop trails after +1%.",
+    },
+    "earnings_trailing_distance_pct": {
+        "type": float,
+        "min": 0.1,
+        "max": 5.0,
+        "label": "Trailing distance %",
+        "help": "Trailing stop sits this far below peak. Smaller = locks in gains faster, exits more often.",
+    },
 }
 
 
@@ -85,6 +105,9 @@ class RuntimeConfig:
     earnings_stop_loss_pct: float = 1.5
     earnings_max_hold_minutes: int = 60
     earnings_require_sentiment: str = "positive"
+    earnings_trailing_enabled: str = "true"
+    earnings_trailing_activation_pct: float = 1.0
+    earnings_trailing_distance_pct: float = 2.0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -95,6 +118,9 @@ class RuntimeConfig:
             "earnings_stop_loss_pct": self.earnings_stop_loss_pct,
             "earnings_max_hold_minutes": self.earnings_max_hold_minutes,
             "earnings_require_sentiment": self.earnings_require_sentiment,
+            "earnings_trailing_enabled": self.earnings_trailing_enabled,
+            "earnings_trailing_activation_pct": self.earnings_trailing_activation_pct,
+            "earnings_trailing_distance_pct": self.earnings_trailing_distance_pct,
         }
 
 
