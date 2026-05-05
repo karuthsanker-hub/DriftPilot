@@ -154,8 +154,16 @@ def _payload_from_repo(repo: DriftPilotRepository, settings: DriftPilotSettings)
     # hold, catalyst headline). Lets the UI show what got bought, what got
     # sold, and the result, in chronological order.
     payload["recent_trades"] = _recent_trades(repo, limit=20)
+    # Build a symbol-keyed lookup for local positions (slots don't always carry
+    # position_id) and pass live Alpaca per-symbol data so slot cards show
+    # current price + unrealized %.
+    positions_by_symbol_db = {
+        (p.symbol or "").upper(): p
+        for p in positions.values()
+    }
+    live_positions_map = (live or {}).get("positions_by_symbol", {}) if live else {}
     payload["slots"] = [
-        _slot_payload(slot, positions)
+        _slot_payload(slot, positions, positions_by_symbol_db, live_positions_map)
         for slot in slots
     ] or payload["slots"]
     payload["candidate_queue"] = [
@@ -205,18 +213,45 @@ def _latest_regime_label(current_metadata: dict[str, Any] | None, transitions: l
     return "UNKNOWN"
 
 
-def _slot_payload(slot: Any, positions: dict[int, Any]) -> dict[str, Any]:
+def _slot_payload(
+    slot: Any,
+    positions: dict[int, Any],
+    positions_by_symbol_db: dict[str, Any] | None = None,
+    live_positions: dict[str, dict[str, float]] | None = None,
+) -> dict[str, Any]:
     metadata = slot.metadata or {}
+    sym = (slot.symbol or "").upper() if slot.symbol else None
+    # Look up the local position by id first, then by symbol (slots in our
+    # SQLite don't always carry position_id).
     position = positions.get(slot.position_id or -1)
-    entry = position.entry_price if position is not None else metadata.get("entry_price")
-    current = metadata.get("current_price", entry)
+    if position is None and sym and positions_by_symbol_db:
+        position = positions_by_symbol_db.get(sym)
+
+    # Live Alpaca data takes precedence for current_price + unrealized.
+    live = (live_positions or {}).get(sym) if sym else None
+    entry = (
+        live["avg_entry"] if live else
+        (position.entry_price if position is not None else metadata.get("entry_price"))
+    )
+    current = (
+        live["mark"] if live else
+        metadata.get("current_price", entry)
+    )
     pnl_pct = None
     time_min = None
-    if position is not None and entry is not None:
-        current_value = float(current if current is not None else entry)
-        entry_value = float(entry)
-        pnl_pct = (current_value - entry_value) / entry_value
-        time_min = int((datetime.now(UTC) - position.opened_at.astimezone(UTC)).total_seconds() // 60)
+    if entry is not None:
+        try:
+            entry_value = float(entry)
+            current_value = float(current if current is not None else entry)
+            if entry_value > 0:
+                pnl_pct = (current_value - entry_value) / entry_value
+        except (TypeError, ValueError):
+            pass
+        if position is not None:
+            try:
+                time_min = int((datetime.now(UTC) - position.opened_at.astimezone(UTC)).total_seconds() // 60)
+            except Exception:
+                pass
     return {
         "id": slot.slot_id,
         "state": slot.status,
@@ -303,14 +338,20 @@ def _win_rate_today(repo: DriftPilotRepository) -> float:
     return wins / total if total else 0.0
 
 
-_ALPACA_CACHE: dict[str, Any] = {"ts": 0.0, "equity": None, "buying_power": None, "positions_mv": 0.0}
+_ALPACA_CACHE: dict[str, Any] = {
+    "ts": 0.0,
+    "equity": None,
+    "buying_power": None,
+    "positions_mv": 0.0,
+    "positions_by_symbol": {},
+}
 _ALPACA_CACHE_TTL = 30.0  # seconds
 
 
 def _live_alpaca_equity(settings: DriftPilotSettings) -> dict[str, Any] | None:
-    """Best-effort live Alpaca equity + buying_power + total mv. None if
-    creds missing or call fails. Cached to avoid hammering the API on
-    every dashboard poll.
+    """Best-effort live Alpaca equity + buying_power + total mv +
+    per-symbol position dict (mark/avg_entry/qty/unrealized). None if
+    creds missing or call fails. Cached to avoid hammering the API.
     """
     import time
     if not settings.alpaca_key_id or not settings.alpaca_secret_key:
@@ -321,6 +362,7 @@ def _live_alpaca_equity(settings: DriftPilotSettings) -> dict[str, Any] | None:
             "equity": _ALPACA_CACHE["equity"],
             "buying_power": _ALPACA_CACHE["buying_power"],
             "positions_mv": _ALPACA_CACHE["positions_mv"],
+            "positions_by_symbol": _ALPACA_CACHE["positions_by_symbol"],
         }
     try:
         from alpaca.trading.client import TradingClient
@@ -331,10 +373,29 @@ def _live_alpaca_equity(settings: DriftPilotSettings) -> dict[str, Any] | None:
         acct = client.get_account()
         positions = client.get_all_positions()
         total_mv = sum(float(p.market_value or 0) for p in positions)
+        per_sym: dict[str, dict[str, float]] = {}
+        for p in positions:
+            try:
+                qty = float(p.qty or 0)
+                avg = float(p.avg_entry_price or 0)
+                mv = float(p.market_value or 0)
+                mark = (mv / qty) if qty else avg
+                unr_pct = ((mark - avg) / avg) if avg else 0.0
+                per_sym[p.symbol.upper()] = {
+                    "qty": qty,
+                    "avg_entry": avg,
+                    "market_value": mv,
+                    "mark": mark,
+                    "unrealized_pl": float(p.unrealized_pl or 0),
+                    "unrealized_pct": unr_pct,
+                }
+            except (TypeError, ValueError):
+                continue
         result = {
             "equity": float(acct.equity or 0),
             "buying_power": float(acct.buying_power or 0),
             "positions_mv": total_mv,
+            "positions_by_symbol": per_sym,
         }
         _ALPACA_CACHE.update({"ts": now_t, **result})
         return result
