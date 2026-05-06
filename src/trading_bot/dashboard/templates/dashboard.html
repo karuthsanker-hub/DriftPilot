@@ -75,6 +75,20 @@
       .green { color: var(--green); } .red { color: var(--red); } .amber { color: var(--amber); }
       .skeleton { animation: pulse 1.2s ease-in-out infinite; color: var(--dim); }
       @keyframes pulse { 50% { opacity: .45; } }
+      /* News ticker (scrolling marquee under nav) */
+      .ticker { position: relative; height: 36px; overflow: hidden; background: var(--panel-2); border-bottom: 1px solid var(--line); }
+      .ticker-track { display: inline-flex; align-items: center; gap: 40px; height: 36px; padding-left: 100%; white-space: nowrap; animation: tickermove 600s linear infinite; will-change: transform; }
+      .ticker-track:hover { animation-play-state: paused; }
+      .ticker-item { display: inline-flex; align-items: center; gap: 8px; font: 500 13px "JetBrains Mono"; color: var(--text); }
+      .ticker-symbol { color: var(--blue); font-weight: 700; }
+      .ticker-tag { font: 700 10px "JetBrains Mono"; padding: 2px 6px; border-radius: 3px; background: var(--panel); color: var(--muted); text-transform: uppercase; letter-spacing: .08em; }
+      .ticker-tag.pos { color: var(--green); }
+      .ticker-tag.neg { color: var(--red); }
+      .ticker-tag.neu { color: var(--amber); }
+      .ticker-headline { color: var(--muted); }
+      .ticker-sep { color: var(--dim); }
+      .ticker-label { position: absolute; left: 0; top: 0; height: 36px; display: flex; align-items: center; padding: 0 12px; background: linear-gradient(90deg, var(--panel) 70%, transparent); color: var(--muted); font: 700 11px "JetBrains Mono"; letter-spacing: .13em; text-transform: uppercase; z-index: 2; pointer-events: none; }
+      @keyframes tickermove { from { transform: translateX(0); } to { transform: translateX(-100%); } }
       @media (max-width: 1120px) { main { grid-template-columns: 1fr; } .rail { border-left: 0; border-top: 1px solid var(--line); } .slot-grid { grid-template-columns: repeat(2, 1fr); } .strip { grid-template-columns: repeat(2, 1fr); } }
     </style>
   </head>
@@ -89,6 +103,10 @@
       </div>
       <div class="right"><span id="heartbeat" class="mono">SIP feed · loading</span><span id="mode" class="badge">PAPER</span></div>
     </nav>
+    <div id="ticker" class="ticker">
+      <div class="ticker-label">CATALYST FEED</div>
+      <div id="ticker-track" class="ticker-track"><span style="color:var(--dim)">loading recent catalyst events...</span></div>
+    </div>
     <div id="banner" class="banner skeleton">Loading operator state...</div>
     <section class="strip">
       <div class="metric"><div class="label">Operator State</div><div class="value"><span class="state-pill"><span class="dot"></span><span id="state">BOOT</span></span></div></div>
@@ -230,8 +248,45 @@
         try { render(await apiJson("/api/operator/state")); }
         catch (error) { document.getElementById("banner").textContent = `ERROR: ${error}`; document.getElementById("state").textContent = "ERROR"; }
       }
+      function sentClass(s) {
+        const v = String(s || "").toLowerCase();
+        if (v === "positive") return "pos";
+        if (v === "negative") return "neg";
+        if (v === "neutral") return "neu";
+        return "";
+      }
+      function renderTicker(events) {
+        const track = document.getElementById("ticker-track");
+        if (!track) return;
+        if (!events || events.length === 0) {
+          track.innerHTML = `<span style="color:var(--dim)">no catalyst events in last 4h</span>`;
+          return;
+        }
+        // Duplicate the items so the loop reads continuous on wide screens.
+        const html = events.map(e => {
+          const t = e.ts ? new Date(e.ts).toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"}) : "";
+          const cat = `${e.category || ""}/${e.subcategory || ""}`;
+          return `<span class="ticker-item">
+            <span class="mono" style="color:var(--dim)">${t}</span>
+            <span class="ticker-symbol">${e.symbol}</span>
+            <span class="ticker-tag">${cat}</span>
+            <span class="ticker-tag ${sentClass(e.sentiment)}">${e.sentiment}</span>
+            <span class="ticker-headline">${e.headline || ""}</span>
+            <span class="ticker-sep">•</span>
+          </span>`;
+        }).join("");
+        track.innerHTML = html + html;
+        // ~12s per item — slow enough to read full headlines.
+        track.style.animationDuration = Math.max(180, events.length * 12) + "s";
+      }
+      async function loadTicker() {
+        try { renderTicker((await apiJson("/api/operator/news-ticker")).events || []); }
+        catch (e) { /* keep last frame */ }
+      }
       load();
+      loadTicker();
       setInterval(load, 5000);
+      setInterval(loadTicker, 30000);
     </script>
   </body>
 </html>

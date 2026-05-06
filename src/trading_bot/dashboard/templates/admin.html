@@ -42,8 +42,12 @@
         </div>
       </section>
       <section class="card">
-        <div class="label">Live Settings (Hot-Reload)</div>
-        <p style="color:var(--muted)">Signal fields (max_age, profit_take, stop_loss, max_hold, sentiment) take effect within ~30s on next scan cycle. <strong>slot_value</strong> and <strong>max_trades_per_symbol_per_day</strong> require operator restart.</p>
+        <div class="label">Live Settings</div>
+        <p style="color:var(--muted)">
+          <span style="color:var(--green);font-weight:700">HOT</span> fields hot-reload within ~30s on next scan cycle.
+          <span style="color:var(--amber);font-weight:700">RESTART</span> fields are read at operator boot — save here, then restart the operator process to pick them up.
+          Use <em>Pause scanning</em> as an instant kill switch on new entries.
+        </p>
         <div id="rt-form" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px;margin-top:14px"></div>
         <div class="actions">
           <button onclick="saveRuntimeConfig()">Save</button>
@@ -93,8 +97,13 @@
           _rtFields = data.fields || {};
           const values = data.values || {};
           const form = document.getElementById("rt-form");
-          form.innerHTML = Object.entries(_rtFields).map(([key, spec]) => {
+          // Group: RESTART-required fields first (highlighted), then HOT/quiet.
+          const entries = Object.entries(_rtFields);
+          const restartKeys = entries.filter(([,s]) => /RESTART/i.test(s.label));
+          const hotKeys = entries.filter(([,s]) => !/RESTART/i.test(s.label));
+          const renderField = ([key, spec]) => {
             const v = values[key] ?? "";
+            const restart = /RESTART/i.test(spec.label);
             let input;
             if (spec.choices) {
               input = `<select id="rt-${key}">${spec.choices.map(c => `<option value="${c}" ${c==v?"selected":""}>${c}</option>`).join("")}</select>`;
@@ -105,8 +114,20 @@
             } else {
               input = `<input type="text" id="rt-${key}" value="${v}" />`;
             }
-            return `<div><div class="label">${spec.label}</div>${input}<div style="font:400 11px/1.4 sans-serif;color:var(--dim);margin-top:6px">${spec.help || ""}</div></div>`;
-          }).join("");
+            const border = restart ? "1px solid rgba(255,174,43,.4)" : "1px solid var(--line-soft)";
+            const tagBg = restart ? "rgba(255,174,43,.12)" : "rgba(37,211,154,.12)";
+            const tagColor = restart ? "var(--amber)" : "var(--green)";
+            const tag = restart ? "RESTART" : "HOT";
+            return `<div style="border:${border};border-radius:6px;padding:10px 12px;background:var(--panel-2)">
+              <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+                <div class="label">${spec.label.replace(/\s*\((RESTART|HOT)\)\s*/i,"")}</div>
+                <span style="font:700 9px 'JetBrains Mono';padding:2px 6px;border-radius:3px;background:${tagBg};color:${tagColor};letter-spacing:.08em">${tag}</span>
+              </div>
+              <div style="margin-top:8px">${input}</div>
+              <div style="font:400 11px/1.4 sans-serif;color:var(--dim);margin-top:6px">${spec.help || ""}</div>
+            </div>`;
+          };
+          form.innerHTML = [...restartKeys, ...hotKeys].map(renderField).join("");
           document.getElementById("rt-result").textContent = `Loaded ${Object.keys(values).length} fields. Edit and click Save.`;
         } catch (e) {
           document.getElementById("rt-result").textContent = `Load failed: ${e}`;

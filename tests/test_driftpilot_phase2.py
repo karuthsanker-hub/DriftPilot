@@ -293,7 +293,7 @@ def test_boot_reconciliation_uses_broker_truth_when_local_position_mismatches() 
     assert stale_position.exit_reason == "broker_missing_at_boot"
     assert [position.symbol for position in open_positions] == ["MSFT"]
     assert slot is not None
-    assert slot.status == "occupied"
+    assert slot.status == "OPEN"
     assert slot.symbol == "MSFT"
     assert state is not None
     assert state.current_state == "IN_POSITION"

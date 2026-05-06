@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Iterable
 
 from .classifier import CatalystClassifier
-from .db import insert_event
+from .db import insert_event, update_enrichment
 from .event import CatalystEvent
 from .event_bus import CatalystEventBus
 from .qwen_enricher import QwenEnricher
@@ -160,6 +160,17 @@ class AlpacaNewsFeed:
                 headline_hash=event.headline_hash,
                 sentiment=enrichment.sentiment,
                 priority_modifier=enrichment.priority_modifier,
+            )
+            # Patch the DB row (inserted at line above with sentiment=NULL)
+            # with the enrichment results so DB readers — bootstrap, the news
+            # ticker, the negative-catalyst gate — see the same sentiment that
+            # the bus carries.
+            await asyncio.to_thread(
+                update_enrichment,
+                self._db_path, enriched.headline_hash, enriched.symbol,
+                sentiment=enriched.sentiment,
+                priority_modifier=enriched.priority_modifier,
+                horizon_minutes=enriched.horizon_minutes,
             )
             await self._bus.publish(enriched)
             published += 1

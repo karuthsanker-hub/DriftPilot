@@ -689,7 +689,12 @@ class PositionRepository:
 
             self._upsert_slot(
                 slot_id,
-                status="occupied",
+                # Use "OPEN" (the canonical active-slot status) instead of
+                # the legacy "occupied" string — otherwise SlotAllocator's
+                # ACTIVE_SLOT_STATUSES check skips these slots and the same
+                # symbol can be re-allocated, breaking duplicate-symbol and
+                # day-cap gates.
+                status="OPEN",
                 slot_value=slot_value,
                 symbol=symbol,
                 position_id=position.id,

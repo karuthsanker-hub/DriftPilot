@@ -154,6 +154,8 @@ def _payload_from_repo(repo: DriftPilotRepository, settings: DriftPilotSettings)
     # hold, catalyst headline). Lets the UI show what got bought, what got
     # sold, and the result, in chronological order.
     payload["recent_trades"] = _recent_trades(repo, limit=20)
+    # Scrolling news ticker — most recent catalyst events from the catalyst DB
+    payload["news_ticker"] = _news_ticker(limit=30, lookback_minutes=240)
     # Build a symbol-keyed lookup for local positions (slots don't always carry
     # position_id) and pass live Alpaca per-symbol data so slot cards show
     # current price + unrealized %.
@@ -443,6 +445,52 @@ def _recent_trades(repo: DriftPilotRepository, limit: int = 20) -> list[dict[str
             "closed_at": r["closed_at"],
             "catalyst_headline": (md.get("catalyst_headline") or "")[:100],
             "catalyst_sentiment": md.get("catalyst_sentiment"),
+        })
+    return out
+
+
+def _news_ticker(
+    db_path: str = "data/driftpilot/catalyst_events.sqlite3",
+    limit: int = 30,
+    lookback_minutes: int = 240,
+) -> list[dict[str, Any]]:
+    """Most recent catalyst events for the dashboard scrolling ticker.
+
+    Pulls (symbol, category/subcategory, sentiment, headline, ts) from the
+    catalyst sqlite. Independent of the operator's main DB. Best-effort: a
+    missing/locked DB just returns []. Limited to last `lookback_minutes`
+    so stale headlines don't show up after the operator's been down a day.
+    """
+    import sqlite3
+    from datetime import datetime, timedelta, timezone
+    p = Path(db_path)
+    if not p.exists():
+        return []
+    cutoff = (datetime.now(timezone.utc) - timedelta(minutes=lookback_minutes)).isoformat()
+    try:
+        conn = sqlite3.connect(p)
+        cur = conn.execute(
+            "SELECT symbol, category, subcategory, sentiment, headline, "
+            "event_ts, source, priority_modifier "
+            "FROM catalyst_events WHERE event_ts >= ? "
+            "ORDER BY event_ts DESC LIMIT ?",
+            (cutoff, limit),
+        )
+        rows = cur.fetchall()
+        conn.close()
+    except Exception:
+        return []
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        out.append({
+            "symbol": r[0],
+            "category": r[1],
+            "subcategory": r[2],
+            "sentiment": r[3] or "pending",
+            "headline": (r[4] or "")[:140],
+            "ts": r[5],
+            "source": r[6] or "",
+            "priority": float(r[7] or 0.0),
         })
     return out
 

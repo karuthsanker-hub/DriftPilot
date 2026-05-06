@@ -36,6 +36,35 @@ def init_catalyst_schema(db_path: str) -> None:
         conn.close()
 
 
+def update_enrichment(
+    db_path: str,
+    headline_hash: str,
+    symbol: str,
+    *,
+    sentiment: str | None,
+    priority_modifier: float,
+    horizon_minutes: int,
+) -> int:
+    """Patch an already-inserted event row with Qwen enrichment results.
+
+    Called after insert_event() succeeds and the enricher returns. Without
+    this, the DB row stays at sentiment=NULL forever (the bus carries the
+    enriched copy but the DB doesn't), which breaks bootstrap-on-restart,
+    the news ticker's sentiment tags, and the negative-catalyst gate.
+    """
+    conn = sqlite3.connect(db_path)
+    try:
+        cur = conn.execute(
+            "UPDATE catalyst_events SET sentiment = ?, priority_modifier = ?, "
+            "horizon_minutes = ? WHERE headline_hash = ? AND symbol = ?",
+            (sentiment, priority_modifier, horizon_minutes, headline_hash, symbol),
+        )
+        conn.commit()
+        return cur.rowcount
+    finally:
+        conn.close()
+
+
 def insert_event(db_path: str, event: CatalystEvent) -> int:
     """Returns 1 if inserted, 0 if duplicate (UNIQUE constraint hit)."""
     conn = sqlite3.connect(db_path)

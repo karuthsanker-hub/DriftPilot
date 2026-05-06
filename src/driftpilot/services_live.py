@@ -86,7 +86,10 @@ class LiveBrokerReconciler:
                     {
                         "symbol": getattr(p, "symbol", "").upper(),
                         "quantity": float(getattr(p, "quantity", 0)),
-                        "avg_entry_price": float(getattr(p, "avg_entry_price", 0)),
+                        # Repo expects "entry_price"; AlpacaBrokerClient surfaces
+                        # `avg_entry_price` (Alpaca's name). Pass both for safety.
+                        "entry_price": float(getattr(p, "avg_entry_price", 0) or getattr(p, "average_entry_price", 0) or 0),
+                        "avg_entry_price": float(getattr(p, "avg_entry_price", 0) or getattr(p, "average_entry_price", 0) or 0),
                     }
                     for p in broker_positions
                 ],
@@ -102,6 +105,119 @@ class LiveBrokerReconciler:
     # Pass-through for any other broker calls the state machine might make
     def __getattr__(self, name):
         return getattr(self.alpaca, name)
+
+
+class MultiSignal:
+    """Fan-out/fan-in aggregator over N catalyst signals.
+
+    The single-signal architecture forces a tradeoff: pick the validated
+    earnings cell (5.09 ratio, low N/day) or the broader filing_8a (2.05
+    ratio, ~10x more flow). This wrapper runs both in parallel:
+
+    - subscribe()  → subscribes every sub-signal to its own bus topic
+    - bootstrap_from_db() → fans out per sub-signal
+    - scan()  → concatenates candidates from each (each tags its own signal_name
+                in `features` so the scanner can stamp position metadata for
+                exit routing)
+    - evaluate_exit(position, now) → looks up `metadata["signal_name"]` and
+                delegates to the matching sub-signal. Falls back to the first
+                sub-signal if name missing (back-compat with positions opened
+                before MultiSignal was wired).
+
+    Each sub-signal owns its own _config, so they can have different
+    max_hold / profit_take / stop_loss. That's the whole point — different
+    cells have different optimal hold periods.
+    """
+
+    name: str = "multi_signal"
+
+    def __init__(self, signals: list[Any]) -> None:
+        if not signals:
+            raise ValueError("MultiSignal requires at least one sub-signal")
+        self._signals = signals
+        self._by_name: dict[str, Any] = {
+            getattr(s, "name", None) or s.__class__.__name__: s for s in signals
+        }
+
+    @property
+    def signals(self) -> list[Any]:
+        return list(self._signals)
+
+    @property
+    def _config(self):  # for hot-reload compatibility (no-op shim)
+        return getattr(self._signals[0], "_config", None)
+
+    @_config.setter
+    def _config(self, value):
+        # Hot-reload of earnings config affects only sub-signals that accept
+        # the same config type. Skip silently for incompatible signals.
+        for s in self._signals:
+            try:
+                if isinstance(getattr(s, "_config", None), type(value)):
+                    s._config = value
+            except Exception:
+                pass
+
+    async def subscribe(self) -> None:
+        for s in self._signals:
+            sub = getattr(s, "subscribe", None)
+            if sub is None:
+                continue
+            res = sub()
+            if hasattr(res, "__await__"):
+                await res
+
+    def bootstrap_from_db(self, db_path: str) -> int:
+        total = 0
+        for s in self._signals:
+            boot = getattr(s, "bootstrap_from_db", None)
+            if boot is None:
+                continue
+            try:
+                total += int(boot(db_path) or 0)
+            except Exception as exc:
+                logger.warning("MultiSignal bootstrap %s failed: %s", s.name, exc)
+        return total
+
+    async def scan(self, now=None):
+        import inspect as _inspect
+        out: list[Any] = []
+        for s in self._signals:
+            try:
+                res = s.scan(now=now) if "now" in _inspect.signature(s.scan).parameters else s.scan()
+                cands = await res if _inspect.isawaitable(res) else res
+            except Exception as exc:
+                logger.exception("MultiSignal: %s.scan raised: %s", s.name, exc)
+                continue
+            for c in cands or []:
+                # Ensure features carry signal_name so the scanner can stamp it
+                feats = dict(getattr(c, "features", None) or {})
+                feats.setdefault("signal_name", getattr(s, "name", None))
+                # Candidate is a frozen-ish dataclass — replace via constructor
+                try:
+                    c = c.__class__(
+                        symbol=c.symbol, score=c.score, sector=c.sector,
+                        allowed=c.allowed, blocked_reason=c.blocked_reason,
+                        features=feats,
+                    )
+                except Exception:
+                    pass
+                out.append(c)
+        return out
+
+    def evaluate_exit(self, position, now, *args, **kwargs):
+        metadata = getattr(position, "metadata", {}) or {}
+        sig_name = metadata.get("signal_name")
+        target = self._by_name.get(sig_name) if sig_name else None
+        if target is None:
+            # Fall back to the first sub-signal (covers positions opened
+            # before MultiSignal stamped signal_name into metadata).
+            target = self._signals[0]
+        try:
+            return target.evaluate_exit(position, now, *args, **kwargs)
+        except Exception as exc:
+            logger.exception("MultiSignal.evaluate_exit %s raised: %s", sig_name, exc)
+            return None
 
 
 class CatalystScannerService:
@@ -133,6 +249,7 @@ class CatalystScannerService:
         # Hot-reload tracking — only re-read the file when its mtime changes.
         self._runtime_config_path = runtime_config_path
         self._runtime_config_mtime: float = 0.0
+        self._scanning_paused: bool = False
         # Lazy-load real sectors so catalyst candidates spread across the
         # allocator's per-sector cap. Otherwise all our candidates end up in
         # "Unknown" and cap fires after 3.
@@ -179,14 +296,18 @@ class CatalystScannerService:
                 trailing_activation_pct=cfg.earnings_trailing_activation_pct,
                 trailing_distance_pct=cfg.earnings_trailing_distance_pct,
             )
-            self.signal._config = new_signal_cfg  # type: ignore[attr-defined]
+            # Earnings signal hot-reload (only meaningful for earnings_report_v1)
+            if hasattr(self.signal, "_config"):
+                self.signal._config = new_signal_cfg  # type: ignore[attr-defined]
+            # Hot kill switch
+            self._scanning_paused = str(cfg.scanning_paused).lower() == "true"
             self._runtime_config_mtime = mtime
             logger.info(
-                "🔄 hot-reloaded signal config: max_hold=%dm profit=%.2f%% stop=%.2f%% "
-                "max_age=%dm sentiment=%s",
+                "🔄 hot-reloaded: max_hold=%dm profit=%.2f%% stop=%.2f%% "
+                "max_age=%dm sentiment=%s scanning_paused=%s",
                 cfg.earnings_max_hold_minutes, cfg.earnings_profit_take_pct,
                 cfg.earnings_stop_loss_pct, cfg.earnings_max_event_age_minutes,
-                require_sent,
+                require_sent, cfg.scanning_paused,
             )
         except Exception as exc:
             logger.warning("hot-reload failed: %s", exc)
@@ -195,8 +316,16 @@ class CatalystScannerService:
         self._maybe_hot_reload()
         now = self.clock.now_utc()
         candidates: list[AllocationCandidate] = []
+        # Hot-reloadable kill switch — UI sets scanning_paused=true to halt
+        # new entries without stopping the operator. Existing positions are
+        # still managed by the monitor.
+        if getattr(self, "_scanning_paused", False):
+            logger.info("catalyst scanner: scanning_paused=true (UI lever) — 0 candidates")
+            return _build_scan_result([], now)
         try:
-            sig_candidates = await self.signal.scan(now=now)
+            import inspect
+            res = self.signal.scan(now=now)
+            sig_candidates = await res if inspect.isawaitable(res) else res
         except Exception as exc:
             logger.exception("catalyst scanner: signal.scan raised: %s", exc)
             return _build_scan_result([], now)
@@ -231,6 +360,10 @@ class CatalystScannerService:
                     "event_age_minutes": features.get("event_age_minutes"),
                     "horizon_minutes": features.get("horizon_minutes"),
                     "source": features.get("source", "catalyst_bus"),
+                    # signal_name lets the position monitor route evaluate_exit
+                    # to the right signal under MultiSignal mode (mixed
+                    # filing_8a + earnings_report etc).
+                    "signal_name": features.get("signal_name") or getattr(self.signal, "name", None),
                 },
             )
             candidates.append(ac)
@@ -386,6 +519,9 @@ class LiveAlpacaAllocator:
                     "catalyst_headline": cat_headline,
                     "catalyst_event_age_min_at_entry": cat_event_age,
                     "signal_score_at_entry": float(getattr(candidate, "score", 0.0)),
+                    # Stamp the originating signal so the monitor's MultiSignal
+                    # router knows which exit logic to apply.
+                    "signal_name": candidate.metadata.get("signal_name"),
                 },
             )
             logger.info(
@@ -393,6 +529,34 @@ class LiveAlpacaAllocator:
                 allocation.symbol, quantity, entry_price,
                 getattr(position, "id", None), submission.broker_order_id,
             )
+            # Transition the slot RESERVED → OPEN and link to the position id
+            # so the dashboard / state machine know the slot is held by a real
+            # position. Without this, slots stay RESERVED forever and the UI
+            # shows "submitting…" indefinitely.
+            try:
+                slot_record = next(
+                    (s for s in self.repository.slots.list_all() if s.slot_id == allocation.slot_id),
+                    None,
+                )
+                self.repository.slots.upsert(
+                    allocation.slot_id,
+                    status="OPEN",
+                    symbol=allocation.symbol,
+                    position_id=getattr(position, "id", None),
+                    slot_value=allocation.slot_value,
+                    metadata={
+                        **((slot_record.metadata if slot_record else None) or {}),
+                        "opened_at": allocation.reserved_at.isoformat(),
+                        "entry_price": entry_price,
+                        "broker_order_id": submission.broker_order_id,
+                    },
+                    updated_at=self.clock.now_utc(),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "LIVE: slot transition RESERVED→OPEN failed for slot=%s: %s",
+                    allocation.slot_id, exc,
+                )
 
         return result
 

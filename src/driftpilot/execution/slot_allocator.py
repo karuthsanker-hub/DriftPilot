@@ -34,7 +34,10 @@ def _has_negative_catalyst(
 
 
 FREE_SLOT_STATUSES = {"EMPTY", "RECYCLING"}
-ACTIVE_SLOT_STATUSES = {"RESERVED", "ENTERING", "OPEN", "EXITING"}
+# OCCUPIED was a legacy status string written by reconcile_broker_open_positions.
+# Keep it in the active set so any stale rows on disk still gate duplicates
+# until they're rewritten as OPEN.
+ACTIVE_SLOT_STATUSES = {"RESERVED", "ENTERING", "OPEN", "EXITING", "OCCUPIED"}
 DEFAULT_MAX_SLOTS_PER_SECTOR = 3
 
 
@@ -256,15 +259,21 @@ class SlotAllocator:
         return counts
 
     def _closed_today_symbol_counts(self) -> dict[str, int]:
-        """Count today-closed positions per symbol so the day-cap gate
-        knows about exits earlier in the session."""
+        """Count today's positions per symbol — both closed AND still-open,
+        anything that opened today.
+
+        Why count opens too: the broker-race path could create a local
+        position record while the slot got transiently released (slot link
+        bugs in Alpaca-paper). If we only count closed, an in-flight ICHR
+        re-buy slips through. Counting "opened_at >= today" catches both.
+        """
         from datetime import datetime, timezone
         today_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         counts: dict[str, int] = {}
         try:
             cur = self.repository.connection.execute(
                 "SELECT symbol, COUNT(*) FROM positions "
-                "WHERE status = 'closed' AND closed_at >= ? GROUP BY symbol",
+                "WHERE opened_at >= ? GROUP BY symbol",
                 (today_iso,),
             )
             for row in cur.fetchall():

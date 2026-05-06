@@ -87,6 +87,47 @@ class AnalystTargetRaiseV1Signal:
             return task
         return asyncio.run(coro)
 
+    def bootstrap_from_db(self, db_path: str, lookback_minutes: int | None = None) -> int:
+        """Backfill in-memory _active_events from SQLite for analyst/target_raise
+        events younger than max_event_age_minutes. Lets MultiSignal treat all
+        sub-signals uniformly."""
+        import sqlite3
+        from datetime import datetime, timedelta, timezone
+        max_age = lookback_minutes or self.config.max_event_age_minutes
+        cutoff = (datetime.now(timezone.utc) - timedelta(minutes=max_age)).isoformat()
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.execute(
+                "SELECT symbol, category, subcategory, pillar, event_ts, headline, "
+                "source, horizon_minutes, headline_hash, sentiment, priority_modifier "
+                "FROM catalyst_events WHERE category = 'analyst' "
+                "AND subcategory = 'target_raise' AND event_ts >= ? "
+                "ORDER BY event_ts ASC",
+                (cutoff,),
+            )
+            rows = cur.fetchall()
+            conn.close()
+        except Exception:
+            return 0
+        loaded = 0
+        for r in rows:
+            try:
+                ts = datetime.fromisoformat(r[4])
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                ev = CatalystEvent(
+                    symbol=r[0], category=r[1], subcategory=r[2],
+                    pillar=r[3] or "micro", ts=ts, headline=r[5] or "",
+                    source=r[6] or "db_bootstrap",
+                    horizon_minutes=int(r[7] or 60), headline_hash=r[8] or "",
+                    sentiment=r[9], priority_modifier=float(r[10] or 0.0),
+                )
+                self._active_events[ev.symbol.upper()] = ev
+                loaded += 1
+            except (ValueError, TypeError):
+                continue
+        return loaded
+
     async def _on_event(self, event: CatalystEvent) -> None:
         """Bus callback — remember the most recent event per symbol."""
         symbol = event.symbol.upper()
@@ -137,7 +178,7 @@ class AnalystTargetRaiseV1Signal:
         position: Any,
         latest_bar: Any | None = None,
         settings: Any | None = None,
-    ) -> ExitDecision:
+    ) -> ExitDecision | None:
         """Delegate to `exits.evaluate_all` with current clock time.
 
         `position` must expose `entry_at` (or `entry_ts`) and either
@@ -145,23 +186,44 @@ class AnalystTargetRaiseV1Signal:
         """
         now = self._clock() if callable(self._clock) else self._clock
 
+        # DriftPilot's live PositionRecord stores entry_ts and current_price
+        # inside `metadata`, not as direct attributes — same shape that
+        # earnings_report_v1 already accommodates. Fall through metadata so
+        # the monitor doesn't crash every cycle on AttributeError.
+        metadata = getattr(position, "metadata", {}) or {}
         entry_ts = (
             getattr(position, "entry_ts", None)
             or getattr(position, "entry_at", None)
+            or metadata.get("entry_ts")
+            or metadata.get("entry_at")
         )
         if entry_ts is None:
-            raise AttributeError(
-                "position must expose entry_ts or entry_at"
-            )
+            return None  # not enough data; let the time/price loop revisit
+        # Persisted JSON makes datetimes round-trip as ISO strings — coerce.
+        if isinstance(entry_ts, str):
+            from datetime import datetime
+            try:
+                entry_ts = datetime.fromisoformat(entry_ts.replace("Z", "+00:00"))
+            except ValueError:
+                return None
 
         unrealized_pct = getattr(position, "unrealized_pct", None)
         if unrealized_pct is None:
-            entry_price = float(getattr(position, "entry_price", 0.0))
-            close = float(getattr(latest_bar, "close", entry_price)) if latest_bar else entry_price
+            entry_price = float(
+                getattr(position, "entry_price", None)
+                or metadata.get("entry_price")
+                or 0.0
+            )
+            current_price = float(
+                getattr(position, "current_price", None)
+                or metadata.get("current_price")
+                or (getattr(latest_bar, "close", entry_price) if latest_bar else entry_price)
+                or entry_price
+            )
             if entry_price <= 0:
                 unrealized_pct = 0.0
             else:
-                unrealized_pct = ((close - entry_price) / entry_price) * 100.0
+                unrealized_pct = ((current_price - entry_price) / entry_price) * 100.0
 
         return evaluate_all(now, entry_ts, float(unrealized_pct), self.config)
 

@@ -25,19 +25,56 @@ DEFAULT_PATH = "data/driftpilot/runtime_config.json"
 
 # The set of fields the admin UI can edit. Validation rules below.
 EDITABLE_FIELDS: dict[str, dict[str, Any]] = {
+    "active_signal": {
+        "type": str,
+        "choices": [
+            "earnings_report_v1",
+            "filing_8a_v1",
+            "analyst_target_raise_v1",
+            "earnings_report_v1,filing_8a_v1",
+        ],
+        "label": "Active signal(s) (RESTART)",
+        "help": (
+            "Which catalyst signal(s) drive entries. Single name OR comma-separated list "
+            "for MultiSignal mode. earnings_report_v1 (validated, ratio=5.09 n=33), "
+            "filing_8a_v1 (validated, ratio=2.05 n=256, biggest sample), "
+            "analyst_target_raise_v1 (FAIL, ratio=0.85). Combo recommended for broader coverage. "
+            "Read at operator boot — pause, change, restart."
+        ),
+    },
+    "scanning_paused": {
+        "type": str,
+        "choices": ["false", "true"],
+        "label": "Pause scanning (HOT)",
+        "help": "true = scanner emits 0 candidates (no new entries). Existing positions still managed. Hot-reloads in ~30s.",
+    },
     "slot_value": {
         "type": float,
         "min": 100.0,
         "max": 100_000.0,
-        "label": "Slot value ($)",
+        "label": "Slot value ($) (RESTART)",
         "help": "Notional dollars per slot. 10 slots × this = max deployed.",
     },
     "max_trades_per_symbol_per_day": {
         "type": int,
         "min": 1,
         "max": 20,
-        "label": "Max trades / symbol / day",
+        "label": "Max trades / symbol / day (RESTART)",
         "help": "1 = no re-trading the same symbol once it closes today.",
+    },
+    "max_slots_per_sector": {
+        "type": int,
+        "min": 1,
+        "max": 10,
+        "label": "Max slots / sector (RESTART)",
+        "help": "Concentration cap. 3 = at most 3 of 10 slots in any one sector.",
+    },
+    "catalyst_universe_lookback_minutes": {
+        "type": int,
+        "min": 30,
+        "max": 1440,
+        "label": "Catalyst universe lookback (min) (RESTART)",
+        "help": "How far back the universe filter looks for catalysts on each symbol.",
     },
     "earnings_max_event_age_minutes": {
         "type": int,
@@ -98,8 +135,12 @@ EDITABLE_FIELDS: dict[str, dict[str, Any]] = {
 
 @dataclass
 class RuntimeConfig:
+    active_signal: str = "earnings_report_v1"
+    scanning_paused: str = "false"
     slot_value: float = 1000.0
     max_trades_per_symbol_per_day: int = 1
+    max_slots_per_sector: int = 3
+    catalyst_universe_lookback_minutes: int = 240
     earnings_max_event_age_minutes: int = 240
     earnings_profit_take_pct: float = 1.0
     earnings_stop_loss_pct: float = 1.5
@@ -111,8 +152,12 @@ class RuntimeConfig:
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "active_signal": self.active_signal,
+            "scanning_paused": self.scanning_paused,
             "slot_value": self.slot_value,
             "max_trades_per_symbol_per_day": self.max_trades_per_symbol_per_day,
+            "max_slots_per_sector": self.max_slots_per_sector,
+            "catalyst_universe_lookback_minutes": self.catalyst_universe_lookback_minutes,
             "earnings_max_event_age_minutes": self.earnings_max_event_age_minutes,
             "earnings_profit_take_pct": self.earnings_profit_take_pct,
             "earnings_stop_loss_pct": self.earnings_stop_loss_pct,

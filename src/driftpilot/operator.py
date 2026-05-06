@@ -166,11 +166,20 @@ async def _run(once: bool, mock_stream: bool, env_file: str, paper_live: bool = 
         from driftpilot.services_live import (
             CatalystScannerService,
             LiveBrokerReconciler,
+            MultiSignal,
             build_live_components,
         )
         from driftpilot.signals.earnings_report_v1 import (
             EarningsReportConfig,
             EarningsReportSignal,
+        )
+        from driftpilot.signals.analyst_target_raise_v1 import (
+            AnalystTargetRaiseConfig,
+            AnalystTargetRaiseV1Signal,
+        )
+        from driftpilot.signals.filing_8a_v1 import (
+            Filing8AConfig,
+            Filing8ASignal,
         )
 
         if catalyst_bus is None:
@@ -195,20 +204,72 @@ async def _run(once: bool, mock_stream: bool, env_file: str, paper_live: bool = 
         from driftpilot.runtime_config import load_runtime_config
         rcfg = load_runtime_config()
         require_sent = rcfg.earnings_require_sentiment
-        live_signal = EarningsReportSignal(
-            EarningsReportConfig(
-                max_hold_minutes=rcfg.earnings_max_hold_minutes,
-                profit_take_pct=rcfg.earnings_profit_take_pct,
-                stop_loss_pct=rcfg.earnings_stop_loss_pct,
-                max_event_age_minutes=rcfg.earnings_max_event_age_minutes,
-                require_sentiment=None if require_sent == "any" else require_sent,
-                trailing_enabled=str(rcfg.earnings_trailing_enabled).lower() == "true",
-                trailing_activation_pct=rcfg.earnings_trailing_activation_pct,
-                trailing_distance_pct=rcfg.earnings_trailing_distance_pct,
-            ),
-            catalyst_bus,
-        )
-        await live_signal.subscribe()
+        # Operator dispatches on active_signal. Order of precedence:
+        # 1) runtime_config.json (UI-set, persistent) — only if the key is
+        #    EXPLICITLY present (we don't let the dataclass default override env)
+        # 2) ACTIVE_SIGNAL env var (settings.active_signal)
+        import json as _json
+        from pathlib import Path as _Path
+        _rc_path = _Path("data/driftpilot/runtime_config.json")
+        _rc_raw: dict = {}
+        if _rc_path.exists():
+            try:
+                _rc_raw = _json.loads(_rc_path.read_text())
+            except Exception:
+                _rc_raw = {}
+        active_signal_name = _rc_raw.get("active_signal") or settings.active_signal
+        # Comma-separated list = run multiple signals in parallel via MultiSignal.
+        # e.g. ACTIVE_SIGNAL="earnings_report_v1,filing_8a_v1"
+        signal_names = [s.strip() for s in str(active_signal_name).split(",") if s.strip()]
+
+        def _build_signal(name: str):
+            if name == "analyst_target_raise_v1":
+                logger.warning(
+                    "🟠 %s — backtest verdict FAIL (edge_ratio=0.85). "
+                    "Trading at known-negative expected value.", name,
+                )
+                return AnalystTargetRaiseV1Signal(AnalystTargetRaiseConfig(), catalyst_bus)
+            if name == "filing_8a_v1":
+                return Filing8ASignal(
+                    Filing8AConfig(
+                        max_hold_minutes=rcfg.earnings_max_hold_minutes,
+                        profit_take_pct=rcfg.earnings_profit_take_pct,
+                        stop_loss_pct=rcfg.earnings_stop_loss_pct,
+                        max_event_age_minutes=rcfg.earnings_max_event_age_minutes,
+                        require_sentiment=None if require_sent == "any" else require_sent,
+                        trailing_enabled=str(rcfg.earnings_trailing_enabled).lower() == "true",
+                        trailing_activation_pct=rcfg.earnings_trailing_activation_pct,
+                        trailing_distance_pct=rcfg.earnings_trailing_distance_pct,
+                    ),
+                    catalyst_bus,
+                )
+            # Default: earnings_report_v1
+            return EarningsReportSignal(
+                EarningsReportConfig(
+                    max_hold_minutes=rcfg.earnings_max_hold_minutes,
+                    profit_take_pct=rcfg.earnings_profit_take_pct,
+                    stop_loss_pct=rcfg.earnings_stop_loss_pct,
+                    max_event_age_minutes=rcfg.earnings_max_event_age_minutes,
+                    require_sentiment=None if require_sent == "any" else require_sent,
+                    trailing_enabled=str(rcfg.earnings_trailing_enabled).lower() == "true",
+                    trailing_activation_pct=rcfg.earnings_trailing_activation_pct,
+                    trailing_distance_pct=rcfg.earnings_trailing_distance_pct,
+                ),
+                catalyst_bus,
+            )
+
+        sub_signals = [_build_signal(n) for n in signal_names]
+        if len(sub_signals) > 1:
+            live_signal = MultiSignal(sub_signals)
+            logger.info("MULTI-SIGNAL active: %s", ", ".join(signal_names))
+        else:
+            live_signal = sub_signals[0]
+            logger.info("single signal active: %s", signal_names[0])
+        # subscribe() is async on most signals; sync/already-done on others.
+        if hasattr(live_signal, "subscribe"):
+            maybe = live_signal.subscribe()
+            if hasattr(maybe, "__await__"):
+                await maybe
         logger.info(
             "live signal config: max_hold=%dm profit_take=%.2f%% stop_loss=%.2f%% "
             "max_age=%dm require_sentiment=%s (hot-reloadable from /admin)",
@@ -218,13 +279,11 @@ async def _run(once: bool, mock_stream: bool, env_file: str, paper_live: bool = 
         )
         # Bootstrap _active_events from DB so events that landed before this
         # process started (or were just reclassified) are visible to the
-        # signal without waiting for re-publication on the bus.
-        if catalyst_db_path:
+        # signal without waiting for re-publication on the bus. MultiSignal
+        # delegates to each sub-signal's bootstrap_from_db.
+        if catalyst_db_path and hasattr(live_signal, "bootstrap_from_db"):
             n_loaded = live_signal.bootstrap_from_db(catalyst_db_path)
-            logger.info(
-                "live signal bootstrapped %d earnings/report events from DB (within max_event_age=%dmin)",
-                n_loaded, EarningsReportConfig().max_event_age_minutes,
-            )
+            logger.info("live signal bootstrapped %d events from DB", n_loaded)
 
         scanner = CatalystScannerService(
             signal=live_signal,
@@ -240,8 +299,8 @@ async def _run(once: bool, mock_stream: bool, env_file: str, paper_live: bool = 
             settings.alpaca_paper_base_url,
         )
         logger.info(
-            "live signal: earnings_report_v1 (require_sentiment=positive); "
-            "scanner: CatalystScannerService (event-driven)"
+            "live signal: %s; scanner: CatalystScannerService (event-driven)",
+            active_signal_name,
         )
         # Wrap the broker so it satisfies the BrokerReconciler protocol the
         # state machine expects. AlpacaBrokerClient doesn't implement

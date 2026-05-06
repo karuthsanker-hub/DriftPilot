@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from typing import Callable
 
 from .classifier import CatalystClassifier
-from .db import insert_event
+from .db import insert_event, update_enrichment
 from .event import CatalystEvent
 from .event_bus import CatalystEventBus
 from .qwen_enricher import QwenEnricher
@@ -152,6 +152,14 @@ class RssNewsFeed:
             headline_hash=event.headline_hash,
             sentiment=enrichment.sentiment,
             priority_modifier=enrichment.priority_modifier,
+        )
+        # Patch the DB row with enrichment so ticker / bootstrap / gate see it.
+        await asyncio.to_thread(
+            update_enrichment,
+            self._db_path, enriched.headline_hash, enriched.symbol,
+            sentiment=enriched.sentiment,
+            priority_modifier=enriched.priority_modifier,
+            horizon_minutes=enriched.horizon_minutes,
         )
         await self._bus.publish(enriched)
         return 1

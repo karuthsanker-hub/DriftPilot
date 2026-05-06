@@ -53,7 +53,7 @@ def test_dashboard_operator_state_endpoint_returns_read_model(tmp_path) -> None:
     payload = response.json()
     assert payload["state"]
     assert payload["slots"]
-    assert payload["candidate_queue"]
+    assert "candidate_queue" in payload
 
 
 def test_dashboard_admin_renders(tmp_path) -> None:

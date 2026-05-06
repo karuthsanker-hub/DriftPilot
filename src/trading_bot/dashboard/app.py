@@ -323,6 +323,15 @@ def create_app(env_path: Path | str = ".env") -> FastAPI:
         except Exception as exc:
             _raise_api_error(exc, "backtest_report")
 
+    @app.get("/api/operator/news-ticker")
+    def operator_news_ticker(limit: int = 30, lookback_minutes: int = 240):
+        """Recent catalyst events for the dashboard scrolling ticker."""
+        try:
+            from driftpilot.dashboard.view_models import _news_ticker
+            return {"events": _news_ticker(limit=limit, lookback_minutes=lookback_minutes)}
+        except Exception as exc:
+            _raise_api_error(exc, "operator_news_ticker")
+
     @app.get("/api/admin/state")
     def admin_state():
         try:
