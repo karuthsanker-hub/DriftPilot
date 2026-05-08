@@ -236,7 +236,6 @@ async def _run(once: bool, mock_stream: bool, env_file: str, paper_live: bool = 
                         profit_take_pct=rcfg.earnings_profit_take_pct,
                         stop_loss_pct=rcfg.earnings_stop_loss_pct,
                         max_event_age_minutes=rcfg.earnings_max_event_age_minutes,
-                        require_sentiment=None if require_sent == "any" else require_sent,
                         trailing_enabled=str(rcfg.earnings_trailing_enabled).lower() == "true",
                         trailing_activation_pct=rcfg.earnings_trailing_activation_pct,
                         trailing_distance_pct=rcfg.earnings_trailing_distance_pct,

@@ -40,13 +40,32 @@ echo "[$(date)] pre-warming catalyst DB: $START_DATE to $END_DATE" >> "$LOGFILE"
 
 # Enrich with Qwen sentiment (best-effort — operator works without it)
 echo "[$(date)] enriching with Qwen sentiment" >> "$LOGFILE"
-timeout 300 ./.venv/bin/python scripts/enrich_catalyst_events.py \
+# macOS doesn't ship `timeout`; use perl one-liner as fallback
+if command -v gtimeout &>/dev/null; then
+    TIMEOUT_CMD="gtimeout 300"
+elif command -v timeout &>/dev/null; then
+    TIMEOUT_CMD="timeout 300"
+else
+    TIMEOUT_CMD=""
+fi
+$TIMEOUT_CMD ./.venv/bin/python scripts/enrich_catalyst_events.py \
     --priority-only --concurrency 32 \
     >> "$LOGFILE" 2>&1 || echo "[$(date)] WARNING: Qwen enrichment failed (DGX down?)" >> "$LOGFILE"
 
+# Ensure dashboard is running on :8000
+DASH_PID=$(lsof -ti :8000 2>/dev/null || true)
+if [ -z "$DASH_PID" ]; then
+    echo "[$(date)] starting dashboard on :8000" >> "$LOGFILE"
+    PYTHONPATH=src ./.venv/bin/python -m uvicorn trading_bot.dashboard.app:app \
+        --host 127.0.0.1 --port 8000 >> logs/dashboard.log 2>&1 &
+    echo "[$(date)] dashboard started PID=$!" >> "$LOGFILE"
+else
+    echo "[$(date)] dashboard already running PID=$DASH_PID" >> "$LOGFILE"
+fi
+
 # Launch operator
 echo "[$(date)] launching operator" >> "$LOGFILE"
-CATALYST_ENABLED=true ACTIVE_SIGNAL=earnings_report_v1 \
+CATALYST_ENABLED=true ACTIVE_SIGNAL="earnings_report_v1,filing_8a_v1" \
     ./.venv/bin/python -u -m driftpilot.operator \
     --paper-live >> "$LOGFILE" 2>&1 &
 echo $! > logs/operator.pid

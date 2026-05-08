@@ -18,8 +18,10 @@ class Filing8AConfig:
     trailing_enabled: bool = True
     trailing_activation_pct: float = 1.0
     trailing_distance_pct: float = 2.0
-    # GATED-positive: backtest cell is unconditional, but live trading
-    # gates on Qwen sentiment for the same reason earnings does — most
-    # filing/8a headlines are descriptive. Positive-tagged events filter
-    # to the subset with bullish framing.
-    require_sentiment: str | None = "positive"
+    # Validation cell (2.05× ratio, n=256) was measured WITHOUT sentiment
+    # filtering — filing/8a events are mostly factual/descriptive so Qwen
+    # tags ~90% neutral. Gating on positive kills all flow. Accept any
+    # non-negative event (positive or neutral). Negative events are
+    # excluded as a safety filter only.
+    require_sentiment: str | None = None
+    exclude_negative: bool = True

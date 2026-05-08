@@ -111,9 +111,12 @@ class Filing8ASignal:
         candidates: list[Candidate] = []
         max_age = self._config.max_event_age_minutes
         require_sentiment = self._config.require_sentiment
+        exclude_negative = getattr(self._config, "exclude_negative", True)
         for symbol, event in self._active_events.items():
             age = event_age_minutes(event.ts, now)
             if age > max_age:
+                continue
+            if exclude_negative and event.sentiment == "negative":
                 continue
             if require_sentiment is not None and event.sentiment != require_sentiment:
                 continue
