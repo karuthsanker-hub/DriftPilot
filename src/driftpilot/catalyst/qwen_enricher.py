@@ -18,9 +18,10 @@ class EnrichmentResult:
     sentiment: Sentiment
     priority_modifier: float
     horizon_override: int | None
+    confidence: float = 0.5
 
 
-_DEFAULT = EnrichmentResult(sentiment="neutral", priority_modifier=0.0, horizon_override=None)
+_DEFAULT = EnrichmentResult(sentiment="neutral", priority_modifier=0.0, horizon_override=None, confidence=0.0)
 _VALID_HORIZONS = {60, 240, 1440, 2880}
 _VALID_SENTIMENTS = {"positive", "negative", "neutral"}
 
@@ -29,6 +30,31 @@ _VALID_SENTIMENTS = {"positive", "negative", "neutral"}
 _THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", flags=re.DOTALL)
 # Find the first JSON object in the response (after any think block).
 _JSON_OBJECT_RE = re.compile(r"\{[^{}]*\}", flags=re.DOTALL)
+
+_SYSTEM_PROMPT = (
+    "You are a short-term equity analyst. Your job is to predict whether a "
+    "financial news headline will move a stock's price UP, DOWN, or have NO "
+    "directional impact within the next 60 minutes of trading.\n\n"
+    "Focus on the TRADING IMPLICATION, not the tone of the words:\n"
+    "- Earnings beat, revenue above consensus, raised guidance → positive (price UP)\n"
+    "- Earnings miss, revenue miss, lowered guidance, downgrade → negative (price DOWN)\n"
+    "- Analyst raises price target, upgrade, new buy rating → positive\n"
+    "- Analyst lowers price target, downgrade, new sell rating → negative\n"
+    "- SEC filing (8-A, 8-K), routine regulatory filing → neutral UNLESS the "
+    "filing content itself is bullish (new product, acquisition) or bearish (delisting, dilution)\n"
+    "- Roundup articles listing multiple stocks (\"12 Stocks Moving...\") → neutral\n"
+    "- Stock mentioned in passing in a broader story → neutral\n"
+    "- M&A target announced → positive for target, context-dependent for acquirer\n\n"
+    "Return ONLY a JSON object with these keys:\n"
+    "- \"sentiment\": \"positive\", \"negative\", or \"neutral\"\n"
+    "- \"confidence\": float 0.0-1.0 (how confident in the directional call)\n"
+    "- \"priority_modifier\": float -0.20 to +0.20 (expected magnitude: "
+    "+0.15 = strong beat/upgrade, +0.05 = mild positive, -0.10 = moderate negative, "
+    "0.0 = no edge)\n"
+    "- \"horizon_override\": 60, 240, 1440, or 2880 if the move will play out "
+    "over a different window than the default for this category, else null\n\n"
+    "No prose, no markdown, no explanation. JSON only."
+)
 
 
 def _strip_thinking_and_extract_json(content: str) -> str:
@@ -42,10 +68,8 @@ class QwenEnricher:
     def __init__(
         self,
         base_url: str = "http://192.168.1.166:8000/v1",
-        model: str = "qwen",
-        # Realistic for Qwen3-8B with /no_think on DGX: cold ~2s, warm ~0.5s.
-        # 3000ms gives margin without making the news pipeline stall.
-        timeout_ms: int = 3000,
+        model: str = "Qwen/Qwen3-8B",
+        timeout_ms: int = 10000,
         max_tokens: int = 128,
         client: httpx.AsyncClient | None = None,
     ) -> None:
@@ -53,18 +77,14 @@ class QwenEnricher:
         self._model = model
         self._timeout_s = timeout_ms / 1000.0
         self._max_tokens = max_tokens
-        self._client = client  # injected for tests; if None, create per-call
+        self._client = client
 
     async def enrich(self, headline: str, category: str, subcategory: str) -> EnrichmentResult:
-        # /no_think tells Qwen3 to emit an empty <think></think> block.
-        prompt = (
-            "/no_think Classify this financial headline. Return ONLY a JSON object "
-            "(no prose, no markdown) with keys "
-            "'sentiment' (positive/negative/neutral), "
-            "'priority_modifier' (float in [-0.2, +0.2] reflecting headline strength), "
-            "'horizon_override' (one of 60, 240, 1440, 2880 if the default category horizon "
-            "should be overridden, else null). "
-            f"Headline: {headline}. Category: {category}/{subcategory}."
+        user_prompt = (
+            f"/no_think Headline: \"{headline}\"\n"
+            f"Category: {category}/{subcategory}\n"
+            f"Symbol context: this headline was tagged to a specific stock. "
+            f"Will it move that stock's price in the next 60 minutes?"
         )
 
         try:
@@ -75,7 +95,10 @@ class QwenEnricher:
                         f"{self._base_url}/chat/completions",
                         json={
                             "model": self._model,
-                            "messages": [{"role": "user", "content": prompt}],
+                            "messages": [
+                                {"role": "system", "content": _SYSTEM_PROMPT},
+                                {"role": "user", "content": user_prompt},
+                            ],
                             "temperature": 0.0,
                             "max_tokens": self._max_tokens,
                         },
@@ -111,7 +134,16 @@ class QwenEnricher:
             pm = 0.0
         pm = max(-0.2, min(0.2, pm))
 
+        try:
+            confidence = float(data.get("confidence", 0.5))
+        except (TypeError, ValueError):
+            confidence = 0.5
+        confidence = max(0.0, min(1.0, confidence))
+
         ho_raw = data.get("horizon_override")
         horizon_override = ho_raw if (isinstance(ho_raw, int) and ho_raw in _VALID_HORIZONS) else None
 
-        return EnrichmentResult(sentiment=sentiment, priority_modifier=pm, horizon_override=horizon_override)
+        return EnrichmentResult(
+            sentiment=sentiment, priority_modifier=pm,
+            horizon_override=horizon_override, confidence=confidence,
+        )
