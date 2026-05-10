@@ -2,6 +2,10 @@
 
 You are working on **DriftPilot**, an autonomous intraday paper-trading operator. Before doing anything, read `CODEX_HANDOFF.md` in the repo root — it has the full project state, architecture, what's working, what's broken, and what to build next.
 
+These instructions are written for both Codex and Claude. If one agent runs out
+of context/tokens, the next agent should be able to resume from the files below
+without relying on chat history.
+
 ## Critical files to read first
 
 1. `CODEX_HANDOFF.md` — **start here**. Current state, open bugs, next work items, architecture summary.
@@ -9,6 +13,28 @@ You are working on **DriftPilot**, an autonomous intraday paper-trading operator
 3. `AGENTS.md` — hard rules that apply to all code changes.
 4. `REFACTOR_PLAN.md` — the authoritative spec (~1500 lines). Reference when in doubt.
 5. `docs/REFACTOR_PLAN_V3_CATALYST_LAYER.md` — the catalyst layer design (v3, the active workstream).
+
+## Resume protocol for a fresh agent
+
+When inheriting this repo after another agent worked on it:
+
+1. Run `git status --short --branch` and `git log --oneline --decorate -5`.
+2. Read `CODEX_HANDOFF.md` and trust it only up to the commit named near the top.
+3. If local files are modified, inspect the diff before editing. Do not revert
+   user/agent work unless explicitly asked.
+4. Run the smallest relevant test first, then the full command before commit:
+   `PYTHONPATH=src uv run --extra test pytest -q`.
+5. If tests fail, fix the code or update stale tests only when the code behavior
+   matches the locked spec. Record any unresolved ambiguity in `BLOCKED.md`.
+6. Before handing off, update `CODEX_HANDOFF.md` with:
+   - current commit/branch
+   - test/lint/type-check status
+   - files changed
+   - remaining failures or open decisions
+   - exact next command for the next agent
+
+If context is running low, stop coding and write a handoff update first. A short,
+accurate handoff is more valuable than a half-finished patch.
 
 ## Hard rules
 
@@ -22,6 +48,11 @@ You are working on **DriftPilot**, an autonomous intraday paper-trading operator
 8. **Live mode is blocked** until the four-criterion live deploy gate passes. Do not bypass.
 9. **`relative_volume` MUST exclude the current bar** from the lookback average (lookahead-bias guard).
 10. **Tests must pass before any commit.** Run: `PYTHONPATH=src pytest -q`
+
+11. **Generated artifacts stay out of commits.** Do not commit `logs/`,
+    `__pycache__/`, `.pyc`, `.pytest_cache/`, local SQLite DBs, or virtualenv
+    contents.
+12. **Keep `CODEX_HANDOFF.md` current.** It is the cross-agent memory file.
 
 ## Code style
 
@@ -80,7 +111,21 @@ reports/                  # Backtest verdicts + paper trading day reports
 ## Running tests
 
 ```bash
-PYTHONPATH=src pytest -q
+PYTHONPATH=src uv run --extra test pytest -q
+```
+
+Recommended verification ladder:
+
+```bash
+# Fast focused check while iterating
+PYTHONPATH=src uv run --extra test pytest tests/catalyst tests/signals/earnings_report_v1 -q
+
+# Full test gate before handoff/commit
+PYTHONPATH=src uv run --extra test pytest -q
+
+# Static checks
+uvx ruff check src/driftpilot src/trading_bot/dashboard tests
+PYTHONPATH=src uv run --with mypy mypy src/driftpilot src/trading_bot/dashboard
 ```
 
 ## Running the operator
@@ -100,3 +145,22 @@ PYTHONPATH=src uvicorn trading_bot.dashboard.app:app --port 8000 --reload
 ## When you hit ambiguity
 
 If a decision is not covered by `REFACTOR_PLAN.md` or the signal's locked spec, append the question to `BLOCKED.md` and continue with non-blocked work. Do not improvise architectural decisions.
+
+## Handoff template
+
+Append this shape to `CODEX_HANDOFF.md` or replace its "Current Snapshot" section:
+
+```md
+## Current Snapshot
+
+- Date:
+- Branch/commit:
+- Working tree:
+- Tests:
+- Ruff:
+- Mypy:
+- Changed files:
+- What changed:
+- Known failures:
+- Next command:
+```

@@ -1,9 +1,20 @@
 # Codex Handoff — DriftPilot Project State
 
 **Date:** 2026-05-06  
-**Branch:** `main` at `44f186c`  
-**Test count:** 511 passing (109 test files)  
-**Paper trading:** Day 2 complete, Day 3 is the first clean session with all bug fixes baked in
+**Branch:** `main` at `40ff129` (`origin/main`)  
+**Latest commits:** `40ff129` daily cron scripts; `598b8ca` MultiSignal + `filing_8a_v1` + enrichment persistence + dashboard ticker/admin upgrades  
+**Paper trading:** Day 2 complete; Day 3 is the first clean session with all bug fixes baked in
+
+## Current Snapshot
+
+- **Working tree at last instruction update:** clean except local untracked runtime artifacts may appear under `.claude/` and `logs/`.
+- **Last known full test gate:** Claude was running/fixing the full suite before this handoff update; re-run `PYTHONPATH=src uv run --extra test pytest -q` before any code commit.
+- **Static checks:** re-run `uvx ruff check src/driftpilot src/trading_bot/dashboard tests` and `PYTHONPATH=src uv run --with mypy mypy src/driftpilot src/trading_bot/dashboard` before committing code.
+- **Instruction update:** `.codex/instructions.md` now contains a cross-agent resume protocol and handoff template. Keep this file and this handoff in sync whenever context is running low.
+- **Next agent first command:** `git status --short --branch && git log --oneline --decorate -5`
+
+If you inherit this while another agent is still testing, wait for that result,
+then update this snapshot with the exact pass/fail output and remaining files.
 
 ---
 
@@ -21,7 +32,7 @@ Live trading is blocked by default until a four-criterion live deploy gate passe
 
 1. **Operator loop** (`python -m driftpilot.operator --paper-live`): boots, reconciles with Alpaca, scans for catalyst events, allocates slots, submits real paper orders to Alpaca, monitors positions, exits on profit_take/stop_loss/trailing_stop/time_stop, recycles slots.
 2. **Catalyst event pipeline**: Alpaca News API → regex classifier → Qwen3-8B sentiment enrichment (on DGX) → event bus → signal subscription.
-3. **Two catalyst signals**: `earnings_report_v1` (GATED, edge_ratio 1.105) and `analyst_target_raise_v1` (FAIL, for observation only).
+3. **Catalyst signals**: `earnings_report_v1` (GATED, edge_ratio 1.105), `filing_8a_v1` (new broader-flow catalyst signal), and `analyst_target_raise_v1` (FAIL, for observation only).
 4. **Five technical signals**: all FAIL on the raw 1500-symbol universe. Architecture exists for them to be re-tested on catalyst-filtered universe (v3 retrofit — not yet done).
 5. **Backtest harness**: replay Databento Parquet bars through the same signal code used in live. Full 2024 year backtested for all 7 signals.
 6. **Dashboard**: FastAPI with Operator/Admin/Backtest/LLM tabs. Shows live Alpaca equity, slots, candidate queue, P&L, admin tunables.
@@ -124,11 +135,14 @@ HALTED_RISK ← (kill switch) → RECYCLING (exits only)
 
 ### Signal registry
 
-7 signals registered, selected via `ACTIVE_SIGNAL` env var:
+Signals are selected via `ACTIVE_SIGNAL` / runtime config. Multi-signal mode can
+run comma-separated catalyst signals in parallel, e.g.
+`earnings_report_v1,filing_8a_v1`.
 
 | Signal | Type | Verdict | Notes |
 |--------|------|---------|-------|
 | `earnings_report_v1` | Catalyst | **GATED** (1.105) | Active paper trading signal. Positive sentiment gate required. |
+| `filing_8a_v1` | Catalyst | validation cell 2.05x abs-move at 60m | Added with MultiSignal support for broader event flow. |
 | `analyst_target_raise_v1` | Catalyst | FAIL (0.85) | Subscribed for observation only |
 | `intraday_momentum_v1` | Technical | FAIL | Reference signal, Phase 12 |
 | `whale_tail_v1` | Technical | FAIL (0.754) | Best technical signal candidate for v3 retrofit |
