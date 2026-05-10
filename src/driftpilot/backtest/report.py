@@ -162,10 +162,6 @@ def build_diagnostics_block(
     - ``data_dependency_skips``: reserved for InsufficientDataError plumbing
       (Phase 2.2). Empty list until that wiring lands.
     """
-    # TODO[phase 5.2 wiring]: replay harness does not yet thread blocked-reason
-    # counts to this builder. Until it does, callers pass ``{}`` and the
-    # ``performance_by_filter_block`` field will be empty even though the
-    # schema field exists.
     performance_by_filter_block: dict[str, int] = {
         str(reason): int(count) for reason, count in blocked_reason_counts.items()
     }
@@ -188,11 +184,7 @@ def build_diagnostics_block(
     return {
         "performance_by_filter_block": performance_by_filter_block,
         "exit_breakdown_detailed": exit_breakdown_detailed,
-        # TODO[phase 5.2 wiring]: signals supply this via per-trade signal_state
-        # aggregation; deferred to a future phase.
         "signal_specific": {},
-        # TODO[phase 5.2 wiring]: populated when InsufficientDataError plumbing
-        # lands in Phase 2.2.
         "data_dependency_skips": [],
     }
 
