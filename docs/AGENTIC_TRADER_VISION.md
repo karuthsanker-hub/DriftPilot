@@ -332,13 +332,125 @@ Or denied:
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
+### Where the Quant Algos Live — The Critical Integration
+
+The signal algorithms (`earnings_report_v1`, `filing_8a_v1`, `whale_tail`, etc.) are NOT decorative. They are the **primary decision-makers**. The LLM agents are the override layer.
+
+```
+CATALYST ARRIVES
+       │
+       ▼
+┌──────────────────────────────────────────────────────────┐
+│  SCANNER AGENT                                           │
+│                                                          │
+│  Step 1: RuleBasedRouter.route(event)                    │  ← DETERMINISTIC
+│           → "ROUTE to earnings_report_v1, conviction 0.85"│
+│                                                          │
+│  Step 2: earnings_report_v1.scan(symbol, event)          │  ← ALGORITHM RUNS
+│           → Candidate(score=0.14, allowed=True,          │
+│              features={eps_beat: 6.5%, age: 3min...})    │
+│                                                          │
+│  Step 3: LLM evaluates the algo's output + context       │  ← NON-DETERMINISTIC
+│           "Algo says yes with score 0.14. Context shows  │    (OVERRIDE LAYER)
+│            6.5% beat, small-cap, hot sector. I agree —   │
+│            but suggest 1.5% target instead of default 1%"│
+│                                                          │
+│  Step 4: Pitch PM with BOTH algo recommendation and      │
+│           LLM opinion                                    │
+└──────────────────────────────────────────────────────────┘
+
+PM ASSIGNS STOCK TO SLOT
+       │
+       ▼
+┌──────────────────────────────────────────────────────────┐
+│  SLOT AGENT (every 30 seconds)                           │
+│                                                          │
+│  Step 1: signal.evaluate_exit(position, now)             │  ← ALGORITHM RUNS
+│           → ExitDecision(should_exit=False) or           │
+│           → ExitDecision(should_exit=True,               │
+│              reason="profit_take")                       │
+│                                                          │
+│  Step 2: IF algo says exit → EXIT (no LLM needed)       │  ← ALGO IS AUTHORITY
+│           IF algo says hold → LLM evaluates whether      │    on its own rules
+│           to OVERRIDE                                    │
+│                                                          │
+│  Step 3: LLM reads tape context (bars, volume, spread)  │  ← NON-DETERMINISTIC
+│           "Algo says hold (not at target yet). But I see │    (OVERRIDE LAYER)
+│            momentum building — volume 3x, new highs.     │
+│            Request PM to raise target."                  │
+│           OR                                             │
+│           "Algo says hold. But stock stuck 30 min, volume│
+│            dying. Request PM to let me take partial."    │
+│                                                          │
+│  DEFAULT: If LLM is down or uncertain → FOLLOW ALGO     │
+└──────────────────────────────────────────────────────────┘
+```
+
+**The hierarchy of authority:**
+
+```
+1. MECHANICAL GUARDRAILS   (hard stop, cap, time stop)     — NEVER overridden
+2. ALGORITHM               (scan, evaluate_exit)           — DEFAULT behavior
+3. LLM AGENT               (override algo when it sees more) — REQUIRES PM APPROVAL
+```
+
+The LLM doesn't replace the algo — it **wraps** it. The algo runs first, produces its output, and the LLM decides whether to accept or override. If the LLM has no strong opinion (or is down), the algo's answer stands.
+
+**Concrete example — Slot Agent monitoring REGN:**
+
+```
+t=0:   earnings_report_v1.evaluate_exit(regn_position, now)
+       → should_exit=False (unrealized +0.4%, target is 1.0%)
+       → Algo says: HOLD
+
+       LLM sees: bars trending up, volume 2.5x, sector green
+       → LLM agrees: HOLD (no override needed)
+
+t=30s: earnings_report_v1.evaluate_exit(regn_position, now)
+       → should_exit=False (unrealized +0.9%, target is 1.0%)
+       → Algo says: HOLD (not at target yet)
+
+       LLM sees: volume just spiked to 4x, making new highs, bid wall moving up
+       → LLM DISAGREES: "This is running. I want to RAISE_TARGET to 2%."
+       → Sends request to PM
+
+t=60s: earnings_report_v1.evaluate_exit(regn_position, now)
+       → should_exit=True (unrealized +1.0%, reason="profit_take")
+       → Algo says: EXIT at 1%
+
+       But PM already approved raise to 2%, so algo's 1% target is overridden.
+       Trailing stop set at +0.7%.
+       → LLM says: HOLD (following the raised target now)
+
+t=90s: unrealized +1.9%, momentum fading
+       LLM says: TAKE_PROFIT (below the 2% target, but reasoning is sound)
+       → This is a TAKE at the slot agent's discretion (above original 1% target)
+```
+
+**Which agent uses which algo:**
+
+| Agent | Algo used | How |
+|---|---|---|
+| **Scanner** | `RuleBasedRouter.route(event)` | Determines which algo to consult |
+| **Scanner** | `signal.scan(now)` | Runs the algo's candidate filtering — is this stock tradeable? |
+| **Slot Agent** | `signal.evaluate_exit(position, now)` | Runs the algo's exit logic every 30s — the DEFAULT |
+| **PM** | None directly | PM doesn't run algos — it makes portfolio-level decisions on top of algo + LLM outputs |
+
+**The algo is the baseline. The LLM is the alpha on top.**
+
+If we turned off all LLM agents, the system would revert to exactly what we have today: router → signal → mechanical entry/exit. The agents add:
+- Smarter target expansion (algo doesn't do this)
+- Early profit-taking when stuck (algo waits for time stop)
+- Skipping weak catalysts the algo would accept
+- Direct entries for obvious setups the algo isn't designed for
+
 ### Who Does What — Clear Responsibilities
 
-| Agent | Singleton? | Loop interval | Decisions | Cannot do |
-|---|---|---|---|---|
-| **PM** | Yes, 1 instance | 30 seconds | Approve entries, approve raises, force exits, assign slots, adapt session params | Execute orders directly (delegates to slot agents) |
-| **Scanner** | Yes, 1 instance | Event-driven (on each catalyst) | Evaluate catalyst, pitch PM, recommend algo vs direct | Buy or sell anything. Can only request. |
-| **Slot Agent** | 10 instances | 30 seconds (when active) | HOLD, TAKE_PROFIT, RAISE request, CUT_EARLY request | Raise own target without PM approval. Enter new positions. |
+| Agent | Singleton? | Loop interval | Algo it runs | LLM decisions | Cannot do |
+|---|---|---|---|---|---|
+| **PM** | Yes, 1 instance | 30 seconds | None | Approve entries, approve raises, force exits, assign slots, adapt session params | Execute orders directly (delegates to slot agents) |
+| **Scanner** | Yes, 1 instance | Event-driven (on each catalyst) | `Router.route()` + `signal.scan()` | Override algo recommendation (skip what algo accepts, accept what algo skips) | Buy or sell anything. Can only request. |
+| **Slot Agent** | 10 instances | 30 seconds (when active) | `signal.evaluate_exit()` | Override algo hold (request raise, request cut), but FOLLOWS algo exit | Raise own target without PM approval. Enter new positions. |
 
 ### The PM is the Single Point of Control
 
