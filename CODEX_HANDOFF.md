@@ -1,15 +1,15 @@
 # Codex Handoff — DriftPilot Project State
 
 **Date:** 2026-05-11  
-**Branch:** `main` at `f03c342` (`origin/main` is `4f8ba49`; local branch ahead 11 commits)  
-**Latest commits:** `f03c342` Wave 3 Orchestrator; `f31bb38` Wave 2 PM/Scanner/Slot agents; `ebc5777` Wave 1 MessageBus/Guardrails/LLM/Prompts; `5b6d4cb` agentic requirements; `b7fc306` algo integration  
+**Branch:** `main` at `3c454a8` (`origin/main` is `4f8ba49`; local branch ahead 14 commits)  
+**Latest commits:** `3c454a8` operator wiring; `d4809f7` Wave 4 dashboard/exporter; `b549008` handoff update; `f03c342` Wave 3 Orchestrator; `f31bb38` Wave 2  
 **Paper trading:** Day 2 complete; Day 3 is the first clean session with all bug fixes baked in
 
 ## Current Snapshot
 
 - **Working tree at last instruction update:** Qwen v2 phases A/C/D/E implemented but not committed; runtime artifacts under `.claude/` and `logs/` remain untracked.
-- **Last known full test gate:** `PYTHONPATH=src uv run --extra test pytest -q` passed: `993 passed, 1 warning in 8.42s`.
-- **Agent layer gate:** `PYTHONPATH=src uv run --extra test pytest tests/agents/ -q` passed: `104 passed in 2.43s`. Agent ruff/mypy clean.
+- **Last known full test gate:** `PYTHONPATH=src uv run --extra test pytest -q` passed: `1025 passed, 1 warning in 8.55s`.
+- **Agent layer gate:** `PYTHONPATH=src uv run --extra test pytest tests/agents/ -q` passed: `136 passed in 2.53s`. Agent ruff/mypy clean.
 - **Qwen v2 targeted gate:** `PYTHONPATH=src uv run --extra test pytest tests/catalyst/test_context_assembler.py tests/catalyst/test_headline_parser.py tests/catalyst/test_qwen_enricher.py tests/catalyst/test_qwen_enricher_v2.py tests/catalyst/test_db_idempotent.py tests/test_dashboard_catalyst_detail.py tests/test_enrichment_pipeline_integration.py tests/backtest/test_catalyst_replay.py -q` passed: `110 passed`.
 - **Repo-wide static checks:** `uvx ruff check src/driftpilot src/trading_bot/dashboard scripts tests` passed; `PYTHONPATH=src uv run --with mypy mypy src/driftpilot src/trading_bot/dashboard` passed with two informational notes about unchecked untyped function bodies in `services_live.py`.
 - **Instruction update:** `.codex/instructions.md` now contains a cross-agent resume protocol and handoff template. Keep this file and this handoff in sync whenever context is running low.
@@ -139,22 +139,28 @@ Full implementation spec at `docs/AGENTIC_TRADER_REQUIREMENTS.md`. Vision/archit
 - Override rate limited to 20%, auto-disable if exceeded
 - Every decision logged with prompt + response + outcome for fine-tuning
 
-**Build plan:** 4 waves — **Waves 1-3 COMPLETE**, Wave 4 remaining:
+**Build plan:** 4 waves — **ALL 4 WAVES COMPLETE** + operator wiring:
 - ✅ Wave 1: Message Bus + Guardrail Engine + LLM Client + Prompt Loader (60 tests)
 - ✅ Wave 2: PM Agent + Scanner Agent + Slot Agent (28 tests)
 - ✅ Wave 3: Orchestrator + lifecycle management (16 tests)
-- ❌ Wave 4: Dashboard integration + training data exporter (not started)
+- ✅ Wave 4: Dashboard views + training data exporter (27 tests)
+- ✅ Operator wiring: factory + settings + operator boot/stop (5 tests)
 
-**2026-05-11 progress:** Waves 1-3 committed:
-- `ebc5777`: models.py (12 message types), message_bus.py (SQLite A2A), guardrail_validator.py, llm_client.py (dual Qwen+Claude), prompt_loader.py (YAML hot-reload), 4 prompt YAMLs, migration 006
-- `f31bb38`: pm_agent.py (entry/raise/cut/partial approval, force-exit, override rate), scanner_agent.py (candidate eval, algo-first), slot_agent.py (algo exit authoritative, LLM on HOLD only)
-- `f03c342`: orchestrator.py (lifecycle, tick delegation, daily reset, prompt hot-reload)
-- Agent is disabled by default (`agent_enabled=False`). Wire into operator by calling `tick_pm`/`tick_scanner`/`tick_slot` in the loop.
+**Commits:**
+- `ebc5777`: Wave 1 — models.py, message_bus.py, guardrail_validator.py, llm_client.py, prompt_loader.py, 4 YAML prompts, migration 006
+- `f31bb38`: Wave 2 — pm_agent.py, scanner_agent.py, slot_agent.py
+- `f03c342`: Wave 3 — orchestrator.py
+- `d4809f7`: Wave 4 — training_exporter.py, agent_views.py, agents.html, app.py endpoints, settings.py AGENT_* vars
+- `3c454a8`: Operator wiring — factory.py, operator.py start/stop, test_factory.py
+
+**Test counts:** 136 agent tests across 10 test files. 1025 project total. All gates pass.
+- Agent is disabled by default (`AGENT_ENABLED=false`). Set to true + configure AGENT_QWEN_URL to activate.
+- Dashboard at `/agents` shows live agent states, override rate gauge, decision feed, message bus activity.
+- Training data export via `TrainingExporter(db_path).export_jsonl(output)` with filters.
 
 **Remaining work:**
-- Wave 4: Dashboard agent views + training data exporter
-- Operator wiring: add agent_* settings to DriftPilotSettings, create OrchestratorConfig from settings, call orchestrator.start() in operator boot
 - Integration test: replay a day with agents enabled vs disabled, compare edge ratio
+- Wire `tick_pm`/`tick_scanner`/`tick_slot` into state machine scan/monitor cycles (orchestrator starts/stops but ticks are not yet called from the state machine loop)
 
 ### 4. V3 retrofit backtests (technical signals on catalyst-filtered universe)
 
