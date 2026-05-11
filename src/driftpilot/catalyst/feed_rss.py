@@ -66,7 +66,7 @@ class RssNewsFeed:
     def _parse(self, url: str):
         if self._parser is not None:
             return self._parser(url)
-        import feedparser
+        import feedparser  # type: ignore[import-untyped]
         return feedparser.parse(url)
 
     async def run(self) -> None:

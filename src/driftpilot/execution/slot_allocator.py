@@ -270,8 +270,11 @@ class SlotAllocator:
         from datetime import datetime, timezone
         today_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         counts: dict[str, int] = {}
+        connection = getattr(self.repository, "connection", None)
+        if connection is None:
+            return counts
         try:
-            cur = self.repository.connection.execute(
+            cur = connection.execute(
                 "SELECT symbol, COUNT(*) FROM positions "
                 "WHERE opened_at >= ? GROUP BY symbol",
                 (today_iso,),
@@ -281,7 +284,8 @@ class SlotAllocator:
                 if sym:
                     counts[sym] = int(row[1] or 0)
         except Exception:
-            pass  # best-effort — fall back to active-only check
+            # Best-effort fallback: allocator still has the active-slot duplicate gate.
+            return counts
         return counts
 
     def _persist_allocator_state(self, status: str, timestamp: datetime, metadata: dict[str, Any]) -> None:

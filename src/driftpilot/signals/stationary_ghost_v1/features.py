@@ -6,7 +6,6 @@ via the canonical `MinuteBar` (which calls `require_aware`).
 
 from __future__ import annotations
 
-import math
 from statistics import fmean, pstdev
 
 from driftpilot.signals.features import MinuteBar

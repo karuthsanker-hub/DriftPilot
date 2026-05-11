@@ -177,7 +177,7 @@ async def test_target_cut_event_propagates_through_bus_to_state_machine(tmp_path
     """Publish target_cut to the bus → handler fires → state machine prepares
     EMERGENCY_FLUSH (we test the handler return rather than full state
     transition since that requires ScannerService etc.)."""
-    from driftpilot.state_machine import DriftPilotStateMachine, OperatorState
+    from driftpilot.state_machine import DriftPilotStateMachine
     from driftpilot.storage.repositories import DriftPilotRepository
     from driftpilot.clock import DriftPilotClock
 

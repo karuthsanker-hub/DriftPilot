@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -76,7 +76,6 @@ def test_opening_range_high_no_window_bars_raises():
 
 
 def test_rs_score_pure_relative_strength():
-    session_date = date(2024, 6, 5)
     # Stock: 09:30 open 100, 09:59 close 101.5 → +1.5%
     stock_bars = [
         _bar("ABC", datetime(2024, 6, 5, 9, 30, tzinfo=ET), open_=100.0),

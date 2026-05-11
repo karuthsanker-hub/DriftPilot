@@ -32,9 +32,6 @@ from driftpilot.execution.slot_allocator import (
 from driftpilot.market_data.rest_quotes import AlpacaRestQuoteProvider
 from driftpilot.settings import DriftPilotSettings
 from driftpilot.signals import get_signal
-from driftpilot.signals.earnings_report_v1 import (
-    EarningsReportSignal,
-)
 from driftpilot.storage.repositories import DriftPilotRepository
 
 logger = logging.getLogger(__name__)
@@ -250,8 +247,8 @@ class CatalystScannerService:
 
     def __init__(
         self,
-        signal: EarningsReportSignal,
-        quote_provider: AlpacaRestQuoteProvider,
+        signal: Any,
+        quote_provider: Any,
         clock: DriftPilotClock,
         universe_path: str | None = None,
         runtime_config_path: str | None = None,
@@ -418,6 +415,10 @@ class CatalystScannerService:
         """
         from driftpilot.signal_router import RoutingAction
 
+        router = self._router
+        if router is None:
+            return candidates
+
         routed: list[AllocationCandidate] = []
         for ac in candidates:
             # Build a lightweight event-like object from candidate metadata
@@ -434,7 +435,7 @@ class CatalystScannerService:
                 continue
 
             try:
-                decisions = self._router.route(evt, time_et=now)
+                decisions = router.route(evt, time_et=now)
             except Exception as exc:
                 logger.warning("router failed for %s: %s — passing through", ac.symbol, exc)
                 routed.append(ac)
@@ -506,6 +507,12 @@ class LiveAlpacaAllocator:
             # Catalyst-event audit fields — passed through from the candidate
             # so we can post-hoc join trade rows back to the triggering event.
             cat_event_ts = candidate.metadata.get("catalyst_event_ts")
+            if isinstance(cat_event_ts, datetime):
+                cat_event_ts_value = cat_event_ts.isoformat()
+            elif isinstance(cat_event_ts, str):
+                cat_event_ts_value = cat_event_ts
+            else:
+                cat_event_ts_value = None
             cat_headline = (candidate.metadata.get("headline") or "")[:200]
             cat_headline_hash = candidate.metadata.get("headline_hash")
             cat_sentiment = candidate.metadata.get("sentiment")
@@ -604,9 +611,7 @@ class LiveAlpacaAllocator:
                     "entry_price": entry_price,
                     "source": "live_alpaca_paper",
                     # Catalyst event chain — for forensic analysis
-                    "catalyst_event_ts": (
-                        cat_event_ts.isoformat() if hasattr(cat_event_ts, "isoformat") else cat_event_ts
-                    ),
+                    "catalyst_event_ts": cat_event_ts_value,
                     "catalyst_headline_hash": cat_headline_hash,
                     "catalyst_sentiment": cat_sentiment,
                     "catalyst_headline": cat_headline,
@@ -827,9 +832,13 @@ class LiveAlpacaPositionMonitor:
             except Exception:
                 position_metadata = {}
             position_id = getattr(position, "id", None)
-            prev_peak = self._peak_by_position_id.get(position_id, unrealized_pct)
+            prev_peak = (
+                self._peak_by_position_id.get(position_id, unrealized_pct)
+                if isinstance(position_id, int)
+                else unrealized_pct
+            )
             new_peak = max(prev_peak, unrealized_pct)
-            if position_id is not None:
+            if isinstance(position_id, int):
                 self._peak_by_position_id[position_id] = new_peak
             position_metadata["current_price"] = mid
             position_metadata["peak_unrealized_pct"] = new_peak
@@ -932,7 +941,9 @@ class LiveAlpacaPositionMonitor:
                     except Exception as slot_exc:
                         logger.warning("LIVE: slot %s free failed: %s", slot_id, slot_exc)
                 # Clean up in-memory peak tracker
-                self._peak_by_position_id.pop(getattr(position, "id", None), None)
+                close_position_id = getattr(position, "id", None)
+                if isinstance(close_position_id, int):
+                    self._peak_by_position_id.pop(close_position_id, None)
                 logger.info(
                     "LIVE: position closed symbol=%s broker_order_id=%s reason=%s realized=$%.2f path=%s slot=%s peak=%.3f%% freed",
                     symbol, broker_oid, exit_reason, realized, close_reason_label, slot_id, new_peak,

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from driftpilot.settings import DriftPilotSettings
 from driftpilot.storage.repositories import DriftPilotRepository
@@ -372,8 +372,8 @@ def _live_alpaca_equity(settings: DriftPilotSettings) -> dict[str, Any] | None:
             settings.alpaca_key_id, settings.alpaca_secret_key,
             paper=settings.mode != "live",
         )
-        acct = client.get_account()
-        positions = client.get_all_positions()
+        acct = cast(Any, client.get_account())
+        positions = cast(list[Any], client.get_all_positions())
         total_mv = sum(float(p.market_value or 0) for p in positions)
         per_sym: dict[str, dict[str, float]] = {}
         for p in positions:

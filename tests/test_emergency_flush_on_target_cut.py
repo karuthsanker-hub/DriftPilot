@@ -49,7 +49,6 @@ async def test_target_cut_event_with_open_position_transitions_to_emergency_flus
     result = await sm.on_analyst_target_cut(_make_event("AAPL"))
 
     assert result == OperatorState.EMERGENCY_FLUSH
-    state = repo.state.get()
     # Last transition is EXITING (delegated by emergency_flush), but EMERGENCY_FLUSH
     # was recorded immediately before. Verify transition log contains it.
     transitions = repo.transitions.list_latest(limit=5)

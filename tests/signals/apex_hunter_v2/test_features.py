@@ -19,13 +19,13 @@ from driftpilot.signals.features import MinuteBar
 ET = ZoneInfo("America/New_York")
 
 
-def _bar(ts: datetime, *, o: float, h: float, l: float, c: float, v: float = 1000.0) -> MinuteBar:
-    return MinuteBar(symbol="X", timestamp=ts, open=o, high=h, low=l, close=c, volume=v)
+def _bar(ts: datetime, *, o: float, h: float, low: float, c: float, v: float = 1000.0) -> MinuteBar:
+    return MinuteBar(symbol="X", timestamp=ts, open=o, high=h, low=low, close=c, volume=v)
 
 
 def test_atr_flat_bars_is_zero():
     start = datetime(2024, 6, 5, 10, 0, tzinfo=ET)
-    bars = [_bar(start + timedelta(minutes=i), o=100, h=100, l=100, c=100) for i in range(20)]
+    bars = [_bar(start + timedelta(minutes=i), o=100, h=100, low=100, c=100) for i in range(20)]
     assert atr(bars, period=14) == 0.0
 
 
@@ -34,18 +34,18 @@ def test_atr_constant_true_range():
     start = datetime(2024, 6, 5, 10, 0, tzinfo=ET)
     bars: list[MinuteBar] = []
     prev_close = 100.0
-    bars.append(_bar(start, o=prev_close, h=prev_close + 0.5, l=prev_close - 0.5, c=prev_close))
+    bars.append(_bar(start, o=prev_close, h=prev_close + 0.5, low=prev_close - 0.5, c=prev_close))
     for i in range(1, 16):
         ts = start + timedelta(minutes=i)
         # close == prev_close, range = 1.0 → TR = 1.0
-        bars.append(_bar(ts, o=prev_close, h=prev_close + 0.5, l=prev_close - 0.5, c=prev_close))
+        bars.append(_bar(ts, o=prev_close, h=prev_close + 0.5, low=prev_close - 0.5, c=prev_close))
     a = atr(bars, period=14)
     assert a == pytest.approx(1.0, abs=1e-9)
 
 
 def test_atr_insufficient_history_raises():
     start = datetime(2024, 6, 5, 10, 0, tzinfo=ET)
-    bars = [_bar(start + timedelta(minutes=i), o=100, h=100.5, l=99.5, c=100) for i in range(5)]
+    bars = [_bar(start + timedelta(minutes=i), o=100, h=100.5, low=99.5, c=100) for i in range(5)]
     with pytest.raises(ValueError):
         atr(bars, period=14)
 

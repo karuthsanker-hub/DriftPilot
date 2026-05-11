@@ -6,10 +6,9 @@ import math
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-import pytest
 
 from driftpilot.signals import get_signal, list_signals
-from driftpilot.signals.base import Candidate, SignalProtocol
+from driftpilot.signals.base import SignalProtocol
 from driftpilot.signals.features import MinuteBar
 from driftpilot.signals.stationary_ghost_v1 import (
     SIGNAL_NAME,
@@ -22,8 +21,8 @@ from driftpilot.states import BlockedReason
 ET = ZoneInfo("America/New_York")
 
 
-def _bar(symbol: str, ts: datetime, o: float, h: float, l: float, c: float, v: float = 1000.0) -> MinuteBar:
-    return MinuteBar(symbol=symbol, timestamp=ts, open=o, high=h, low=l, close=c, volume=v)
+def _bar(symbol: str, ts: datetime, o: float, h: float, low: float, c: float, v: float = 1000.0) -> MinuteBar:
+    return MinuteBar(symbol=symbol, timestamp=ts, open=o, high=h, low=low, close=c, volume=v)
 
 
 def _spy_bars(latest_minute: datetime, n: int = 60) -> list[MinuteBar]:
@@ -189,7 +188,7 @@ def test_scan_blocks_high_adx():
         prev = price
         nxt = prev * 1.005
         bars.append(_bar("TREND", start + timedelta(minutes=i),
-                         o=prev, h=nxt, l=prev, c=nxt, v=1000.0))
+                         o=prev, h=nxt, low=prev, c=nxt, v=1000.0))
         price = nxt
     sig = StationaryGhostV1Signal()
     _, cands = sig.scan({"TREND": bars}, {}, _spy_bars(end))

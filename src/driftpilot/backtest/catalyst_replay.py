@@ -22,12 +22,12 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable
 
-import pandas as pd
+import pandas as pd  # type: ignore[import-untyped]
 
 from driftpilot.backtest.replay import BacktestTrade, ReplayResult
 from driftpilot.catalyst.event import CatalystEvent

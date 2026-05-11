@@ -25,10 +25,10 @@ from driftpilot.signals.stationary_ghost_v1.features import adx
 ET = ZoneInfo("America/New_York")
 
 
-def _bar(ts: datetime, o: float, h: float, l: float, c: float) -> MinuteBar:
+def _bar(ts: datetime, o: float, h: float, low: float, c: float) -> MinuteBar:
     return MinuteBar(
         symbol="TEST", timestamp=ts,
-        open=o, high=h, low=l, close=c, volume=1000.0,
+        open=o, high=h, low=low, close=c, volume=1000.0,
     )
 
 
@@ -54,7 +54,7 @@ def _trending_bars(n: int, start_price: float = 100.0, pct_per_bar: float = 0.00
             start + timedelta(minutes=i),
             o=prev_close,
             h=next_close,
-            l=prev_close,
+            low=prev_close,
             c=next_close,
         ))
         price = next_close

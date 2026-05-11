@@ -10,9 +10,9 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
-import os
 from datetime import datetime
 from pathlib import Path
+from typing import Any, Awaitable, Callable
 
 from driftpilot.clock import DriftPilotClock
 from driftpilot.services import (
@@ -64,7 +64,7 @@ def _build_catalyst_layer(settings: DriftPilotSettings):
         lookback_minutes=settings.catalyst_universe_lookback_minutes,
     )
 
-    feeds: list[tuple[str, callable]] = []
+    feeds: list[tuple[str, Callable[[], Awaitable[None]]]] = []
 
     if settings.alpaca_key_id and settings.alpaca_secret_key:
         from driftpilot.catalyst.feed_alpaca import AlpacaNewsFeed
@@ -188,6 +188,10 @@ async def _run(once: bool, mock_stream: bool, env_file: str, paper_live: bool = 
                 "the only ones wired for live order submission today)"
             )
 
+        scanner: Any
+        broker_for_machine: Any
+        allocator_service: Any
+        monitor_service: Any
         broker, allocator_service, monitor_service = build_live_components(
             repository, settings, clock=clock, catalyst_db_path=catalyst_db_path,
         )
@@ -257,7 +261,7 @@ async def _run(once: bool, mock_stream: bool, env_file: str, paper_live: bool = 
                 catalyst_bus,
             )
 
-        sub_signals = [_build_signal(n) for n in signal_names]
+        sub_signals: list[Any] = [_build_signal(n) for n in signal_names]
         if len(sub_signals) > 1:
             live_signal = MultiSignal(sub_signals)
             logger.info("MULTI-SIGNAL active: %s", ", ".join(signal_names))

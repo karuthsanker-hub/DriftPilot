@@ -52,6 +52,9 @@ class CatalystUniverseFilter:
             return symbols
 
     def _query_and_rank(self, symbols: list[str], cutoff: str) -> list[str]:
+        db_path = self._db_path
+        if db_path is None:
+            return symbols
         symbol_set = set(symbols)
         rows: list[tuple[str, str, str, str]] = []
         for chunk in _chunks(symbols, 500):
@@ -62,7 +65,7 @@ class CatalystUniverseFilter:
                 f"WHERE symbol IN ({placeholders}) AND event_ts >= ? "
                 f"ORDER BY event_ts DESC"
             )
-            conn = sqlite3.connect(self._db_path)
+            conn = sqlite3.connect(db_path)
             try:
                 cur = conn.execute(query, (*chunk, cutoff))
                 rows.extend(cur.fetchall())

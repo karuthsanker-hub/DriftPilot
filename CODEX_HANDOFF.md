@@ -1,15 +1,16 @@
 # Codex Handoff — DriftPilot Project State
 
-**Date:** 2026-05-06  
-**Branch:** `main` at `40ff129` (`origin/main`)  
-**Latest commits:** `40ff129` daily cron scripts; `598b8ca` MultiSignal + `filing_8a_v1` + enrichment persistence + dashboard ticker/admin upgrades  
+**Date:** 2026-05-11  
+**Branch:** `main` at `6297a85` (`origin/main` is `4f8ba49`; local branch ahead 2 commits)  
+**Latest commits:** `6297a85` Qwen directional-prediction re-enrichment backtest; `0d8de52` Phase 1 RuleBasedRouter  
 **Paper trading:** Day 2 complete; Day 3 is the first clean session with all bug fixes baked in
 
 ## Current Snapshot
 
-- **Working tree at last instruction update:** clean except local untracked runtime artifacts may appear under `.claude/` and `logs/`.
-- **Last known full test gate:** Claude was running/fixing the full suite before this handoff update; re-run `PYTHONPATH=src uv run --extra test pytest -q` before any code commit.
-- **Static checks:** re-run `uvx ruff check src/driftpilot src/trading_bot/dashboard tests` and `PYTHONPATH=src uv run --with mypy mypy src/driftpilot src/trading_bot/dashboard` before committing code.
+- **Working tree at last instruction update:** `CODEX_HANDOFF.md` modified; Qwen v2 parser files untracked; repo-wide ruff/mypy cleanup touched multiple source/test files; untracked docs include `docs/QWEN_ENRICHMENT_V2.md` and `docs/AGENTIC_TRADER_VISION.md`; runtime artifacts under `.claude/` and `logs/`.
+- **Last known full test gate:** `PYTHONPATH=src uv run --extra test pytest -q` passed: `870 passed, 1 warning in 6.22s`.
+- **Qwen v2 parser gate:** `PYTHONPATH=src uv run --extra test pytest tests/catalyst/test_headline_parser.py -q` passed: `69 passed`; `uvx ruff check src/driftpilot/catalyst/headline_parser.py tests/catalyst/test_headline_parser.py` passed; `PYTHONPATH=src uv run --with mypy mypy src/driftpilot/catalyst/headline_parser.py` passed.
+- **Repo-wide static checks:** `uvx ruff check src/driftpilot src/trading_bot/dashboard tests` passed; `PYTHONPATH=src uv run --with mypy mypy src/driftpilot src/trading_bot/dashboard` passed with two informational notes about unchecked untyped function bodies in `services_live.py`.
 - **Instruction update:** `.codex/instructions.md` now contains a cross-agent resume protocol and handoff template. Keep this file and this handoff in sync whenever context is running low.
 - **Next agent first command:** `git status --short --branch && git log --oneline --decorate -5`
 
@@ -104,9 +105,27 @@ Bug #11 (bootstrap-on-enrich) is the highest priority — it means the operator 
 
 After bug fixes, the system needs 2-3 weeks of clean paper trading data to validate the earnings_report_v1 signal in production. The backtest showed edge_ratio=1.105 over 185 trades (Jul-Dec 2024). Paper trading validates this on live data.
 
-### 3. Portfolio controller layer (DEFERRED — needs paper evidence)
+### 3. Qwen Enrichment v2 — Pre-enrichment context pipeline (READY TO BUILD)
 
-Design doc exists at `docs/PORTFOLIO_CONTROLLER_DESIGN.md`. This is the "fund manager" layer above the slots — score candidates, allocate, override exits, halt. Two implementations planned: rule-based (deterministic) and LLM-driven (Qwen). **Do not build until 2-3 weeks of paper trading data exists.**
+Full requirements + agent breakdown at `docs/QWEN_ENRICHMENT_V2.md`. The current Qwen prompt produces a 3-bucket classifier (98% of positives get the same +0.15 score). Edge ratio collapsed from 1.6 to 1.0 because marginal "positive" events dilute the signal. Fix: assemble company context (market cap, beat %, earnings history, ATR, VIX) before calling Qwen so the LLM can distinguish a $0.01 beat on a $3B company from a 6.5% beat on a biotech. Dashboard gets a catalyst detail panel showing the full enrichment context + auto-generated warning flags.
+
+**5 agents:** Headline Parser → Context Assembler → Prompt v2 + Enricher → Dashboard Detail Panel → Batch Re-enrichment + Validation. Agent 2 (parser) and Agent 4 (dashboard) can start in parallel. Full spec with test requirements, review checklist, and merge order in the doc.
+
+**2026-05-11 progress:** Headline Parser slice has been implemented but not committed yet:
+- New file: `src/driftpilot/catalyst/headline_parser.py`
+- New tests: `tests/catalyst/test_headline_parser.py`
+- Behavior: extracts EPS actual/estimate/beat %, revenue actual/estimate/beat % in millions, guidance direction (`up`, `down`, `maintained`), and mixed beat-plus-lowered-guidance signals.
+- Review agent findings addressed: documented malformed numeric suppression and added a hardcoded corpus of 32 real 2024 catalyst DB headlines plus real guidance headlines.
+- Gates: parser tests `69 passed`; full pytest `870 passed, 1 warning`; parser ruff and parser mypy clean. Repo-wide ruff/mypy still fail on unrelated existing issues listed above.
+
+### 4. Agentic Trader — LLM-driven position management (THE PRODUCT)
+
+Full vision doc at `docs/AGENTIC_TRADER_VISION.md`. This is the actual product — an LLM agent that monitors positions every 30 seconds, makes dynamic profit-taking decisions, and adapts intra-session. The 1% target is the baseline; the agent expands to 3-5% when momentum is clear, takes partial profit when stuck, and cuts early when thesis breaks. All deterministic guardrails (1.5% stop, 5% cap, 60-min time stop, daily loss limit) remain mechanically enforced — the agent cannot override risk controls.
+
+**Phase 1 (build after Enrichment v2):** Position Monitor Agent — monitors open positions, decides hold/take-profit/raise-target/cut-early. Entries still come from signal pipeline + router.
+**Phase 2:** Entry Agent — decides whether to trade new catalysts and can override router or enter directly.
+**Phase 3:** Session Adaptation — adjusts default targets based on intra-day performance.
+**Phase 4:** Dynamic Strategy Generation — identifies patterns, writes filter code, self-improves.
 
 ### 4. V3 retrofit backtests (technical signals on catalyst-filtered universe)
 
@@ -141,8 +160,8 @@ run comma-separated catalyst signals in parallel, e.g.
 
 | Signal | Type | Verdict | Notes |
 |--------|------|---------|-------|
-| `earnings_report_v1` | Catalyst | **GATED** (1.105) | Active paper trading signal. Positive sentiment gate required. |
-| `filing_8a_v1` | Catalyst | validation cell 2.05x abs-move at 60m | Added with MultiSignal support for broader event flow. |
+| `earnings_report_v1` | Catalyst | **GATED** (1.137 Oct-Nov, 1.007 Jul-Dec) | Edge collapsed after Qwen re-enrichment. Needs v2 prompt with context. |
+| `filing_8a_v1` | Catalyst | **FAIL** (0.816 positive, 0.812 unfiltered) | No edge with current enrichment. Needs v2 context pipeline. |
 | `analyst_target_raise_v1` | Catalyst | FAIL (0.85) | Subscribed for observation only |
 | `intraday_momentum_v1` | Technical | FAIL | Reference signal, Phase 12 |
 | `whale_tail_v1` | Technical | FAIL (0.754) | Best technical signal candidate for v3 retrofit |
@@ -257,7 +276,9 @@ python scripts/enrich_catalyst_events.py --priority-only --concurrency 32
 | `reports/PAPER_DAY_2026-05-05.md` | Understanding Day 2 bugs | CURRENT |
 | `docs/ARCHITECTURE.md` | Deep runtime detail | CURRENT |
 | `docs/OPERATIONS.md` | Running services locally | CURRENT |
-| `docs/PORTFOLIO_CONTROLLER_DESIGN.md` | Portfolio controller (DEFERRED) | DESIGN-ONLY |
+| `docs/QWEN_ENRICHMENT_V2.md` | Enrichment v2 context pipeline + agents | CURRENT |
+| `docs/AGENTIC_TRADER_VISION.md` | LLM trading agent — the product vision | CURRENT |
+| `docs/PORTFOLIO_CONTROLLER_DESIGN.md` | Portfolio controller (superseded by Agentic Trader) | SUPERSEDED |
 
 ---
 

@@ -6,7 +6,7 @@ from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 from driftpilot.signals import get_signal, list_signals
-from driftpilot.signals.base import Candidate, SignalProtocol
+from driftpilot.signals.base import SignalProtocol
 from driftpilot.signals.features import MinuteBar
 from driftpilot.signals.rs_drift_v1 import (
     SIGNAL_NAME,
@@ -107,7 +107,6 @@ def test_scan_emits_allowed_candidate_when_all_filters_pass():
 
 
 def test_scan_blocks_outside_window_before_10am():
-    session_date = date(2024, 6, 5)
     # Inline bars from 09:30 to 09:55 only — strictly before the 10:00 scan window.
     stock_bars: list[MinuteBar] = []
     or_start = datetime(2024, 6, 5, 9, 30, tzinfo=ET)

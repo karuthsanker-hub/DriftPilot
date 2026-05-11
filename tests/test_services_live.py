@@ -128,7 +128,7 @@ async def test_live_allocator_skips_when_broker_rejects(settings, repo):
         latest_bar_at=datetime.now(timezone.utc),
         metadata={"reference_price": 200.0},
     )]
-    result = await allocator.allocate(candidates)
+    await allocator.allocate(candidates)
 
     fake_broker.submit_entry_order.assert_awaited_once()
     # No position should have been created since broker rejected
@@ -304,7 +304,7 @@ async def test_live_monitor_calls_signal_evaluate_exit(settings, repo, monkeypat
 
     # Create one open position (slot must exist for FK)
     repo.slots.upsert(1, status="OPEN", symbol="AAPL", slot_value=1000, updated_at=datetime.now(timezone.utc))
-    pos = repo.positions.create_open(
+    repo.positions.create_open(
         symbol="AAPL", quantity=5, entry_price=200.0,
         target_price=202.0, stop_price=197.0, slot_id=1,
         opened_at=datetime.now(timezone.utc),

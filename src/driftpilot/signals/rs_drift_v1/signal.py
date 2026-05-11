@@ -10,7 +10,7 @@ Per locked spec strategy_rs_drift_v1.md:
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from datetime import time
 from typing import Any
 from zoneinfo import ZoneInfo

@@ -8,6 +8,7 @@ from driftpilot.signals.earnings_report_v1.exits import (
     profit_take,
     stop_loss,
     time_stop,
+    trailing_stop,
 )
 
 
@@ -71,11 +72,6 @@ def test_no_exit_when_nothing_triggers() -> None:
     fired, reason = evaluate_all(NOW, entry, 0.2, CFG)
     assert fired is False
     assert reason == ""
-
-
-# ---- 2026-05-05 trailing stop tests ----
-
-from driftpilot.signals.earnings_report_v1.exits import trailing_stop
 
 
 def test_trailing_stop_inactive_below_activation():

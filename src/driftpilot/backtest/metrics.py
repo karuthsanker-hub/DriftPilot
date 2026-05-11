@@ -193,19 +193,6 @@ def _daily_pnl(trades: list[BacktestTrade]) -> dict[date, float]:
     return dict(pnl_by_day)
 
 
-def _monthly_returns(daily_pnl: dict[date, float], starting_capital: float) -> dict[str, float]:
-    equity = starting_capital
-    returns: dict[str, float] = {}
-    monthly_pnl: dict[str, float] = defaultdict(float)
-    for day, pnl in sorted(daily_pnl.items()):
-        month = day.strftime("%Y-%m")
-        monthly_pnl[month] += pnl
-    for month, pnl in sorted(monthly_pnl.items()):
-        returns[month] = pnl / equity if equity else 0.0
-        equity += pnl
-    return returns
-
-
 def _sharpe(daily_returns_or_pnl: list[float]) -> float:
     if len(daily_returns_or_pnl) < 2:
         return 0.0

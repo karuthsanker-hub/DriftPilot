@@ -1,6 +1,4 @@
 from __future__ import annotations
-import asyncio
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -11,7 +9,7 @@ from driftpilot.catalyst.classifier import CatalystClassifier
 from driftpilot.catalyst.db import init_catalyst_schema
 from driftpilot.catalyst.event import CatalystEvent
 from driftpilot.catalyst.event_bus import CatalystEventBus
-from driftpilot.catalyst.feed_alpaca import AlpacaNewsFeed, DEFAULT_HORIZON_BY_CATEGORY
+from driftpilot.catalyst.feed_alpaca import AlpacaNewsFeed
 from driftpilot.catalyst.qwen_enricher import EnrichmentResult, QwenEnricher
 
 
@@ -64,7 +62,7 @@ async def test_poll_publishes_events(db_path):
 
     articles = [
         _article(["AAPL"], "Apple beats earnings expectations"),
-        _article(["MSFT"], "Goldman raises MSFT price target to 500"),
+        _article(["MSFT"], "Goldman raises price target on MSFT to 500"),
         _article(["NVDA"], "NVIDIA launches new GPU lineup"),
     ]
     feed = AlpacaNewsFeed(

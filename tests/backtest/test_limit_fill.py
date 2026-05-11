@@ -13,7 +13,6 @@ from datetime import datetime, timedelta, timezone
 
 from driftpilot.backtest.limit_fill import (
     LimitOrder,
-    LimitFillResult,
     attempt_limit_fill,
 )
 from driftpilot.signals.features import MinuteBar

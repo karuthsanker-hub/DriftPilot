@@ -87,7 +87,7 @@ TAXONOMY_RULES: tuple[CategoryRule, ...] = (
     CategoryRule("filing", "10k",            ("10-k", "annual report filed")),
     CategoryRule("filing", "10q",            ("10-q", "quarterly report filed")),
     CategoryRule("filing", "13d",            ("13d", "13-d", "13g")),
-    CategoryRule("filing", "8a",             ("8-a")),
+    CategoryRule("filing", "8a",             ("8-a",)),
 )
 
 

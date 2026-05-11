@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timedelta, timezone
 
-import pytest
 
 from driftpilot.catalyst.event import CatalystEvent
 from driftpilot.catalyst.event_bus import CatalystEventBus

@@ -21,15 +21,14 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
-import signal as _signal
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Awaitable, Callable
 
 from driftpilot.catalyst.classifier import CatalystClassifier
-from driftpilot.catalyst.db import init_catalyst_schema, insert_event
+from driftpilot.catalyst.db import init_catalyst_schema
 from driftpilot.catalyst.discovery_service import DiscoveryService
-from driftpilot.catalyst.event import CatalystEvent
 from driftpilot.catalyst.event_bus import CatalystEventBus
 from driftpilot.catalyst.feed_alpaca import AlpacaNewsFeed
 from driftpilot.catalyst.qwen_enricher import QwenEnricher
@@ -78,7 +77,7 @@ async def _print_state(signals: dict, universe_filter: CatalystUniverseFilter, n
         admitted_symbols = sorted({c.symbol for c in candidates})
 
         # Sentiment breakdown of active (subscribed) events
-        sentiments = {}
+        sentiments: dict[str, int] = {}
         for ev in active.values():
             sentiments[ev.sentiment or "unenriched"] = sentiments.get(ev.sentiment or "unenriched", 0) + 1
 
@@ -88,7 +87,6 @@ async def _print_state(signals: dict, universe_filter: CatalystUniverseFilter, n
         if admitted_symbols:
             print(f"    symbols: {', '.join(admitted_symbols[:10])}{' ...' if len(admitted_symbols) > 10 else ''}")
             for c in candidates[:5]:
-                ts = c.features.get("catalyst_event_ts")
                 age = c.features.get("event_age_minutes", 0)
                 head = (c.features.get("headline") or "")[:80]
                 sent = c.features.get("sentiment")
@@ -142,7 +140,7 @@ async def main_async(args) -> None:
         db_path=settings.catalyst_db_path,
         poll_interval_s=settings.catalyst_alpaca_poll_seconds,
     )
-    feeds = [("alpaca_news", alpaca_feed.run)]
+    feeds: list[tuple[str, Callable[[], Awaitable[None]]]] = [("alpaca_news", alpaca_feed.run)]
     discovery = DiscoveryService(feeds)
 
     # Build the two catalyst signals (the validated GATED config: positive sentiment)

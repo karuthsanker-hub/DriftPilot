@@ -25,7 +25,6 @@ from driftpilot.signals.base import (
 )
 from driftpilot.signals.features import MinuteBar, Quote
 from driftpilot.signals import DEFAULT_SIGNAL, get_signal
-from driftpilot.signals.intraday_momentum import scan_intraday_momentum
 from driftpilot.signals.regime import CAUTION_5M_RETURN_FLOOR, GREEN_5M_RETURN_FLOOR, VWAP_ATR_BREAK_MULTIPLE
 
 

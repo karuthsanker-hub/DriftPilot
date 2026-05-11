@@ -5,7 +5,6 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-import pytest
 
 from driftpilot.signals import get_signal, list_signals
 from driftpilot.signals.base import SignalProtocol

@@ -1,4 +1,3 @@
-import asyncio
 import pytest
 from datetime import datetime, timezone
 

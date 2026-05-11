@@ -6,9 +6,7 @@ deferred per KNOWN_RISKS (user owns final verification before merge).
 
 from __future__ import annotations
 
-import math
 
-import pytest
 
 from driftpilot.signals.apex_hunter_v2.features import calculate_ewmlr
 

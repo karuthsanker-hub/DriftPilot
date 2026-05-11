@@ -8,8 +8,26 @@ the same bar.
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Protocol
 
-from driftpilot.signals.earnings_report_v1.config import EarningsReportConfig
+class ExitConfig(Protocol):
+    @property
+    def max_hold_minutes(self) -> int: ...
+
+    @property
+    def profit_take_pct(self) -> float: ...
+
+    @property
+    def stop_loss_pct(self) -> float: ...
+
+    @property
+    def trailing_enabled(self) -> bool: ...
+
+    @property
+    def trailing_activation_pct(self) -> float: ...
+
+    @property
+    def trailing_distance_pct(self) -> float: ...
 
 
 def time_stop(
@@ -63,7 +81,7 @@ def evaluate_all(
     now: datetime,
     entry_ts: datetime,
     unrealized_pct: float,
-    cfg: EarningsReportConfig,
+    cfg: ExitConfig,
     peak_unrealized_pct: float = 0.0,
 ) -> tuple[bool, str]:
     """Precedence:
@@ -92,4 +110,4 @@ def evaluate_all(
     return False, ""
 
 
-__all__ = ["time_stop", "profit_take", "stop_loss", "trailing_stop", "evaluate_all"]
+__all__ = ["ExitConfig", "time_stop", "profit_take", "stop_loss", "trailing_stop", "evaluate_all"]
