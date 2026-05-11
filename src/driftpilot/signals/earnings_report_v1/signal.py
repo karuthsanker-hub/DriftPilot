@@ -148,6 +148,9 @@ class EarningsReportSignal:
                         "headline_hash": event.headline_hash,
                         "source": event.source,
                         "sentiment": event.sentiment,
+                        "priority_modifier": event.priority_modifier,
+                        "category": event.category,
+                        "subcategory": event.subcategory,
                         "catalyst_event_ts": event.ts,
                     },
                 )

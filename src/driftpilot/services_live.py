@@ -20,6 +20,7 @@ import inspect
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Any
 
 from driftpilot.broker.alpaca_client import AlpacaBrokerClient, OrderSubmissionResult
 from driftpilot.clock import DriftPilotClock
@@ -32,7 +33,6 @@ from driftpilot.market_data.rest_quotes import AlpacaRestQuoteProvider
 from driftpilot.settings import DriftPilotSettings
 from driftpilot.signals import get_signal
 from driftpilot.signals.earnings_report_v1 import (
-    EarningsReportConfig,
     EarningsReportSignal,
 )
 from driftpilot.storage.repositories import DriftPilotRepository
@@ -220,6 +220,19 @@ class MultiSignal:
             return None
 
 
+@dataclass(frozen=True)
+class _RoutingEventStub:
+    """Lightweight event stub for the signal router.
+
+    Carries just the fields the router needs — avoids importing CatalystEvent
+    into services_live.py (which would create a circular dependency risk).
+    """
+    category: str
+    subcategory: str
+    sentiment: str | None = None
+    priority_modifier: float = 0.0
+
+
 class CatalystScannerService:
     """Scanner that emits AllocationCandidates from a catalyst signal's bus.
 
@@ -242,10 +255,12 @@ class CatalystScannerService:
         clock: DriftPilotClock,
         universe_path: str | None = None,
         runtime_config_path: str | None = None,
+        router: Any | None = None,
     ) -> None:
         self.signal = signal
         self.quote_provider = quote_provider
         self.clock = clock
+        self._router = router  # Optional Phase 1 signal router
         # Hot-reload tracking — only re-read the file when its mtime changes.
         self._runtime_config_path = runtime_config_path
         self._runtime_config_mtime: float = 0.0
@@ -357,6 +372,9 @@ class CatalystScannerService:
                     "headline": features.get("headline"),
                     "headline_hash": features.get("headline_hash"),
                     "sentiment": features.get("sentiment"),
+                    "priority_modifier": features.get("priority_modifier"),
+                    "category": features.get("category"),
+                    "subcategory": features.get("subcategory"),
                     "event_age_minutes": features.get("event_age_minutes"),
                     "horizon_minutes": features.get("horizon_minutes"),
                     "source": features.get("source", "catalyst_bus"),
@@ -376,9 +394,84 @@ class CatalystScannerService:
                 (features.get("headline") or "")[:80],
             )
 
+        # Phase 1 Signal Router: annotate candidates with routing decisions.
+        # The router does NOT filter candidates yet (that's Phase 2 / PM work).
+        # It adds audit metadata so downstream code and logs show what the
+        # router would have decided.
+        if self._router is not None:
+            candidates = self._annotate_with_routing(candidates, now)
+
         if not candidates:
             logger.info("catalyst scanner: 0 candidates this cycle (no admitted events)")
         return _build_scan_result(candidates, now)
+
+    def _annotate_with_routing(
+        self,
+        candidates: list[AllocationCandidate],
+        now: datetime,
+    ) -> list[AllocationCandidate]:
+        """Run each candidate through the router, attach routing metadata.
+
+        BLOCK decisions filter out the candidate (negative catalyst gate).
+        ROUTE/DEFERRED/SKIP decisions annotate but pass through — the signal
+        already decided this candidate is valid.
+        """
+        from driftpilot.signal_router import RoutingAction
+
+        routed: list[AllocationCandidate] = []
+        for ac in candidates:
+            # Build a lightweight event-like object from candidate metadata
+            meta = ac.metadata or {}
+            evt = _RoutingEventStub(
+                category=meta.get("category", ""),
+                subcategory=meta.get("subcategory", ""),
+                sentiment=meta.get("sentiment"),
+                priority_modifier=float(meta.get("priority_modifier", 0.0) or 0.0),
+            )
+            # Skip routing if no category info (pre-router candidates)
+            if not evt.category:
+                routed.append(ac)
+                continue
+
+            try:
+                decisions = self._router.route(evt, time_et=now)
+            except Exception as exc:
+                logger.warning("router failed for %s: %s — passing through", ac.symbol, exc)
+                routed.append(ac)
+                continue
+
+            # Check for BLOCK — negative catalyst gate
+            blocks = [d for d in decisions if d.action == RoutingAction.BLOCK]
+            if blocks:
+                logger.info(
+                    "ROUTER BLOCK %s: %s (rule=%s, ttl=%dm)",
+                    ac.symbol, blocks[0].reason, blocks[0].rule_id,
+                    blocks[0].horizon_minutes,
+                )
+                continue  # drop this candidate
+
+            # Annotate with routing info
+            route_decisions = [d for d in decisions if d.action == RoutingAction.ROUTE]
+            new_meta = dict(meta)
+            if route_decisions:
+                new_meta["routed_signal"] = route_decisions[0].signal_name
+                new_meta["routing_rule_id"] = route_decisions[0].rule_id
+                new_meta["routing_conviction"] = route_decisions[0].conviction
+            new_meta["routing_decisions"] = [
+                {"action": d.action.value, "signal": d.signal_name, "rule": d.rule_id}
+                for d in decisions
+            ]
+
+            routed.append(AllocationCandidate(
+                symbol=ac.symbol,
+                score=ac.score,
+                sector=ac.sector,
+                latest_bar_at=ac.latest_bar_at,
+                rank=ac.rank,
+                metadata=new_meta,
+            ))
+
+        return routed
 
 
 class LiveAlpacaAllocator:
@@ -615,7 +708,6 @@ class LiveAlpacaPositionMonitor:
         """Insert local position records for any Alpaca positions missing
         from our DB. Uses slot data + catalyst metadata where available.
         """
-        from datetime import datetime, timezone
         import json
         try:
             alpaca_positions = await asyncio.wait_for(
