@@ -51,6 +51,24 @@ SIGNAL_CONFIGS: dict[str, dict] = {
         "max_event_age_minutes": 60,
         "verdict_gate_edge_ratio": 1.2,  # 1.42× cell
     },
+    "filing_8a_v1": {
+        "category": "filing",
+        "subcategory": "8a",
+        "max_hold_minutes": 60,
+        "profit_take_pct": 1.0,
+        "stop_loss_pct": 1.5,
+        "max_event_age_minutes": 240,
+        "verdict_gate_edge_ratio": 1.5,  # 2.05× cell (n=256)
+    },
+    "analyst_target_cut_v1": {
+        "category": "analyst",
+        "subcategory": "target_cut",
+        "max_hold_minutes": 240,
+        "profit_take_pct": 1.0,
+        "stop_loss_pct": 1.5,
+        "max_event_age_minutes": 240,
+        "verdict_gate_edge_ratio": 1.5,  # 2.91× cell
+    },
 }
 
 

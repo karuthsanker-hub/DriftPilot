@@ -1,0 +1,57 @@
+{
+  "signal": "earnings_report_v1",
+  "verdict": "FAIL",
+  "fail_reason": "edge_ratio=1.007 below universal 1.1 threshold",
+  "config": {
+    "category": "earnings",
+    "subcategory": "report",
+    "max_hold_minutes": 60,
+    "profit_take_pct": 1.0,
+    "stop_loss_pct": 1.5,
+    "max_event_age_minutes": 60,
+    "verdict_gate_edge_ratio": 1.5
+  },
+  "window": {
+    "start": "2024-07-01",
+    "end": "2024-12-31"
+  },
+  "sentiment_filter": "positive",
+  "headline_metrics": {
+    "total_trades": 224,
+    "wins": 93,
+    "losses": 131,
+    "actual_win_rate": 0.41517857142857145,
+    "breakeven_win_rate": 0.41224984568732626,
+    "realized_rr": 1.4257134610511337,
+    "avg_winner_pct": 2.2054807598181783,
+    "avg_loser_pct": -1.546931287435658,
+    "edge_ratio": 1.0071042494542655,
+    "fill_rate_pct": 1.0,
+    "total_return_pct": -0.13733172500002278,
+    "starting_capital": 10000.0,
+    "ending_capital": 9986.266827499998
+  },
+  "diagnostics": {
+    "exit_breakdown_detailed": {
+      "time_stop": {
+        "count": 76,
+        "avg_pnl_pct": -0.1017999690498364,
+        "avg_hold_mins": 15.986842105263158
+      },
+      "profit_take": {
+        "count": 80,
+        "avg_pnl_pct": 2.4763084142686775,
+        "avg_hold_mins": 10.8625
+      },
+      "stop_loss": {
+        "count": 68,
+        "avg_pnl_pct": -2.7633259335983418,
+        "avg_hold_mins": 14.323529411764707
+      }
+    },
+    "caveats": [
+      "348 events skipped: first post-event bar past max_event_age"
+    ]
+  },
+  "generated_at": "2026-05-11T00:01:41.706837+00:00"
+}
