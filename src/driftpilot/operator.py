@@ -159,6 +159,12 @@ async def _run(once: bool, mock_stream: bool, env_file: str, paper_live: bool = 
     clock = DriftPilotClock(settings.timezone)
     repository = DriftPilotRepository.open(settings.sqlite_path_obj, clock)
 
+    # Agent orchestrator — no-op when AGENT_ENABLED=false
+    from driftpilot.agents.factory import build_orchestrator
+
+    orchestrator = build_orchestrator(settings)
+    orchestrator.start()
+
     catalyst_bus, universe_filter, discovery_service = _build_catalyst_layer(settings)
     catalyst_db_path = settings.catalyst_db_path if settings.catalyst_enabled else None
 
@@ -344,6 +350,7 @@ async def _run(once: bool, mock_stream: bool, env_file: str, paper_live: bool = 
 
     if once:
         state = await machine.run_once()
+        orchestrator.stop()
         print(f"state={state.value} sqlite={settings.sqlite_path}")
         return
 
@@ -353,7 +360,10 @@ async def _run(once: bool, mock_stream: bool, env_file: str, paper_live: bool = 
     if discovery_service is not None:
         coros.append(discovery_service.start())
 
-    await asyncio.gather(*coros)
+    try:
+        await asyncio.gather(*coros)
+    finally:
+        orchestrator.stop()
 
 
 if __name__ == "__main__":
