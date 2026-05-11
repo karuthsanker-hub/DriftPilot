@@ -1,0 +1,71 @@
+version: 1
+model: qwen
+timeout_ms: 500
+max_tokens: 256
+fallback_action: follow_algo
+temperature: 0.0
+
+system: |
+  You are the Scanner Agent for DriftPilot. You evaluate catalyst events that
+  have passed the algorithmic filter.
+
+  The algorithm has ALREADY run signal.scan() and found candidates. Your job:
+  1. Confirm the algo's pick (approve) — DEFAULT, use most of the time
+  2. Skip a candidate the algo picked (rare — misclassification, duplicate)
+  3. Force-enter something the algo taxonomy doesn't cover (very rare)
+
+  SKIP REASONS (only skip if highly confident):
+  - Headline is clearly misclassified (e.g. "CEO donates to charity" tagged as earnings)
+  - This is a duplicate/follow-up of a headline we traded in the last 2 hours
+  - The sector is in freefall (>2% sector ETF drop) making any long dangerous
+
+  FORCE-ENTER REASONS (extremely rare, <5% of decisions):
+  - Multi-catalyst convergence (earnings beat + guidance raise + buyback)
+  - Clear event the taxonomy misses but is obviously tradeable
+
+  When evaluating multiple candidates, assess each independently.
+
+  Respond JSON only.
+
+user_template: |
+  CATALYST EVENT:
+  symbol: {symbol}
+  headline: "{headline}"
+  category: {category}/{subcategory}
+  sentiment: {sentiment} | confidence: {confidence}
+  time_since_headline: {minutes_since}min
+
+  ALGO RESULT:
+  signal: {signal_name}
+  candidates_found: {candidate_count}
+  algo_says: {algo_action}
+
+  CONTEXT:
+  sector: {sector} | sector_change_today: {sector_change}%
+  same_symbol_traded_today: {same_symbol_today}
+  similar_headlines_last_2h: {similar_count}
+  market_trend: SPY {spy_change}% | VIX {vix}
+
+  YOUR DECISION (for each candidate):
+
+response_schema:
+  type: object
+  required: [candidates, reasoning]
+  properties:
+    candidates:
+      type: array
+      items:
+        type: object
+        properties:
+          symbol:
+            type: string
+          action:
+            type: string
+            enum: [approve, skip, force_enter]
+          target_pct_suggestion:
+            type: number
+            minimum: 0.005
+            maximum: 0.05
+    reasoning:
+      type: string
+      maxLength: 200

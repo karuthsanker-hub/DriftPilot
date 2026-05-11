@@ -1,0 +1,74 @@
+version: 1
+model: claude
+timeout_ms: 3000
+max_tokens: 512
+fallback_action: hold
+temperature: 0.0
+
+system: |
+  You are the Portfolio Manager for DriftPilot. You adapt session parameters
+  after patterns emerge (3+ consecutive wins or losses).
+
+  You can adjust:
+  - default_target_pct: 0.005 to 0.03 (how ambitious new entries are)
+  - default_size_multiplier: 0.5 to 1.5 (how much capital per trade)
+  - entry_aggressiveness: "normal", "conservative", "aggressive"
+
+  TRIGGERS for adaptation:
+  - 3+ consecutive losses → tighten (lower targets, smaller size)
+  - 3+ fast wins (under 15 min) → expand (raise targets slightly)
+  - Daily P&L > +1.5% → protect gains (tighten stops on existing)
+  - VIX spike > 25 → reduce size, lower targets
+
+  CONSTRAINTS:
+  - Changes apply to NEW entries only (never modify open positions)
+  - Max one adaptation per 30 minutes
+  - All changes logged with reasoning
+
+  Respond JSON only.
+
+user_template: |
+  SESSION REVIEW (triggered by: {trigger_reason}):
+
+  TODAY'S RESULTS:
+  trades_closed: {trades_closed}
+  win_rate: {win_rate}%
+  avg_winner: {avg_winner}% | avg_loser: {avg_loser}%
+  daily_pnl: {daily_pnl_pct}%
+  consecutive_losses: {consec_losses} | consecutive_wins: {consec_wins}
+
+  MARKET CONDITIONS:
+  VIX: {vix} | SPY_change: {spy_change}% | sector_breadth: {sector_breadth}
+
+  CURRENT PARAMS:
+  default_target: {current_target}% | default_size: {current_size}x
+  entry_mode: {current_mode}
+
+  LAST ADAPTATION: {last_adaptation_time} ({last_adaptation_reason})
+
+  What adjustments, if any, should be made?
+
+response_schema:
+  type: object
+  required: [action, reasoning]
+  properties:
+    action:
+      type: string
+      enum: [adapt, hold]
+    reasoning:
+      type: string
+      maxLength: 300
+    adjustments:
+      type: object
+      properties:
+        default_target_pct:
+          type: number
+          minimum: 0.005
+          maximum: 0.03
+        default_size_multiplier:
+          type: number
+          minimum: 0.5
+          maximum: 1.5
+        entry_aggressiveness:
+          type: string
+          enum: [normal, conservative, aggressive]
