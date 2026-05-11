@@ -1,8 +1,8 @@
 # Codex Handoff — DriftPilot Project State
 
 **Date:** 2026-05-11  
-**Branch:** `main` at `6297a85` (`origin/main` is `4f8ba49`; local branch ahead 2 commits)  
-**Latest commits:** `6297a85` Qwen directional-prediction re-enrichment backtest; `0d8de52` Phase 1 RuleBasedRouter  
+**Branch:** `main` at `b7fc306` (`origin/main` is `4f8ba49`; local branch ahead 5 commits)  
+**Latest commits:** `b7fc306` algo integration clarity; `f44c8d9` Qwen v2 + agentic docs; `09625e1` parser + static gates; `6297a85` backtest re-validation; `0d8de52` Phase 1 RuleBasedRouter  
 **Paper trading:** Day 2 complete; Day 3 is the first clean session with all bug fixes baked in
 
 ## Current Snapshot
@@ -118,9 +118,24 @@ Full requirements + agent breakdown at `docs/QWEN_ENRICHMENT_V2.md`. The current
 - Review agent findings addressed: documented malformed numeric suppression and added a hardcoded corpus of 32 real 2024 catalyst DB headlines plus real guidance headlines.
 - Gates: parser tests `69 passed`; full pytest `870 passed, 1 warning`; parser ruff and parser mypy clean. Repo-wide ruff/mypy still fail on unrelated existing issues listed above.
 
-### 4. Agentic Trader — LLM-driven position management (THE PRODUCT)
+### 4. Agentic Trader — Multi-agent position management (THE PRODUCT)
 
-Full vision doc at `docs/AGENTIC_TRADER_VISION.md`. This is the actual product — an LLM agent that monitors positions every 30 seconds, makes dynamic profit-taking decisions, and adapts intra-session. The 1% target is the baseline; the agent expands to 3-5% when momentum is clear, takes partial profit when stuck, and cuts early when thesis breaks. All deterministic guardrails (1.5% stop, 5% cap, 60-min time stop, daily loss limit) remain mechanically enforced — the agent cannot override risk controls.
+Full implementation spec at `docs/AGENTIC_TRADER_REQUIREMENTS.md`. Vision/architecture at `docs/AGENTIC_TRADER_VISION.md`.
+
+**Architecture:** 3-type multi-agent topology — PM Agent (1) + Scanner Agent (1) + Slot Agents (10). Authority hierarchy: Mechanical Guardrails > Algorithm > LLM Agent. Quant signals (signal.scan(), signal.evaluate_exit()) run FIRST as primary decision-makers; LLM agents provide override layer requiring PM approval.
+
+**Key design decisions:**
+- A2A message bus (SQLite-backed, 12 message types)
+- All prompts configurable via `config/prompts/*.yaml` (hot-reloadable)
+- Guardrails NEVER overridable: 1.5% stop, 5% cap, 60min time stop, 3% daily loss
+- Override rate limited to 20%, auto-disable if exceeded
+- Every decision logged with prompt + response + outcome for fine-tuning
+
+**Build plan:** 7 coding agents across 4 waves (see requirements doc §12):
+- Wave 1: Message Bus + Guardrail Engine (foundation)
+- Wave 2: PM Agent + Slot Agent (core agents, can start in parallel)
+- Wave 3: Scanner Agent + Dashboard Integration
+- Wave 4: Integration Tests + Simulation Harness
 
 **Phase 1 (build after Enrichment v2):** Position Monitor Agent — monitors open positions, decides hold/take-profit/raise-target/cut-early. Entries still come from signal pipeline + router.
 **Phase 2:** Entry Agent — decides whether to trade new catalysts and can override router or enter directly.
