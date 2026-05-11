@@ -98,6 +98,19 @@ class DriftPilotSettings:
     catalyst_rss_enabled: bool = True
     catalyst_alpaca_poll_seconds: int = 30
     catalyst_universe_lookback_minutes: int = 240
+    # Agent layer
+    agent_enabled: bool = False
+    agent_num_slots: int = 10
+    agent_qwen_url: str = "http://192.168.1.166:8000/v1"
+    agent_qwen_model: str = "Qwen/Qwen3-8B"
+    agent_qwen_timeout_ms: int = 500
+    agent_claude_api_key: str = ""
+    agent_claude_model: str = "claude-sonnet-4-20250514"
+    agent_claude_timeout_ms: int = 3000
+    agent_max_override_rate: float = 0.20
+    agent_prompts_dir: str = "config/prompts"
+    agent_db_path: str = "data/driftpilot/agent_messages.sqlite3"
+    agent_message_ttl_seconds: int = 300
 
     @property
     def sqlite_path_obj(self) -> Path:
@@ -159,4 +172,16 @@ def load_settings(
         catalyst_rss_enabled=_get_bool(values, "CATALYST_RSS_ENABLED", True),
         catalyst_alpaca_poll_seconds=_get_int(values, "CATALYST_ALPACA_POLL_SECONDS", 30),
         catalyst_universe_lookback_minutes=_get_int(values, "CATALYST_UNIVERSE_LOOKBACK_MINUTES", 240),
+        agent_enabled=_get_bool(values, "AGENT_ENABLED", False),
+        agent_num_slots=_get_int(values, "AGENT_NUM_SLOTS", 10),
+        agent_qwen_url=_get_str(values, "AGENT_QWEN_URL", "http://192.168.1.166:8000/v1"),
+        agent_qwen_model=_get_str(values, "AGENT_QWEN_MODEL", "Qwen/Qwen3-8B"),
+        agent_qwen_timeout_ms=_get_int(values, "AGENT_QWEN_TIMEOUT_MS", 500),
+        agent_claude_api_key=_get_str(values, "AGENT_CLAUDE_API_KEY", ""),
+        agent_claude_model=_get_str(values, "AGENT_CLAUDE_MODEL", "claude-sonnet-4-20250514"),
+        agent_claude_timeout_ms=_get_int(values, "AGENT_CLAUDE_TIMEOUT_MS", 3000),
+        agent_max_override_rate=_get_float(values, "AGENT_MAX_OVERRIDE_RATE", 0.20),
+        agent_prompts_dir=_get_str(values, "AGENT_PROMPTS_DIR", "config/prompts"),
+        agent_db_path=_get_str(values, "AGENT_DB_PATH", "data/driftpilot/agent_messages.sqlite3"),
+        agent_message_ttl_seconds=_get_int(values, "AGENT_MESSAGE_TTL_SECONDS", 300),
     )

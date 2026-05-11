@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>DriftPilot Agents</title>
+    <style>
+      @import url("https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap");
+      :root { --bg:#080c16; --panel:#111722; --panel2:#151c2a; --line:#283249; --text:#e8edf7; --muted:#8792aa; --dim:#59647b; --green:#25d39a; --red:#ff4054; --amber:#ffae2b; --blue:#4da3ff; font-family:"IBM Plex Sans",system-ui,sans-serif; }
+      *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--text)} .mono{font-family:"JetBrains Mono",ui-monospace,monospace;font-variant-numeric:tabular-nums}
+      .nav{height:48px;display:flex;align-items:center;gap:24px;padding:0 18px;background:var(--panel);border-bottom:1px solid var(--line)} .brand{display:flex;align-items:center;gap:10px;font-weight:700}.mark{width:28px;height:28px;border-radius:6px;display:grid;place-items:center;background:linear-gradient(135deg,var(--blue),#a371f7);font:700 11px "JetBrains Mono"}
+      .tabs{display:flex;gap:4px}.tabs a{color:var(--muted);text-decoration:none;padding:7px 12px;border-radius:6px}.tabs a.active,.tabs a:hover{color:var(--text);background:var(--panel2)}
+      main{width:min(1240px,calc(100% - 32px));margin:20px auto 44px;display:grid;gap:20px}.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}.grid3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+      .card{border:1px solid var(--line);border-radius:8px;background:var(--panel);padding:18px}.label{color:var(--dim);text-transform:uppercase;letter-spacing:.13em;font:700 11px "JetBrains Mono"}.value{margin-top:10px;font:700 24px "JetBrains Mono"}
+      .badge{display:inline-block;padding:2px 8px;border-radius:4px;font:600 11px "JetBrains Mono";text-transform:uppercase}
+      .badge-green{background:#25d39a22;color:var(--green)}.badge-red{background:#ff405422;color:var(--red)}.badge-amber{background:#ffae2b22;color:var(--amber)}.badge-blue{background:#4da3ff22;color:var(--blue)}.badge-dim{background:#283249;color:var(--muted)}
+      table{width:100%;border-collapse:collapse}td,th{padding:8px 6px;border-bottom:1px solid #1d2639;text-align:left}th{color:var(--dim);text-transform:uppercase;font:700 10px "JetBrains Mono";letter-spacing:.1em}
+      .green{color:var(--green)}.red{color:var(--red)}.amber{color:var(--amber)}.blue{color:var(--blue)}.muted{color:var(--muted)}
+      .gauge{height:8px;border-radius:4px;background:var(--panel2);overflow:hidden;margin-top:8px}.gauge-fill{height:100%;border-radius:4px;transition:width 0.3s}
+      .agent-card{display:flex;align-items:center;gap:12px;padding:14px}.agent-dot{width:10px;height:10px;border-radius:50%;flex-shrink:0}
+      @media(max-width:900px){.grid,.grid3{grid-template-columns:1fr}}
+    </style>
+  </head>
+  <body>
+    <nav class="nav"><div class="brand"><div class="mark">DP</div><span>DriftPilot Operator</span></div><div class="tabs"><a href="/">Operator</a><a href="/admin">Admin</a><a class="active" href="/agents">Agents</a><a href="/backtest">Backtest</a><a href="/llm">LLM</a></div></nav>
+    <main>
+      <div id="error-banner" style="display:none;padding:12px 18px;background:#ff405422;border:1px solid var(--red);border-radius:8px;color:var(--red);font-weight:600"></div>
+
+      <!-- KPI cards -->
+      <section class="grid" id="kpi-cards">
+        <div class="card"><div class="label">Total Decisions Today</div><div class="value mono" id="kpi-total">-</div></div>
+        <div class="card"><div class="label">Override Rate</div><div class="value mono" id="kpi-override-rate">-</div><div class="gauge"><div class="gauge-fill" id="kpi-gauge" style="width:0;background:var(--green)"></div></div></div>
+        <div class="card"><div class="label">Avg Latency</div><div class="value mono" id="kpi-latency">-</div></div>
+        <div class="card"><div class="label">Accuracy</div><div class="value mono" id="kpi-accuracy">-</div></div>
+      </section>
+
+      <!-- Agent states -->
+      <section class="card">
+        <div class="label" style="margin-bottom:12px">Agent Status</div>
+        <div class="grid3" id="agent-states"></div>
+      </section>
+
+      <!-- Message activity -->
+      <section class="card">
+        <div class="label" style="margin-bottom:12px">Message Bus Activity</div>
+        <div class="grid" id="msg-activity">
+          <div><span class="muted">Pending:</span> <span class="mono" id="msg-pending">0</span></div>
+          <div><span class="muted">Today:</span> <span class="mono" id="msg-today">0</span></div>
+        </div>
+        <div id="msg-types" style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap"></div>
+      </section>
+
+      <!-- Recent decisions table -->
+      <section class="card">
+        <div class="label" style="margin-bottom:12px">Recent Decisions</div>
+        <div style="overflow-x:auto">
+          <table>
+            <thead><tr><th>Time</th><th>Agent</th><th>Type</th><th>Symbol</th><th>Algo</th><th>Decision</th><th>Override</th><th>Confidence</th><th>Latency</th><th>Outcome</th></tr></thead>
+            <tbody id="decisions-body"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+
+    <script>
+      const API = '/api/agents/dashboard';
+      let refreshTimer = null;
+
+      async function load() {
+        try {
+          const res = await fetch(API);
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          const d = await res.json();
+          if (d.error && !d.enabled) {
+            document.getElementById('error-banner').style.display = 'block';
+            document.getElementById('error-banner').textContent = d.error;
+            return;
+          }
+          document.getElementById('error-banner').style.display = 'none';
+          renderKPI(d.daily_summary, d.override_rate);
+          renderAgents(d.agents);
+          renderMessages(d.message_activity);
+          renderDecisions(d.recent_decisions);
+        } catch(e) {
+          document.getElementById('error-banner').style.display = 'block';
+          document.getElementById('error-banner').textContent = 'Failed to load agent data: ' + e.message;
+        }
+      }
+
+      function renderKPI(s, or_) {
+        document.getElementById('kpi-total').textContent = s.total_decisions;
+        const ratePct = (or_.rate * 100).toFixed(1) + '%';
+        document.getElementById('kpi-override-rate').textContent = ratePct;
+        const gauge = document.getElementById('kpi-gauge');
+        gauge.style.width = Math.min(or_.rate / or_.limit * 100, 100) + '%';
+        gauge.style.background = or_.within_limit ? 'var(--green)' : 'var(--red)';
+        document.getElementById('kpi-latency').textContent = s.avg_latency_ms ? s.avg_latency_ms.toFixed(0) + 'ms' : '-';
+        document.getElementById('kpi-accuracy').textContent = s.accuracy !== null ? (s.accuracy * 100).toFixed(1) + '%' : 'N/A';
+      }
+
+      function renderAgents(agents) {
+        const el = document.getElementById('agent-states');
+        if (!agents.length) { el.innerHTML = '<div class="muted">No agents registered</div>'; return; }
+        el.innerHTML = agents.map(a => {
+          const color = a.status === 'running' ? 'var(--green)' : a.status === 'stopped' ? 'var(--red)' : 'var(--amber)';
+          const health = a.healthy ? 'badge-green' : 'badge-amber';
+          return `<div class="card agent-card">
+            <div class="agent-dot" style="background:${color}"></div>
+            <div>
+              <div style="font-weight:600">${a.name}</div>
+              <div class="muted" style="font-size:13px">${a.status} &middot; <span class="badge ${health}">${a.healthy ? 'healthy' : 'stale'}</span></div>
+              <div class="mono muted" style="font-size:11px;margin-top:4px">W${a.consecutive_wins}/L${a.consecutive_losses} &middot; ${a.total_decisions_today} decisions</div>
+            </div>
+          </div>`;
+        }).join('');
+      }
+
+      function renderMessages(m) {
+        document.getElementById('msg-pending').textContent = m.pending;
+        document.getElementById('msg-today').textContent = m.today_total;
+        const el = document.getElementById('msg-types');
+        el.innerHTML = Object.entries(m.by_type || {}).map(([t,n]) =>
+          `<span class="badge badge-dim">${t} ${n}</span>`
+        ).join('');
+      }
+
+      function renderDecisions(decs) {
+        const tb = document.getElementById('decisions-body');
+        if (!decs.length) { tb.innerHTML = '<tr><td colspan="10" class="muted">No decisions yet</td></tr>'; return; }
+        tb.innerHTML = decs.map(d => {
+          const time = d.created_at ? d.created_at.split('T')[1]?.substring(0,8) || d.created_at : '-';
+          const overrideClass = d.is_override ? 'amber' : 'muted';
+          const decisionClass = d.agent_decision === 'approve' ? 'green' : d.agent_decision === 'deny' ? 'red' : '';
+          const conf = d.confidence !== null ? (d.confidence * 100).toFixed(0) + '%' : '-';
+          let outcome = '-';
+          if (d.outcome_pnl_pct !== null) {
+            const pct = (d.outcome_pnl_pct * 100).toFixed(2);
+            outcome = `<span class="${d.outcome_pnl_pct >= 0 ? 'green' : 'red'}">${pct}%</span>`;
+          }
+          return `<tr>
+            <td class="mono muted" style="font-size:12px">${time}</td>
+            <td>${d.agent_name}</td>
+            <td class="mono" style="font-size:12px">${d.decision_type}</td>
+            <td class="mono">${d.symbol || '-'}</td>
+            <td class="mono muted">${d.algo_recommendation}</td>
+            <td class="${decisionClass}">${d.agent_decision}</td>
+            <td class="${overrideClass}">${d.is_override ? 'YES' : '-'}</td>
+            <td class="mono">${conf}</td>
+            <td class="mono muted">${d.llm_latency_ms}ms</td>
+            <td>${outcome}</td>
+          </tr>`;
+        }).join('');
+      }
+
+      load();
+      refreshTimer = setInterval(load, 10000);
+    </script>
+  </body>
+</html>

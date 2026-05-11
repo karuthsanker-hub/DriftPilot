@@ -18,6 +18,7 @@ from datetime import date
 
 from pydantic import BaseModel, SecretStr
 
+from driftpilot.dashboard.agent_views import agent_dashboard_payload, agent_decision_detail
 from driftpilot.dashboard.view_models import admin_state_payload, backtest_report_payload, operator_state_payload
 from driftpilot.settings import load_settings as load_driftpilot_settings
 from driftpilot.storage.repositories import DriftPilotRepository
@@ -331,6 +332,61 @@ def create_app(env_path: Path | str = ".env") -> FastAPI:
             return {"events": _news_ticker(limit=limit, lookback_minutes=lookback_minutes)}
         except Exception as exc:
             _raise_api_error(exc, "operator_news_ticker")
+
+    @app.get("/api/catalyst/event/{event_id}")
+    def catalyst_event_detail(event_id: int):
+        """Full catalyst event detail for the enrichment audit panel."""
+        try:
+            from driftpilot.dashboard.view_models import _catalyst_detail
+            return _catalyst_detail(event_id)
+        except Exception as exc:
+            _raise_api_error(exc, "catalyst_event_detail")
+
+    @app.get("/agents", response_class=HTMLResponse)
+    def agents_page(request: Request):
+        return templates.TemplateResponse(request, "agents.html")
+
+    @app.get("/api/agents/dashboard")
+    def agents_dashboard():
+        """Full agent dashboard payload — states, decisions, override rate."""
+        try:
+            dp_settings = load_driftpilot_settings(env_path)
+            return agent_dashboard_payload(dp_settings.agent_db_path)
+        except Exception as exc:
+            _raise_api_error(exc, "agents_dashboard")
+
+    @app.get("/api/agents/decision/{decision_id}")
+    def agents_decision(decision_id: int):
+        """Full detail for one agent decision (drill-down)."""
+        try:
+            dp_settings = load_driftpilot_settings(env_path)
+            return agent_decision_detail(decision_id, dp_settings.agent_db_path)
+        except Exception as exc:
+            _raise_api_error(exc, "agents_decision")
+
+    @app.get("/api/agents/export/stats")
+    def agents_export_stats():
+        """Training data export statistics."""
+        try:
+            from driftpilot.agents.training_exporter import ExportFilters, TrainingExporter
+            dp_settings = load_driftpilot_settings(env_path)
+            exporter = TrainingExporter(dp_settings.agent_db_path)
+            stats = exporter.get_stats(ExportFilters())
+            return {
+                "total_decisions": stats.total_decisions,
+                "overrides": stats.overrides,
+                "override_rate": stats.override_rate,
+                "outcomes_filled": stats.outcomes_filled,
+                "accuracy": stats.accuracy,
+                "avg_latency_ms": stats.avg_latency_ms,
+                "models_used": stats.models_used,
+                "decision_types": stats.decision_types,
+                "agents": stats.agents,
+            }
+        except FileNotFoundError:
+            return {"total_decisions": 0, "error": "Agent database not found"}
+        except Exception as exc:
+            _raise_api_error(exc, "agents_export_stats")
 
     @app.get("/api/admin/state")
     def admin_state():
