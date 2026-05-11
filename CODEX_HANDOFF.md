@@ -1,16 +1,17 @@
 # Codex Handoff — DriftPilot Project State
 
 **Date:** 2026-05-11  
-**Branch:** `main` at `b7fc306` (`origin/main` is `4f8ba49`; local branch ahead 5 commits)  
-**Latest commits:** `b7fc306` algo integration clarity; `f44c8d9` Qwen v2 + agentic docs; `09625e1` parser + static gates; `6297a85` backtest re-validation; `0d8de52` Phase 1 RuleBasedRouter  
+**Branch:** `main` at `f03c342` (`origin/main` is `4f8ba49`; local branch ahead 11 commits)  
+**Latest commits:** `f03c342` Wave 3 Orchestrator; `f31bb38` Wave 2 PM/Scanner/Slot agents; `ebc5777` Wave 1 MessageBus/Guardrails/LLM/Prompts; `5b6d4cb` agentic requirements; `b7fc306` algo integration  
 **Paper trading:** Day 2 complete; Day 3 is the first clean session with all bug fixes baked in
 
 ## Current Snapshot
 
-- **Working tree at last instruction update:** `CODEX_HANDOFF.md` modified; Qwen v2 parser files untracked; repo-wide ruff/mypy cleanup touched multiple source/test files; untracked docs include `docs/QWEN_ENRICHMENT_V2.md` and `docs/AGENTIC_TRADER_VISION.md`; runtime artifacts under `.claude/` and `logs/`.
-- **Last known full test gate:** `PYTHONPATH=src uv run --extra test pytest -q` passed: `870 passed, 1 warning in 6.22s`.
-- **Qwen v2 parser gate:** `PYTHONPATH=src uv run --extra test pytest tests/catalyst/test_headline_parser.py -q` passed: `69 passed`; `uvx ruff check src/driftpilot/catalyst/headline_parser.py tests/catalyst/test_headline_parser.py` passed; `PYTHONPATH=src uv run --with mypy mypy src/driftpilot/catalyst/headline_parser.py` passed.
-- **Repo-wide static checks:** `uvx ruff check src/driftpilot src/trading_bot/dashboard tests` passed; `PYTHONPATH=src uv run --with mypy mypy src/driftpilot src/trading_bot/dashboard` passed with two informational notes about unchecked untyped function bodies in `services_live.py`.
+- **Working tree at last instruction update:** Qwen v2 phases A/C/D/E implemented but not committed; runtime artifacts under `.claude/` and `logs/` remain untracked.
+- **Last known full test gate:** `PYTHONPATH=src uv run --extra test pytest -q` passed: `993 passed, 1 warning in 8.42s`.
+- **Agent layer gate:** `PYTHONPATH=src uv run --extra test pytest tests/agents/ -q` passed: `104 passed in 2.43s`. Agent ruff/mypy clean.
+- **Qwen v2 targeted gate:** `PYTHONPATH=src uv run --extra test pytest tests/catalyst/test_context_assembler.py tests/catalyst/test_headline_parser.py tests/catalyst/test_qwen_enricher.py tests/catalyst/test_qwen_enricher_v2.py tests/catalyst/test_db_idempotent.py tests/test_dashboard_catalyst_detail.py tests/test_enrichment_pipeline_integration.py tests/backtest/test_catalyst_replay.py -q` passed: `110 passed`.
+- **Repo-wide static checks:** `uvx ruff check src/driftpilot src/trading_bot/dashboard scripts tests` passed; `PYTHONPATH=src uv run --with mypy mypy src/driftpilot src/trading_bot/dashboard` passed with two informational notes about unchecked untyped function bodies in `services_live.py`.
 - **Instruction update:** `.codex/instructions.md` now contains a cross-agent resume protocol and handoff template. Keep this file and this handoff in sync whenever context is running low.
 - **Next agent first command:** `git status --short --branch && git log --oneline --decorate -5`
 
@@ -105,18 +106,25 @@ Bug #11 (bootstrap-on-enrich) is the highest priority — it means the operator 
 
 After bug fixes, the system needs 2-3 weeks of clean paper trading data to validate the earnings_report_v1 signal in production. The backtest showed edge_ratio=1.105 over 185 trades (Jul-Dec 2024). Paper trading validates this on live data.
 
-### 3. Qwen Enrichment v2 — Pre-enrichment context pipeline (READY TO BUILD)
+### 3. Qwen Enrichment v2 — Pre-enrichment context pipeline (BUILT, needs DB re-enrichment run)
 
 Full requirements + agent breakdown at `docs/QWEN_ENRICHMENT_V2.md`. The current Qwen prompt produces a 3-bucket classifier (98% of positives get the same +0.15 score). Edge ratio collapsed from 1.6 to 1.0 because marginal "positive" events dilute the signal. Fix: assemble company context (market cap, beat %, earnings history, ATR, VIX) before calling Qwen so the LLM can distinguish a $0.01 beat on a $3B company from a 6.5% beat on a biotech. Dashboard gets a catalyst detail panel showing the full enrichment context + auto-generated warning flags.
 
 **5 agents:** Headline Parser → Context Assembler → Prompt v2 + Enricher → Dashboard Detail Panel → Batch Re-enrichment + Validation. Agent 2 (parser) and Agent 4 (dashboard) can start in parallel. Full spec with test requirements, review checklist, and merge order in the doc.
 
-**2026-05-11 progress:** Headline Parser slice has been implemented but not committed yet:
+**2026-05-11 progress:** Headline Parser slice has been implemented and committed:
 - New file: `src/driftpilot/catalyst/headline_parser.py`
 - New tests: `tests/catalyst/test_headline_parser.py`
 - Behavior: extracts EPS actual/estimate/beat %, revenue actual/estimate/beat % in millions, guidance direction (`up`, `down`, `maintained`), and mixed beat-plus-lowered-guidance signals.
 - Review agent findings addressed: documented malformed numeric suppression and added a hardcoded corpus of 32 real 2024 catalyst DB headlines plus real guidance headlines.
-- Gates: parser tests `69 passed`; full pytest `870 passed, 1 warning`; parser ruff and parser mypy clean. Repo-wide ruff/mypy still fail on unrelated existing issues listed above.
+- Gates at parser merge: parser tests `69 passed`; full pytest `870 passed, 1 warning`; parser ruff and parser mypy clean.
+
+**2026-05-11 progress update:** Phases A/C/D/E are now implemented but not committed:
+- Phase A Context Assembler: `src/driftpilot/catalyst/context_assembler.py`, with cached run/symbol context, ATR from Databento parquet, sector lookup, VIX/SPY/sector ETF hooks, headline cluster count, and prompt-block formatting.
+- Phase C Prompt v2 + persistence: `QwenEnricher.enrich(..., context=...)`, v2 system/user prompt, `enrich_with_response()`, schema migration for `confidence`, `context_json`, `qwen_response_json`, and enrichment script `--force-re-enrich` / `--dry-run`.
+- Phase D Dashboard detail: `_news_ticker()` v2 fields/backward compatibility, `_catalyst_detail()`, `/api/catalyst/event/{id}`, clickable ticker modal with context/Qwen/flags.
+- Phase E Batch + validation: enrichment pipeline integration tests, backtest `--min-confidence` and `--min-priority-modifier` filters.
+- Full DB re-enrichment has **not** been run. Before running all 23,888 events, back up `data/driftpilot/catalyst_events_2024.sqlite3` and use the dry-run/smoke-run protocol from `docs/QWEN_ENRICHMENT_V2.md`.
 
 ### 4. Agentic Trader — Multi-agent position management (THE PRODUCT)
 
@@ -131,16 +139,22 @@ Full implementation spec at `docs/AGENTIC_TRADER_REQUIREMENTS.md`. Vision/archit
 - Override rate limited to 20%, auto-disable if exceeded
 - Every decision logged with prompt + response + outcome for fine-tuning
 
-**Build plan:** 7 coding agents across 4 waves (see requirements doc §12):
-- Wave 1: Message Bus + Guardrail Engine (foundation)
-- Wave 2: PM Agent + Slot Agent (core agents, can start in parallel)
-- Wave 3: Scanner Agent + Dashboard Integration
-- Wave 4: Integration Tests + Simulation Harness
+**Build plan:** 4 waves — **Waves 1-3 COMPLETE**, Wave 4 remaining:
+- ✅ Wave 1: Message Bus + Guardrail Engine + LLM Client + Prompt Loader (60 tests)
+- ✅ Wave 2: PM Agent + Scanner Agent + Slot Agent (28 tests)
+- ✅ Wave 3: Orchestrator + lifecycle management (16 tests)
+- ❌ Wave 4: Dashboard integration + training data exporter (not started)
 
-**Phase 1 (build after Enrichment v2):** Position Monitor Agent — monitors open positions, decides hold/take-profit/raise-target/cut-early. Entries still come from signal pipeline + router.
-**Phase 2:** Entry Agent — decides whether to trade new catalysts and can override router or enter directly.
-**Phase 3:** Session Adaptation — adjusts default targets based on intra-day performance.
-**Phase 4:** Dynamic Strategy Generation — identifies patterns, writes filter code, self-improves.
+**2026-05-11 progress:** Waves 1-3 committed:
+- `ebc5777`: models.py (12 message types), message_bus.py (SQLite A2A), guardrail_validator.py, llm_client.py (dual Qwen+Claude), prompt_loader.py (YAML hot-reload), 4 prompt YAMLs, migration 006
+- `f31bb38`: pm_agent.py (entry/raise/cut/partial approval, force-exit, override rate), scanner_agent.py (candidate eval, algo-first), slot_agent.py (algo exit authoritative, LLM on HOLD only)
+- `f03c342`: orchestrator.py (lifecycle, tick delegation, daily reset, prompt hot-reload)
+- Agent is disabled by default (`agent_enabled=False`). Wire into operator by calling `tick_pm`/`tick_scanner`/`tick_slot` in the loop.
+
+**Remaining work:**
+- Wave 4: Dashboard agent views + training data exporter
+- Operator wiring: add agent_* settings to DriftPilotSettings, create OrchestratorConfig from settings, call orchestrator.start() in operator boot
+- Integration test: replay a day with agents enabled vs disabled, compare edge ratio
 
 ### 4. V3 retrofit backtests (technical signals on catalyst-filtered universe)
 
