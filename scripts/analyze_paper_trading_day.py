@@ -33,7 +33,7 @@ import logging
 import sqlite3
 import sys
 from collections import Counter
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -176,7 +176,7 @@ def _print_position_chain(pos: dict, orders: list[dict], event: dict | None) -> 
     cat_sent = md.get("catalyst_sentiment")
     cat_age = md.get("catalyst_event_age_min_at_entry")
     cat_head = md.get("catalyst_headline")
-    print(f"    catalyst:")
+    print("    catalyst:")
     print(f"      sentiment: {cat_sent or 'NONE'}")
     print(f"      event_age_at_entry: {cat_age:.1f}min" if isinstance(cat_age, (int, float)) else "      event_age_at_entry: NONE")
     print(f"      headline_hash: {cat_hash or 'NONE'}")
@@ -203,7 +203,7 @@ def _print_position_chain(pos: dict, orders: list[dict], event: dict | None) -> 
         print(f"    exit_reason: {exit_reason}")
         print(f"    realized_pnl: ${realized or 0:.2f}  return: {ret_pct:+.3f}%  hold: {hold_min:.1f}min")
     else:
-        print(f"    [position is still open at audit time]")
+        print("    [position is still open at audit time]")
 
 
 def _summary(positions: list[dict]) -> dict:

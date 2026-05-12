@@ -469,9 +469,12 @@ def _news_ticker(
     cutoff = (datetime.now(timezone.utc) - timedelta(minutes=lookback_minutes)).isoformat()
     try:
         conn = sqlite3.connect(p)
+        columns = _table_columns(conn, "catalyst_events")
+        confidence_expr = "confidence" if "confidence" in columns else "NULL AS confidence"
+        context_expr = "context_json" if "context_json" in columns else "NULL AS context_json"
         cur = conn.execute(
-            "SELECT symbol, category, subcategory, sentiment, headline, "
-            "event_ts, source, priority_modifier "
+            "SELECT id, symbol, category, subcategory, sentiment, headline, "
+            f"event_ts, source, priority_modifier, {confidence_expr}, {context_expr} "
             "FROM catalyst_events WHERE event_ts >= ? "
             "ORDER BY event_ts DESC LIMIT ?",
             (cutoff, limit),
@@ -483,16 +486,126 @@ def _news_ticker(
     out: list[dict[str, Any]] = []
     for r in rows:
         out.append({
-            "symbol": r[0],
-            "category": r[1],
-            "subcategory": r[2],
-            "sentiment": r[3] or "pending",
-            "headline": (r[4] or "")[:140],
-            "ts": r[5],
-            "source": r[6] or "",
-            "priority": float(r[7] or 0.0),
+            "id": r[0],
+            "symbol": r[1],
+            "category": r[2],
+            "subcategory": r[3],
+            "sentiment": r[4] or "pending",
+            "headline": (r[5] or "")[:140],
+            "ts": r[6],
+            "source": r[7] or "",
+            "priority": float(r[8] or 0.0),
+            "confidence": float(r[9]) if r[9] is not None else None,
+            "has_context": bool(r[10]),
         })
     return out
+
+
+def _catalyst_detail(
+    event_id: int,
+    db_path: str = "data/driftpilot/catalyst_events.sqlite3",
+) -> dict[str, Any]:
+    import sqlite3
+
+    p = Path(db_path)
+    if not p.exists():
+        return {"found": False, "error": "catalyst DB not found"}
+    conn = sqlite3.connect(p)
+    conn.row_factory = sqlite3.Row
+    try:
+        columns = _table_columns(conn, "catalyst_events")
+        confidence_expr = "confidence" if "confidence" in columns else "NULL AS confidence"
+        context_expr = "context_json" if "context_json" in columns else "NULL AS context_json"
+        qwen_expr = "qwen_response_json" if "qwen_response_json" in columns else "NULL AS qwen_response_json"
+        row = conn.execute(
+            "SELECT id, event_ts, ingested_ts, symbol, category, subcategory, pillar, "
+            "sentiment, priority_modifier, horizon_minutes, headline, headline_hash, "
+            f"source, {confidence_expr}, {context_expr}, {qwen_expr} "
+            "FROM catalyst_events WHERE id = ?",
+            (event_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return {"found": False, "error": "event not found"}
+
+    context = _decode_json(row["context_json"])
+    qwen_response = _decode_json(row["qwen_response_json"])
+    event = {
+        "id": row["id"],
+        "event_ts": row["event_ts"],
+        "ingested_ts": row["ingested_ts"],
+        "symbol": row["symbol"],
+        "category": row["category"],
+        "subcategory": row["subcategory"],
+        "pillar": row["pillar"],
+        "sentiment": row["sentiment"] or "pending",
+        "priority_modifier": float(row["priority_modifier"] or 0.0),
+        "confidence": float(row["confidence"]) if row["confidence"] is not None else None,
+        "horizon_minutes": row["horizon_minutes"],
+        "headline": row["headline"],
+        "headline_hash": row["headline_hash"],
+        "source": row["source"],
+    }
+    return {
+        "found": True,
+        "event": event,
+        "context": context,
+        "qwen_response": qwen_response,
+        "flags": _catalyst_flags(event, context),
+        "message": None if context else "enriched without context",
+    }
+
+
+def _table_columns(conn: Any, table: str) -> set[str]:
+    return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+
+
+def _decode_json(raw: str | None) -> dict[str, Any] | None:
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return {"_raw": raw, "_error": "invalid json"}
+    return data if isinstance(data, dict) else {"value": data}
+
+
+def _catalyst_flags(event: dict[str, Any], context: dict[str, Any] | None) -> list[dict[str, str]]:
+    flags: list[dict[str, str]] = []
+    context = context or {}
+    eps_beat = _float_or_none(context.get("eps_beat_pct"))
+    revenue_beat = _float_or_none(context.get("revenue_beat_pct"))
+    surprises = context.get("last_4_surprises") if isinstance(context.get("last_4_surprises"), list) else []
+    historical_avg = (
+        sum(abs(float(item)) for item in surprises if _float_or_none(item) is not None) / len(surprises)
+        if surprises
+        else None
+    )
+    market_cap = _float_or_none(context.get("market_cap_m"))
+    cluster = int(context.get("headline_cluster_count") or 0)
+    confidence = _float_or_none(event.get("confidence"))
+    pm = _float_or_none(event.get("priority_modifier")) or 0.0
+    if eps_beat is not None and historical_avg is not None and abs(eps_beat) < historical_avg:
+        flags.append({"kind": "amber", "label": "marginal beat"})
+    if revenue_beat is not None and abs(revenue_beat) < 1.0:
+        flags.append({"kind": "amber", "label": "noise-level revenue"})
+    if market_cap is not None and market_cap > 50_000 and eps_beat is not None and abs(eps_beat) < 2.0:
+        flags.append({"kind": "amber", "label": "mega-cap small beat"})
+    if cluster > 2:
+        flags.append({"kind": "red", "label": "stale / repeated"})
+    if confidence is not None and confidence < 0.5:
+        flags.append({"kind": "amber", "label": "low confidence"})
+    if round(pm, 2) in {0.15, -0.15, 0.10, -0.10}:
+        flags.append({"kind": "amber", "label": "possible anchor bias"})
+    return flags
+
+
+def _float_or_none(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _equity_curve(starting_capital: float, realized: float) -> list[dict[str, float]]:

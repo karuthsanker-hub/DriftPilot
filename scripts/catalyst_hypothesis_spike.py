@@ -67,7 +67,7 @@ import json
 import os
 import random
 import statistics
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
@@ -526,7 +526,6 @@ def _verdict(summary: dict) -> str:
     ]
     back_alive_any = any(r >= 1.5 for r in back_ratios)
     back_alive_strong = any(r >= 2.0 for r in back_ratios)
-    back_dead = all(r < 1.2 for r in back_ratios)
 
     if fwd_alive and back_alive_strong:
         return "ALIVE_BOTH"

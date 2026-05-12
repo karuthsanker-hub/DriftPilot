@@ -80,14 +80,30 @@
       .ticker-track { display: inline-flex; align-items: center; gap: 40px; height: 36px; padding-left: 100%; white-space: nowrap; animation: tickermove 600s linear infinite; will-change: transform; }
       .ticker-track:hover { animation-play-state: paused; }
       .ticker-item { display: inline-flex; align-items: center; gap: 8px; font: 500 13px "JetBrains Mono"; color: var(--text); }
+      .ticker-item.clickable { cursor: pointer; }
+      .ticker-item.clickable:hover .ticker-headline { color: var(--text); }
       .ticker-symbol { color: var(--blue); font-weight: 700; }
       .ticker-tag { font: 700 10px "JetBrains Mono"; padding: 2px 6px; border-radius: 3px; background: var(--panel); color: var(--muted); text-transform: uppercase; letter-spacing: .08em; }
       .ticker-tag.pos { color: var(--green); }
       .ticker-tag.neg { color: var(--red); }
       .ticker-tag.neu { color: var(--amber); }
       .ticker-headline { color: var(--muted); }
+      .ticker-pm.high { color: var(--green); }
+      .ticker-pm.low { color: var(--amber); }
+      .ticker-pm.neg { color: var(--red); }
       .ticker-sep { color: var(--dim); }
       .ticker-label { position: absolute; left: 0; top: 0; height: 36px; display: flex; align-items: center; padding: 0 12px; background: linear-gradient(90deg, var(--panel) 70%, transparent); color: var(--muted); font: 700 11px "JetBrains Mono"; letter-spacing: .13em; text-transform: uppercase; z-index: 2; pointer-events: none; }
+      .modal-backdrop { position: fixed; inset: 0; display: none; place-items: center; padding: 24px; background: rgba(0,0,0,.62); z-index: 20; }
+      .modal-backdrop.open { display: grid; }
+      .modal { width: min(880px, 100%); max-height: 86vh; overflow: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); box-shadow: 0 22px 70px rgba(0,0,0,.45); }
+      .modal-head { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 16px; border-bottom: 1px solid var(--line); }
+      .modal-body { display: grid; gap: 14px; padding: 16px; }
+      .modal-section { border: 1px solid var(--line-soft); border-radius: 6px; padding: 12px; background: var(--panel-2); }
+      .modal-section pre { white-space: pre-wrap; word-break: break-word; color: var(--muted); margin: 8px 0 0; font: 12px/1.5 "JetBrains Mono"; }
+      .icon-btn { border: 1px solid var(--line); border-radius: 6px; background: var(--panel-2); color: var(--text); width: 32px; height: 32px; cursor: pointer; }
+      .flag-row { display: flex; gap: 8px; flex-wrap: wrap; }
+      .flag { border-radius: 4px; padding: 3px 7px; font: 700 10px "JetBrains Mono"; background: rgba(255,174,43,.12); color: var(--amber); text-transform: uppercase; letter-spacing: .08em; }
+      .flag.red { background: rgba(255,64,84,.12); color: var(--red); }
       @keyframes tickermove { from { transform: translateX(0); } to { transform: translateX(-100%); } }
       @media (max-width: 1120px) { main { grid-template-columns: 1fr; } .rail { border-left: 0; border-top: 1px solid var(--line); } .slot-grid { grid-template-columns: repeat(2, 1fr); } .strip { grid-template-columns: repeat(2, 1fr); } }
     </style>
@@ -151,6 +167,18 @@
         </section>
       </aside>
     </main>
+    <div id="catalyst-modal" class="modal-backdrop">
+      <div class="modal">
+        <div class="modal-head">
+          <div>
+            <div id="catalyst-modal-title" class="symbol">Catalyst Event</div>
+            <div id="catalyst-modal-subtitle" class="sub mono"></div>
+          </div>
+          <button id="catalyst-modal-close" class="icon-btn" aria-label="Close">×</button>
+        </div>
+        <div id="catalyst-modal-body" class="modal-body"></div>
+      </div>
+    </div>
     <script>
       const API_BASE = window.location.protocol === "file:" ? "http://127.0.0.1:8000" : "";
       const fmtMoney = (v) => `$${Number(v || 0).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
@@ -255,6 +283,15 @@
         if (v === "neutral") return "neu";
         return "";
       }
+      function escapeHtml(value) {
+        return String(value ?? "").replace(/[&<>"']/g, c => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", "\"":"&quot;", "'":"&#39;" }[c]));
+      }
+      function pmClass(value) {
+        const pm = Number(value || 0);
+        if (pm < -0.075) return "neg";
+        if (pm > 0.075) return "high";
+        return "low";
+      }
       function renderTicker(events) {
         const track = document.getElementById("ticker-track");
         if (!track) return;
@@ -266,12 +303,16 @@
         const html = events.map(e => {
           const t = e.ts ? new Date(e.ts).toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"}) : "";
           const cat = `${e.category || ""}/${e.subcategory || ""}`;
-          return `<span class="ticker-item">
+          const conf = e.confidence == null ? "--" : Number(e.confidence).toFixed(2);
+          const pm = Number(e.priority || 0);
+          return `<span class="ticker-item ${e.id ? "clickable" : ""}" data-event-id="${e.id || ""}">
             <span class="mono" style="color:var(--dim)">${t}</span>
-            <span class="ticker-symbol">${e.symbol}</span>
-            <span class="ticker-tag">${cat}</span>
-            <span class="ticker-tag ${sentClass(e.sentiment)}">${e.sentiment}</span>
-            <span class="ticker-headline">${e.headline || ""}</span>
+            <span class="ticker-symbol">${escapeHtml(e.symbol)}</span>
+            <span class="ticker-tag">${escapeHtml(cat)}</span>
+            <span class="ticker-tag ${sentClass(e.sentiment)}">${escapeHtml(e.sentiment)}</span>
+            <span class="ticker-tag mono">${conf}</span>
+            <span class="ticker-tag ticker-pm ${pmClass(pm)}">${pm >= 0 ? "+" : ""}${pm.toFixed(2)}</span>
+            <span class="ticker-headline">${escapeHtml(e.headline || "")}</span>
             <span class="ticker-sep">•</span>
           </span>`;
         }).join("");
@@ -283,6 +324,49 @@
         try { renderTicker((await apiJson("/api/operator/news-ticker")).events || []); }
         catch (e) { /* keep last frame */ }
       }
+      async function openCatalystDetail(eventId) {
+        if (!eventId) return;
+        const modal = document.getElementById("catalyst-modal");
+        const body = document.getElementById("catalyst-modal-body");
+        body.innerHTML = `<div class="modal-section sub mono">Loading catalyst detail...</div>`;
+        modal.classList.add("open");
+        const detail = await apiJson(`/api/catalyst/event/${eventId}`);
+        if (!detail.found) {
+          body.innerHTML = `<div class="modal-section red">${escapeHtml(detail.error || "Event not found")}</div>`;
+          return;
+        }
+        const event = detail.event || {};
+        const flags = detail.flags || [];
+        document.getElementById("catalyst-modal-title").textContent = `${event.symbol || ""} ${event.category || ""}/${event.subcategory || ""}`;
+        document.getElementById("catalyst-modal-subtitle").textContent = `${event.sentiment || "pending"} · confidence ${event.confidence ?? "--"} · pm ${event.priority_modifier ?? 0}`;
+        body.innerHTML = `
+          <div class="modal-section">
+            <div class="label">Headline</div>
+            <pre>${escapeHtml(event.headline || "")}</pre>
+          </div>
+          <div class="modal-section">
+            <div class="label">Context</div>
+            <pre>${escapeHtml(detail.context ? JSON.stringify(detail.context, null, 2) : (detail.message || "No context available"))}</pre>
+          </div>
+          <div class="modal-section">
+            <div class="label">Qwen Response</div>
+            <pre>${escapeHtml(detail.qwen_response ? JSON.stringify(detail.qwen_response, null, 2) : "No Qwen response JSON stored")}</pre>
+          </div>
+          <div class="modal-section">
+            <div class="label">Flags</div>
+            <div class="flag-row">${flags.length ? flags.map(f => `<span class="flag ${f.kind === "red" ? "red" : ""}">${escapeHtml(f.label)}</span>`).join("") : `<span class="sub">No flags</span>`}</div>
+          </div>`;
+      }
+      document.getElementById("ticker-track").addEventListener("click", (event) => {
+        const item = event.target.closest("[data-event-id]");
+        if (item) openCatalystDetail(item.dataset.eventId).catch(() => {});
+      });
+      document.getElementById("catalyst-modal-close").addEventListener("click", () => {
+        document.getElementById("catalyst-modal").classList.remove("open");
+      });
+      document.getElementById("catalyst-modal").addEventListener("click", (event) => {
+        if (event.target.id === "catalyst-modal") event.currentTarget.classList.remove("open");
+      });
       load();
       loadTicker();
       setInterval(load, 5000);

@@ -4,9 +4,11 @@ import json
 import logging
 import re
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 import httpx
+
+from driftpilot.catalyst.context_assembler import EnrichmentContext
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +33,7 @@ _THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", flags=re.DOTALL)
 # Find the first JSON object in the response (after any think block).
 _JSON_OBJECT_RE = re.compile(r"\{[^{}]*\}", flags=re.DOTALL)
 
-_SYSTEM_PROMPT = (
+_SYSTEM_PROMPT_V1 = (
     "You are a short-term equity analyst. Your job is to predict whether a "
     "financial news headline will move a stock's price UP, DOWN, or have NO "
     "directional impact within the next 60 minutes of trading.\n\n"
@@ -54,6 +56,35 @@ _SYSTEM_PROMPT = (
     "- \"horizon_override\": 60, 240, 1440, or 2880 if the move will play out "
     "over a different window than the default for this category, else null\n\n"
     "No prose, no markdown, no explanation. JSON only."
+)
+
+_SYSTEM_PROMPT_V2 = (
+    "You are a short-term equity analyst predicting 60-minute price direction "
+    "from financial news. Focus on trading impact, not word tone.\n\n"
+    "MAGNITUDE TIERS (use ranges, not fixed anchors):\n"
+    "+0.15 to +0.20: Large-cap beat >5% or small-cap beat >3%, with guidance raise\n"
+    "+0.08 to +0.14: Clear beat 2-5% on mid-cap, or any beat with hot sector tailwind\n"
+    "+0.03 to +0.07: Small beat 1-2%, large-cap, or beat in line with history\n"
+    "+0.01 to +0.02: Marginal beat <1%, routine, already priced in\n"
+    " 0.00: No directional signal, informational only\n"
+    "-0.01 to -0.07: Small miss, minor negative, guidance maintained\n"
+    "-0.08 to -0.14: Clear miss, or beat with guidance cut (mixed signal is net negative)\n"
+    "-0.15 to -0.20: Large miss, guidance cut, downgrade on high-conviction name\n\n"
+    "CONFIDENCE CALIBRATION:\n"
+    "0.90-1.00: Numbers clearly in headline, direction unambiguous, large magnitude\n"
+    "0.70-0.89: Clear beat/miss but magnitude uncertain, or moderate event\n"
+    "0.50-0.69: Directional lean but could go either way\n"
+    "0.30-0.49: Weak signal, mostly noise, slight lean\n"
+    "0.00-0.29: Coin flip, no meaningful edge\n\n"
+    "Use the CONTEXT block to calibrate magnitude. A 0.9% EPS beat on a company "
+    "that averages 1.8% surprise is noise — neutral or +0.02 at most. If "
+    "headline_cluster_count / prior same-symbol headlines is >0, the headline is "
+    "likely already priced in — reduce confidence by 0.2 and magnitude by half. "
+    "If VIX > 25, reduce positive magnitude by 30%; fear compresses drift. "
+    "Only set horizon_override if the context suggests a materially different "
+    "window than 60 minutes.\n\n"
+    "Return ONLY JSON with sentiment, confidence, priority_modifier, and "
+    "horizon_override. No prose, no markdown, no explanation."
 )
 
 
@@ -79,14 +110,32 @@ class QwenEnricher:
         self._max_tokens = max_tokens
         self._client = client
 
-    async def enrich(self, headline: str, category: str, subcategory: str) -> EnrichmentResult:
-        user_prompt = (
-            f"/no_think Headline: \"{headline}\"\n"
-            f"Category: {category}/{subcategory}\n"
-            f"Symbol context: this headline was tagged to a specific stock. "
-            f"Will it move that stock's price in the next 60 minutes?"
+    async def enrich(
+        self,
+        headline: str,
+        category: str,
+        subcategory: str,
+        *,
+        context: EnrichmentContext | None = None,
+    ) -> EnrichmentResult:
+        result, _ = await self.enrich_with_response(
+            headline,
+            category,
+            subcategory,
+            context=context,
         )
+        return result
 
+    async def enrich_with_response(
+        self,
+        headline: str,
+        category: str,
+        subcategory: str,
+        *,
+        context: EnrichmentContext | None = None,
+    ) -> tuple[EnrichmentResult, dict[str, Any]]:
+        user_prompt = _build_user_prompt(headline, category, subcategory, context=context)
+        system_prompt = _SYSTEM_PROMPT_V2 if context is not None else _SYSTEM_PROMPT_V1
         try:
             client = self._client or httpx.AsyncClient(timeout=self._timeout_s)
             try:
@@ -96,7 +145,7 @@ class QwenEnricher:
                         json={
                             "model": self._model,
                             "messages": [
-                                {"role": "system", "content": _SYSTEM_PROMPT},
+                                {"role": "system", "content": system_prompt},
                                 {"role": "user", "content": user_prompt},
                             ],
                             "temperature": 0.0,
@@ -111,16 +160,16 @@ class QwenEnricher:
 
             if resp.status_code != 200:
                 logger.warning("qwen status %d for headline=%r", resp.status_code, headline[:60])
-                return _DEFAULT
+                return _DEFAULT, {}
 
             payload = resp.json()
             content = payload["choices"][0]["message"]["content"]
             json_str = _strip_thinking_and_extract_json(content)
             data = json.loads(json_str)
-            return self._parse(data)
+            return self._parse(data), data
         except (asyncio.TimeoutError, httpx.RequestError, KeyError, json.JSONDecodeError, ValueError) as exc:
             logger.warning("qwen enrichment failed (%s): %s", type(exc).__name__, str(exc)[:120])
-            return _DEFAULT
+            return _DEFAULT, {}
 
     @staticmethod
     def _parse(data: dict) -> EnrichmentResult:
@@ -147,3 +196,25 @@ class QwenEnricher:
             sentiment=sentiment, priority_modifier=pm,
             horizon_override=horizon_override, confidence=confidence,
         )
+
+
+def _build_user_prompt(
+    headline: str,
+    category: str,
+    subcategory: str,
+    *,
+    context: EnrichmentContext | None = None,
+) -> str:
+    if context is None:
+        return (
+            f"/no_think Headline: \"{headline}\"\n"
+            f"Category: {category}/{subcategory}\n"
+            f"Symbol context: this headline was tagged to a specific stock. "
+            f"Will it move that stock's price in the next 60 minutes?"
+        )
+    return (
+        f"/no_think Headline: \"{headline}\"\n"
+        f"Category: {category}/{subcategory}\n\n"
+        f"CONTEXT:\n{context.to_prompt_block()}\n\n"
+        "Based on the headline AND the context above, predict the 60-minute price direction."
+    )

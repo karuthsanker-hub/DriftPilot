@@ -16,6 +16,9 @@ CREATE TABLE IF NOT EXISTS catalyst_events (
     pillar          TEXT NOT NULL,
     sentiment       TEXT,
     priority_modifier REAL DEFAULT 0,
+    confidence      REAL DEFAULT NULL,
+    context_json    TEXT DEFAULT NULL,
+    qwen_response_json TEXT DEFAULT NULL,
     horizon_minutes INTEGER NOT NULL,
     headline        TEXT NOT NULL,
     headline_hash   TEXT NOT NULL,
@@ -31,9 +34,21 @@ def init_catalyst_schema(db_path: str) -> None:
     conn = sqlite3.connect(db_path)
     try:
         conn.executescript(CATALYST_SCHEMA_SQL)
+        _ensure_optional_columns(conn)
         conn.commit()
     finally:
         conn.close()
+
+
+def _ensure_optional_columns(conn: sqlite3.Connection) -> None:
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(catalyst_events)").fetchall()}
+    for name, ddl in {
+        "confidence": "ALTER TABLE catalyst_events ADD COLUMN confidence REAL DEFAULT NULL",
+        "context_json": "ALTER TABLE catalyst_events ADD COLUMN context_json TEXT DEFAULT NULL",
+        "qwen_response_json": "ALTER TABLE catalyst_events ADD COLUMN qwen_response_json TEXT DEFAULT NULL",
+    }.items():
+        if name not in existing:
+            conn.execute(ddl)
 
 
 def update_enrichment(
@@ -44,6 +59,9 @@ def update_enrichment(
     sentiment: str | None,
     priority_modifier: float,
     horizon_minutes: int,
+    confidence: float | None = None,
+    context_json: str | None = None,
+    qwen_response_json: str | None = None,
 ) -> int:
     """Patch an already-inserted event row with Qwen enrichment results.
 
@@ -54,10 +72,21 @@ def update_enrichment(
     """
     conn = sqlite3.connect(db_path)
     try:
+        _ensure_optional_columns(conn)
         cur = conn.execute(
             "UPDATE catalyst_events SET sentiment = ?, priority_modifier = ?, "
+            "confidence = ?, context_json = ?, qwen_response_json = ?, "
             "horizon_minutes = ? WHERE headline_hash = ? AND symbol = ?",
-            (sentiment, priority_modifier, horizon_minutes, headline_hash, symbol),
+            (
+                sentiment,
+                priority_modifier,
+                confidence,
+                context_json,
+                qwen_response_json,
+                horizon_minutes,
+                headline_hash,
+                symbol,
+            ),
         )
         conn.commit()
         return cur.rowcount
@@ -71,7 +100,10 @@ def insert_event(db_path: str, event: CatalystEvent) -> int:
     try:
         try:
             cur = conn.execute(
-                "INSERT INTO catalyst_events (event_ts, ingested_ts, symbol, category, subcategory, pillar, sentiment, priority_modifier, horizon_minutes, headline, headline_hash, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO catalyst_events "
+                "(event_ts, ingested_ts, symbol, category, subcategory, pillar, "
+                "sentiment, priority_modifier, horizon_minutes, headline, headline_hash, source) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     event.ts.isoformat(),
                     datetime.now(timezone.utc).isoformat(),

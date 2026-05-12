@@ -287,3 +287,49 @@ def test_query_filters_by_category_and_subcategory(catalyst_db, bar_root):
         max_event_age_minutes=60,
     )
     assert result.trades == []
+
+
+def test_confidence_and_priority_modifier_filters_events(catalyst_db, bar_root):
+    high = datetime(2024, 10, 14, 14, 35, tzinfo=timezone.utc)
+    low = datetime(2024, 10, 16, 14, 35, tzinfo=timezone.utc)
+    bars = []
+    base = datetime(2024, 10, 14, 14, 30, tzinfo=timezone.utc)
+    for i in range(60 * 24 * 5):
+        ts = base + timedelta(minutes=i)
+        price = 100.0 + 0.05 * (i % 100)
+        bars.append({"timestamp": ts, "open": price, "high": price, "low": price, "close": price, "volume": 1000})
+    _write_bars(bar_root, "REGN", 2024, bars)
+    insert_event(catalyst_db, _event("REGN", "earnings", "report", high))
+    insert_event(catalyst_db, _event("REGN", "earnings", "report", low))
+    conn = sqlite3.connect(catalyst_db)
+    conn.execute(
+        "UPDATE catalyst_events SET sentiment = 'positive', confidence = 0.82, "
+        "priority_modifier = 0.12 WHERE event_ts = ?",
+        (high.isoformat(),),
+    )
+    conn.execute(
+        "UPDATE catalyst_events SET sentiment = 'positive', confidence = 0.40, "
+        "priority_modifier = 0.03 WHERE event_ts = ?",
+        (low.isoformat(),),
+    )
+    conn.commit()
+    conn.close()
+
+    result = replay_catalyst_signal(
+        catalyst_db_path=catalyst_db,
+        bar_root=bar_root,
+        signal_factory=lambda: None,
+        category="earnings",
+        subcategory="report",
+        start=datetime(2024, 10, 1, tzinfo=timezone.utc),
+        end=datetime(2024, 10, 31, tzinfo=timezone.utc),
+        max_hold_minutes=60,
+        profit_take_pct=1.0,
+        stop_loss_pct=1.5,
+        max_event_age_minutes=60,
+        require_sentiment="positive",
+        min_confidence=0.7,
+        min_priority_modifier=0.08,
+    )
+
+    assert len(result.trades) == 1

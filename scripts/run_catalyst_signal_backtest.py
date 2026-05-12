@@ -119,6 +119,10 @@ def main() -> None:
     p.add_argument("--slot-value", type=float, default=1_000.0)
     p.add_argument("--require-sentiment", choices=["positive", "negative", "neutral"], default=None,
                    help="Filter events to only those Qwen tagged with this sentiment")
+    p.add_argument("--min-confidence", type=float, default=None,
+                   help="Require Qwen confidence >= this value")
+    p.add_argument("--min-priority-modifier", type=float, default=None,
+                   help="Require abs(priority_modifier) >= this value")
     args = p.parse_args()
 
     cfg = SIGNAL_CONFIGS[args.signal]
@@ -143,12 +147,19 @@ def main() -> None:
         slot_value=args.slot_value,
         starting_capital=args.starting_capital,
         require_sentiment=args.require_sentiment,
+        min_confidence=args.min_confidence,
+        min_priority_modifier=args.min_priority_modifier,
     )
 
     metrics = _compute_metrics(result.trades)
     metrics["total_return_pct"] = (result.ending_capital / result.starting_capital - 1) * 100.0
     metrics["starting_capital"] = result.starting_capital
     metrics["ending_capital"] = result.ending_capital
+    metrics["filters"] = {
+        "require_sentiment": args.require_sentiment,
+        "min_confidence": args.min_confidence,
+        "min_priority_modifier": args.min_priority_modifier,
+    }
 
     verdict, fail_reason = _determine_verdict(metrics, cfg["verdict_gate_edge_ratio"])
 

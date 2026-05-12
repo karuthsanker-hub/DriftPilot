@@ -57,6 +57,8 @@ def _query_events(
     start: datetime,
     end: datetime,
     require_sentiment: str | None = None,
+    min_confidence: float | None = None,
+    min_priority_modifier: float | None = None,
 ) -> list[tuple[str, str, str, str, str, int]]:
     """Pull events sorted by event_ts ascending. Tuple matches insert order:
     (symbol, category, subcategory, event_ts, headline, horizon_minutes).
@@ -67,6 +69,10 @@ def _query_events(
     """
     conn = sqlite3.connect(db_path)
     try:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(catalyst_events)").fetchall()}
+        if min_confidence is not None and "confidence" not in columns:
+            logger.warning("min_confidence requested but catalyst DB has no confidence column")
+            return []
         sql = (
             "SELECT symbol, category, subcategory, event_ts, headline, horizon_minutes "
             "FROM catalyst_events "
@@ -77,6 +83,12 @@ def _query_events(
         if require_sentiment:
             sql += " AND sentiment = ?"
             params.append(require_sentiment)
+        if min_confidence is not None:
+            sql += " AND confidence >= ?"
+            params.append(min_confidence)
+        if min_priority_modifier is not None:
+            sql += " AND ABS(priority_modifier) >= ?"
+            params.append(min_priority_modifier)
         sql += " ORDER BY event_ts ASC"
         cur = conn.execute(sql, params)
         return cur.fetchall()
@@ -132,6 +144,8 @@ def replay_catalyst_signal(
     starting_capital: float = 10_000.0,
     progress_every: int = 50,
     require_sentiment: str | None = None,
+    min_confidence: float | None = None,
+    min_priority_modifier: float | None = None,
 ) -> ReplayResult:
     """Simulate a catalyst signal trading 2024 events.
 
@@ -160,6 +174,8 @@ def replay_catalyst_signal(
         category=category, subcategory=subcategory,
         start=start, end=end,
         require_sentiment=require_sentiment,
+        min_confidence=min_confidence,
+        min_priority_modifier=min_priority_modifier,
     )
     sentiment_tag = f" sentiment={require_sentiment}" if require_sentiment else ""
     logger.info(

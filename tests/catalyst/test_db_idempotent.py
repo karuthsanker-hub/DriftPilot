@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import sqlite3
 
-from driftpilot.catalyst.db import init_catalyst_schema, insert_event
+from driftpilot.catalyst.db import init_catalyst_schema, insert_event, update_enrichment
 from driftpilot.catalyst.event import CatalystEvent
 
 
@@ -41,3 +42,29 @@ def test_insert_two_distinct_events_same_symbol(tmp_path) -> None:
     e2 = _event(headline_hash="h2")
     assert insert_event(db_path, e1) == 1
     assert insert_event(db_path, e2) == 1
+
+
+def test_schema_migrates_and_persists_v2_enrichment_columns(tmp_path) -> None:
+    db_path = str(tmp_path / "catalyst.db")
+    init_catalyst_schema(db_path)
+    assert insert_event(db_path, _event(headline_hash="h-v2", symbol="REGN")) == 1
+
+    updated = update_enrichment(
+        db_path,
+        "h-v2",
+        "REGN",
+        sentiment="positive",
+        priority_modifier=0.12,
+        horizon_minutes=240,
+        confidence=0.82,
+        context_json='{"eps_beat_pct":6.5}',
+        qwen_response_json='{"confidence":0.82}',
+    )
+
+    assert updated == 1
+    conn = sqlite3.connect(db_path)
+    row = conn.execute(
+        "SELECT confidence, context_json, qwen_response_json FROM catalyst_events"
+    ).fetchone()
+    conn.close()
+    assert row == (0.82, '{"eps_beat_pct":6.5}', '{"confidence":0.82}')
