@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from driftpilot.catalyst.universe_filter import CatalystUniverseFilter
 from driftpilot.clock import DriftPilotClock, datetime_to_storage, require_aware
@@ -11,6 +12,11 @@ from driftpilot.execution.slot_allocator import AllocationCandidate, AllocationR
 from driftpilot.settings import DriftPilotSettings
 from driftpilot.states import OperatorState
 from driftpilot.storage.repositories import DriftPilotRepository, StateTransitionRecord
+
+if TYPE_CHECKING:
+    from driftpilot.agents.orchestrator import AgentOrchestrator
+
+logger = logging.getLogger(__name__)
 
 
 class CatalystEventBusProtocol(Protocol):
@@ -111,6 +117,7 @@ class DriftPilotStateMachine:
         position_monitor: PositionMonitorService | None = None,
         catalyst_event_bus: CatalystEventBusProtocol | None = None,
         catalyst_universe_filter: CatalystUniverseFilter | None = None,
+        orchestrator: AgentOrchestrator | None = None,
     ) -> None:
         self.repository = repository
         self.settings = settings
@@ -122,6 +129,7 @@ class DriftPilotStateMachine:
         self.position_monitor = position_monitor
         self.catalyst_event_bus = catalyst_event_bus
         self.catalyst_universe_filter = catalyst_universe_filter
+        self.orchestrator = orchestrator
         # TODO(operator-runtime): the SCANNING-state scanner pipeline currently
         # encapsulates symbol selection inside `ScannerService.scan()`. The
         # operator runtime should construct the scanner with this same
@@ -239,7 +247,13 @@ class DriftPilotStateMachine:
                 )
                 return OperatorState.MARKET_CLOSED
 
+            # ── Agent tick: portfolio-level oversight ──
+            self._tick_agents_pm()
+
             if self.position_monitor is not None:
+                # ── Agent tick: per-position observation (before algo acts) ──
+                self._tick_agents_slots()
+
                 monitor_result = await self.position_monitor.monitor()
                 if monitor_result.halted_reason == "daily_loss_limit":
                     await self._transition(
@@ -264,6 +278,10 @@ class DriftPilotStateMachine:
             await self._transition(OperatorState.REGIME_CHECK, "market_open")
             scan_result = await self._scan()
             self._require_fresh_spy(scan_result)
+
+            # ── Agent tick: scanner entry approval ──
+            self._tick_agents_scanner(scan_result)
+
             await self._transition(
                 OperatorState.SCANNING,
                 "scan_complete",
@@ -328,6 +346,64 @@ class DriftPilotStateMachine:
                     slot_value=self.settings.slot_value,
                     updated_at=self.clock.now_utc(),
                 )
+
+    # ── Agent bridge helpers (observe-only, Wave 1) ────────────────
+    def _tick_agents_pm(self) -> None:
+        """Portfolio-level oversight tick. No-op if orchestrator is None."""
+        if self.orchestrator is None:
+            return
+        try:
+            from driftpilot.agents.state_machine_bridge import tick_pm_from_repo
+
+            n = tick_pm_from_repo(self.orchestrator, self.repository, self.settings)
+            if n:
+                logger.debug("agent PM tick processed %d messages", n)
+        except Exception:
+            logger.exception("agent PM tick failed (non-fatal)")
+
+    def _tick_agents_slots(self) -> None:
+        """Per-position observation tick. Reads open positions and lets slot
+        agents record their opinions before the algo executes exits."""
+        if self.orchestrator is None:
+            return
+        try:
+            from driftpilot.agents.state_machine_bridge import tick_slots_from_positions
+
+            positions = self.repository.positions.list_open()
+            # In Wave 1 (observe-only), we pass empty exit_decisions — the
+            # agents see position state but the algo's exit signals are not
+            # yet shared.  Wave 2 will split the monitor into decide/execute
+            # phases so agents can see algo intent before it acts.
+            exit_decisions: dict[int, tuple[str | None, float]] = {}
+            results = tick_slots_from_positions(
+                self.orchestrator, positions, exit_decisions, self.settings,
+            )
+            if results:
+                logger.debug("agent slot ticks: %s", results)
+        except Exception:
+            logger.exception("agent slot tick failed (non-fatal)")
+
+    def _tick_agents_scanner(self, scan_result: ScanResult) -> None:
+        """Scanner entry-approval tick. Lets agents weigh in on candidates."""
+        if self.orchestrator is None:
+            return
+        if not scan_result.candidates:
+            return
+        try:
+            from driftpilot.agents.state_machine_bridge import (
+                tick_scanner_from_candidates,
+            )
+
+            n = tick_scanner_from_candidates(
+                self.orchestrator,
+                scan_result.candidates,
+                scan_result.regime,
+                scan_result.metadata,
+            )
+            if n:
+                logger.debug("agent scanner tick requested %d entries", n)
+        except Exception:
+            logger.exception("agent scanner tick failed (non-fatal)")
 
     async def _scan(self) -> ScanResult:
         if self.scanner is None:

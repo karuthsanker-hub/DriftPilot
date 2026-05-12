@@ -336,6 +336,7 @@ async def _run(once: bool, mock_stream: bool, env_file: str, paper_live: bool = 
         position_monitor=monitor_service,
         catalyst_event_bus=catalyst_bus,
         catalyst_universe_filter=universe_filter,
+        orchestrator=orchestrator,
     )
 
     # Wire the catalyst bus subscription if available
