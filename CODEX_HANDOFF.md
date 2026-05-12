@@ -1,14 +1,14 @@
 # Codex Handoff — DriftPilot Project State
 
-**Date:** 2026-05-11  
-**Branch:** `main` at `3c454a8` (`origin/main` is `4f8ba49`; local branch ahead 14 commits)  
-**Latest commits:** `3c454a8` operator wiring; `d4809f7` Wave 4 dashboard/exporter; `b549008` handoff update; `f03c342` Wave 3 Orchestrator; `f31bb38` Wave 2  
+**Date:** 2026-05-12  
+**Branch:** `main` at `327c0b5` (`origin/main` is `4f8ba49`; local branch ahead 16 commits)  
+**Latest commits:** `327c0b5` Qwen v2 integrated; `3c454a8` operator wiring; `d4809f7` Wave 4 dashboard/exporter; `f03c342` Wave 3; `f31bb38` Wave 2  
 **Paper trading:** Day 2 complete; Day 3 is the first clean session with all bug fixes baked in
 
 ## Current Snapshot
 
-- **Working tree at last instruction update:** Qwen v2 phases A/C/D/E implemented but not committed; runtime artifacts under `.claude/` and `logs/` remain untracked.
-- **Last known full test gate:** `PYTHONPATH=src uv run --extra test pytest -q` passed: `1025 passed, 1 warning in 8.55s`.
+- **Working tree:** CLEAN — all Codex Qwen v2 + agent layer work committed. Only `.claude/` and `logs/` untracked (runtime artifacts).
+- **Last known full test gate:** `PYTHONPATH=src uv run --extra test pytest -q` passed: `1025 passed, 1 warning in 8.60s`.
 - **Agent layer gate:** `PYTHONPATH=src uv run --extra test pytest tests/agents/ -q` passed: `136 passed in 2.53s`. Agent ruff/mypy clean.
 - **Qwen v2 targeted gate:** `PYTHONPATH=src uv run --extra test pytest tests/catalyst/test_context_assembler.py tests/catalyst/test_headline_parser.py tests/catalyst/test_qwen_enricher.py tests/catalyst/test_qwen_enricher_v2.py tests/catalyst/test_db_idempotent.py tests/test_dashboard_catalyst_detail.py tests/test_enrichment_pipeline_integration.py tests/backtest/test_catalyst_replay.py -q` passed: `110 passed`.
 - **Repo-wide static checks:** `uvx ruff check src/driftpilot src/trading_bot/dashboard scripts tests` passed; `PYTHONPATH=src uv run --with mypy mypy src/driftpilot src/trading_bot/dashboard` passed with two informational notes about unchecked untyped function bodies in `services_live.py`.
