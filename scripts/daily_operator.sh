@@ -49,6 +49,7 @@ else
     TIMEOUT_CMD=""
 fi
 $TIMEOUT_CMD ./.venv/bin/python scripts/enrich_catalyst_events.py \
+    --db data/driftpilot/catalyst_events.sqlite3 \
     --priority-only --concurrency 32 \
     >> "$LOGFILE" 2>&1 || echo "[$(date)] WARNING: Qwen enrichment failed (DGX down?)" >> "$LOGFILE"
 

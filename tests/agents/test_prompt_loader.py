@@ -150,7 +150,7 @@ class TestRealPromptConfigs:
         loader = PromptLoader("config/prompts")
         config = loader.get("pm_entry_approval")
         assert config.model == "qwen"
-        assert config.timeout_ms == 500
+        assert config.timeout_ms == 5000
         assert config.fallback_action == "approve"
         assert "{symbol}" in config.user_template
         assert "{daily_pnl_pct}" in config.user_template

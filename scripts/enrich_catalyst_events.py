@@ -255,7 +255,7 @@ async def main_async(args) -> None:
 
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("--db", default="data/driftpilot/catalyst_events_2024.sqlite3")
+    p.add_argument("--db", default="data/driftpilot/catalyst_events.sqlite3")
     p.add_argument("--qwen-url", default="http://192.168.1.166:8000/v1")
     p.add_argument("--model", default="Qwen/Qwen3-8B")
     p.add_argument("--timeout-ms", type=int, default=10000, help="Per-call timeout (ms)")

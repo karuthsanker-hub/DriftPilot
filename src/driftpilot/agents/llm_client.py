@@ -90,11 +90,15 @@ class LLMClient:
         timeout_s = prompt.timeout_ms / 1000.0
         url = f"{self._qwen_url}/chat/completions"
 
+        # Append /no_think to suppress Qwen3's internal thinking blocks,
+        # which waste tokens and time for short JSON-only responses.
+        user_msg = user_content + "\n/no_think"
+
         body = {
             "model": self._qwen_model,
             "messages": [
                 {"role": "system", "content": prompt.system},
-                {"role": "user", "content": user_content},
+                {"role": "user", "content": user_msg},
             ],
             "max_tokens": prompt.max_tokens,
             "temperature": prompt.temperature,

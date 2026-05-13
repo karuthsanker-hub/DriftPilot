@@ -8,6 +8,7 @@ catalyst category.
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from typing import Any
 
@@ -18,6 +19,8 @@ from driftpilot.signals.earnings_report_v1.exits import evaluate_all
 from driftpilot.signals.earnings_report_v1.features import event_age_minutes
 from driftpilot.signals.filing_8a_v1.config import Filing8AConfig
 
+
+logger = logging.getLogger(__name__)
 
 SIGNAL_NAME = "filing_8a_v1"
 SIGNAL_VERSION = "1.0.0"
@@ -40,6 +43,9 @@ class Filing8ASignal:
         self._bus = bus
         self._active_events: dict[str, CatalystEvent] = {}
         self._sub_id: SubscriptionId | None = None
+        self._db_path: str | None = None
+        self._last_sentiment_refresh: float = 0.0
+        self._sentiment_refresh_interval: int = 120  # seconds
 
     async def _on_event(self, event: CatalystEvent) -> None:
         self._active_events[event.symbol.upper()] = event
@@ -63,6 +69,7 @@ class Filing8ASignal:
         import sqlite3
         from datetime import datetime, timedelta, timezone
 
+        self._db_path = db_path
         max_age = lookback_minutes or self._config.max_event_age_minutes
         cutoff = (datetime.now(timezone.utc) - timedelta(minutes=max_age)).isoformat()
 
@@ -105,9 +112,78 @@ class Filing8ASignal:
                 continue
         return loaded
 
+    def refresh_sentiment_from_db(self) -> int:
+        """Re-read sentiment/priority_modifier from DB for active events.
+
+        Called periodically during scan() so that events enriched after
+        bootstrap become visible without an operator restart.
+        """
+        if self._db_path is None:
+            return 0
+
+        import sqlite3
+        import time
+
+        now_mono = time.monotonic()
+        if now_mono - self._last_sentiment_refresh < self._sentiment_refresh_interval:
+            return 0
+        self._last_sentiment_refresh = now_mono
+
+        symbols_needing_refresh = [
+            sym for sym, ev in self._active_events.items()
+            if ev.sentiment is None
+        ]
+        if not symbols_needing_refresh:
+            return 0
+
+        conn = sqlite3.connect(self._db_path)
+        try:
+            placeholders = ",".join("?" for _ in symbols_needing_refresh)
+            rows = conn.execute(
+                f"SELECT symbol, sentiment, priority_modifier "
+                f"FROM catalyst_events "
+                f"WHERE symbol IN ({placeholders}) "
+                f"AND category = ? AND subcategory = ? "
+                f"AND sentiment IS NOT NULL",
+                [*symbols_needing_refresh, EVENT_CATEGORY, EVENT_SUBCATEGORY],
+            ).fetchall()
+        finally:
+            conn.close()
+
+        updated = 0
+        for row in rows:
+            sym = row[0].upper()
+            if sym in self._active_events:
+                ev = self._active_events[sym]
+                if ev.sentiment is None:
+                    self._active_events[sym] = CatalystEvent(
+                        symbol=ev.symbol,
+                        category=ev.category,
+                        subcategory=ev.subcategory,
+                        pillar=ev.pillar,
+                        ts=ev.ts,
+                        headline=ev.headline,
+                        source=ev.source,
+                        horizon_minutes=ev.horizon_minutes,
+                        headline_hash=ev.headline_hash,
+                        sentiment=row[1],
+                        priority_modifier=float(row[2] or 0.0),
+                    )
+                    updated += 1
+        if updated:
+            logger.info(
+                "[SIGNAL] refreshed sentiment for %d events from DB "
+                "(%d still unenriched)",
+                updated,
+                len(symbols_needing_refresh) - updated,
+            )
+        return updated
+
     async def scan(self, now: datetime | None = None) -> list[Candidate]:
         if now is None:
             now = datetime.now(timezone.utc)
+        # Periodically refresh sentiment from DB for unenriched events
+        self.refresh_sentiment_from_db()
         candidates: list[Candidate] = []
         max_age = self._config.max_event_age_minutes
         require_sentiment = self._config.require_sentiment

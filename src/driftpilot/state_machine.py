@@ -351,15 +351,41 @@ class DriftPilotStateMachine:
             )
 
     def _initialize_slots(self) -> None:
-        existing = {slot.slot_id for slot in self.repository.slots.list_all()}
+        now = self.clock.now_utc()
+        existing = {slot.slot_id: slot for slot in self.repository.slots.list_all()}
         for slot_id in range(1, self.settings.trade_slots + 1):
             if slot_id not in existing:
                 self.repository.slots.upsert(
                     slot_id,
                     status="EMPTY",
                     slot_value=self.settings.slot_value,
-                    updated_at=self.clock.now_utc(),
+                    updated_at=now,
                 )
+
+        # Clean stale RESERVED slots from previous operator runs.
+        # A slot stays RESERVED only while the allocator holds the lock
+        # and the broker fills the order — normally <60s. If it's still
+        # RESERVED after 10 minutes, the previous operator died mid-fill.
+        from datetime import timedelta
+
+        stale_cutoff = now - timedelta(minutes=10)
+        recycled = 0
+        for slot in existing.values():
+            if slot.status == "RESERVED" and slot.updated_at < stale_cutoff:
+                self.repository.slots.upsert(
+                    slot.slot_id,
+                    status="EMPTY",
+                    symbol=None,
+                    slot_value=slot.slot_value,
+                    metadata={},
+                    updated_at=now,
+                )
+                recycled += 1
+        if recycled:
+            logger.info(
+                "[BOOT] recycled %d stale RESERVED slots (older than 10min)",
+                recycled,
+            )
 
     # ── Agent bridge helpers (observe-only, Wave 1) ────────────────
     def _tick_agents_pm(self) -> None:
