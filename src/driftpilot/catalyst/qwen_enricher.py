@@ -61,7 +61,14 @@ _SYSTEM_PROMPT_V1 = (
 _SYSTEM_PROMPT_V2 = (
     "You are a short-term equity analyst predicting 60-minute price direction "
     "from financial news. Focus on trading impact, not word tone.\n\n"
-    "MAGNITUDE TIERS (use ranges, not fixed anchors):\n"
+    "OUTPUT FORMAT — return ONLY a JSON object with exactly these four keys:\n"
+    '{"sentiment": "positive", "priority_modifier": 0.12, "confidence": 0.85, "horizon_override": null}\n\n'
+    "FIELD DEFINITIONS:\n"
+    '- "sentiment": MUST be one of "positive", "negative", or "neutral" (a string, not a number)\n'
+    '- "priority_modifier": float from -0.20 to +0.20 (expected price move magnitude)\n'
+    '- "confidence": float from 0.0 to 1.0 (how sure you are of the direction)\n'
+    '- "horizon_override": 60, 240, 1440, 2880, or null\n\n'
+    "MAGNITUDE TIERS for priority_modifier:\n"
     "+0.15 to +0.20: Large-cap beat >5% or small-cap beat >3%, with guidance raise\n"
     "+0.08 to +0.14: Clear beat 2-5% on mid-cap, or any beat with hot sector tailwind\n"
     "+0.03 to +0.07: Small beat 1-2%, large-cap, or beat in line with history\n"
@@ -83,8 +90,7 @@ _SYSTEM_PROMPT_V2 = (
     "If VIX > 25, reduce positive magnitude by 30%; fear compresses drift. "
     "Only set horizon_override if the context suggests a materially different "
     "window than 60 minutes.\n\n"
-    "Return ONLY JSON with sentiment, confidence, priority_modifier, and "
-    "horizon_override. No prose, no markdown, no explanation."
+    "No prose, no markdown, no explanation. JSON only."
 )
 
 
@@ -175,7 +181,26 @@ class QwenEnricher:
     def _parse(data: dict) -> EnrichmentResult:
         sentiment = data.get("sentiment", "neutral")
         if sentiment not in _VALID_SENTIMENTS:
-            sentiment = "neutral"
+            # Qwen sometimes puts a numeric value in sentiment (e.g. "+0.14").
+            # Try to recover: if it looks numeric, use it as pm and infer sentiment.
+            try:
+                misplaced_pm = float(sentiment)
+                if misplaced_pm > 0.005:
+                    sentiment = "positive"
+                elif misplaced_pm < -0.005:
+                    sentiment = "negative"
+                else:
+                    sentiment = "neutral"
+                # Use the misplaced value as priority_modifier if pm field is empty/zero
+                raw_pm = data.get("priority_modifier", 0)
+                try:
+                    if abs(float(raw_pm)) < 0.001:
+                        data = {**data, "priority_modifier": misplaced_pm}
+                except (TypeError, ValueError):
+                    data = {**data, "priority_modifier": misplaced_pm}
+                logger.debug("recovered sentiment from numeric value: %s -> %s", misplaced_pm, sentiment)
+            except (TypeError, ValueError):
+                sentiment = "neutral"
 
         try:
             pm = float(data.get("priority_modifier", 0.0))

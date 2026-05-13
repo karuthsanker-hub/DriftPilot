@@ -165,6 +165,9 @@ async def _run(once: bool, mock_stream: bool, env_file: str, paper_live: bool = 
     orchestrator = build_orchestrator(settings)
     orchestrator.start()
 
+    # Market-data adapter for agent snapshots (best-effort, graceful with None)
+    from driftpilot.agents.market_data_adapter import MarketDataAdapter
+
     catalyst_bus, universe_filter, discovery_service = _build_catalyst_layer(settings)
     catalyst_db_path = settings.catalyst_db_path if settings.catalyst_enabled else None
 
@@ -325,6 +328,14 @@ async def _run(once: bool, mock_stream: bool, env_file: str, paper_live: bool = 
         )
         monitor_service = PaperPositionMonitor(repository, settings, clock=clock)
 
+    # Build market-data adapter for agent snapshots.
+    # In paper-live mode the REST quote provider has latest_quote but no
+    # session bars — the adapter handles None bar_provider gracefully.
+    market_adapter = MarketDataAdapter(
+        bar_provider=None,  # TODO: wire AlpacaSIPStream when bar data is needed
+        catalyst_db_path=catalyst_db_path,
+    )
+
     machine = DriftPilotStateMachine(
         repository,
         settings,
@@ -337,6 +348,7 @@ async def _run(once: bool, mock_stream: bool, env_file: str, paper_live: bool = 
         catalyst_event_bus=catalyst_bus,
         catalyst_universe_filter=universe_filter,
         orchestrator=orchestrator,
+        market_adapter=market_adapter,
     )
 
     # Wire the catalyst bus subscription if available

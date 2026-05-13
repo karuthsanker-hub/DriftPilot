@@ -393,6 +393,7 @@ class DriftPilotStateMachine:
             # Run agents — they log opinions and return verdicts
             agent_results = tick_slots_from_positions(
                 self.orchestrator, positions, exit_map, self.settings,
+                market_adapter=self.market_adapter,
             )
 
             if agent_results:
