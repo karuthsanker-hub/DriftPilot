@@ -255,8 +255,17 @@ class DriftPilotStateMachine:
             if self.position_monitor is not None:
                 # Use decide/execute split when orchestrator is active
                 if self.orchestrator is not None and self.orchestrator.running and hasattr(self.position_monitor, "decide"):
+                    logger.info("[AGENT] decide/execute path ACTIVE — agents will intercept exit decisions")
                     decisions = self.position_monitor.decide()
+                    logger.info(
+                        "[AGENT] algo decisions: %s",
+                        [(d.position.symbol, d.exit_reason or "HOLD", f"slot={d.position.slot_id}") for d in decisions],
+                    )
                     decisions = self._agent_intercept_exits(decisions)
+                    logger.info(
+                        "[AGENT] post-intercept decisions: %s",
+                        [(d.position.symbol, d.exit_reason or "HOLD", f"override={d.overridden_by_agent}") for d in decisions],
+                    )
                     monitor_result = await self.position_monitor.execute(decisions)
                 else:
                     monitor_result = await self.position_monitor.monitor()

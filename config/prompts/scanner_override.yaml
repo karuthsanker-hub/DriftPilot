@@ -1,6 +1,6 @@
 version: 1
 model: qwen
-timeout_ms: 500
+timeout_ms: 5000
 max_tokens: 256
 fallback_action: follow_algo
 temperature: 0.0

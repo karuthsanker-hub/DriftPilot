@@ -127,7 +127,14 @@ def tick_pm_from_repo(
             total_decisions_today=0,
         )
 
-        return orchestrator.tick_pm(snapshot)
+        logger.info(
+            "[AGENT-PM] tick: slots=%d/%d pnl=%.2f%% wins=%d losses=%d mins_left=%d sectors=%s",
+            open_count, total_slots, daily_pnl_pct * 100, consec_wins,
+            consec_losses, minutes_left, sector_exposure,
+        )
+        n = orchestrator.tick_pm(snapshot)
+        logger.info("[AGENT-PM] result: %d messages processed", n)
+        return n
     except Exception:
         logger.exception("Agent bridge: tick_pm failed")
         return 0
@@ -240,9 +247,23 @@ def tick_slots_from_positions(
                 signal_name=str(metadata.get("signal_name", settings.active_signal)),
             )
 
+            logger.info(
+                "[AGENT-SLOT-%d] tick: %s price=%.2f unrealized=%.2f%% "
+                "hold=%dmin algo_exit=%s target=%.2f%% stop=%.2f%% vix=%.1f",
+                pos.slot_id, pos.symbol, current_price, unrealized_pct,
+                age_minutes, algo_exit[0] or "HOLD", target_pct * 100,
+                stop_pct * 100, vix,
+            )
             result = orchestrator.tick_slot(pos.slot_id, snapshot, algo_says_exit)
             if result is not None:
+                logger.info(
+                    "[AGENT-SLOT-%d] verdict: action=%s confidence=%.2f reasoning=%s",
+                    pos.slot_id, result.action, result.confidence,
+                    result.reasoning[:120] if result.reasoning else "n/a",
+                )
                 results[pos.slot_id] = result.action
+            else:
+                logger.info("[AGENT-SLOT-%d] verdict: None (agent disabled or missing)", pos.slot_id)
         except Exception:
             logger.exception(
                 "Agent bridge: tick_slot failed for slot %d", pos.slot_id
@@ -294,7 +315,19 @@ def tick_scanner_from_candidates(
             sector_change_pct=float(metadata.get("sector_return", 0.0)),
         )
 
-        return orchestrator.tick_scanner(agent_candidates, market)
+        logger.info(
+            "[AGENT-SCANNER] tick: %d candidates regime=%s spy=%.2f%% vix=%.1f",
+            len(agent_candidates), regime, market.spy_change_pct, market.vix,
+        )
+        for c in agent_candidates:
+            logger.info(
+                "[AGENT-SCANNER]   candidate: %s score=%.3f sentiment=%s conf=%.2f headline=%.80s",
+                c.symbol, c.algo_score, c.sentiment, c.confidence,
+                c.headline,
+            )
+        n = orchestrator.tick_scanner(agent_candidates, market)
+        logger.info("[AGENT-SCANNER] result: %d entries requested", n)
+        return n
     except Exception:
         logger.exception("Agent bridge: tick_scanner failed")
         return 0
