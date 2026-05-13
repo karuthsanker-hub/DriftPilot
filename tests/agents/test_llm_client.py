@@ -64,8 +64,9 @@ class TestFallbackBehavior:
         assert result.used_fallback is True
         assert result.parsed["action"] == "hold"
 
-    def test_no_claude_key_returns_fallback(self):
-        client = LLMClient(claude_api_key="")
+    def test_no_claude_key_routes_to_qwen(self):
+        """Without a Claude API key, claude-model prompts route through Qwen."""
+        client = LLMClient(claude_api_key="", qwen_url="http://127.0.0.1:1")
         claude_prompt = PromptConfig(
             name="test",
             version="1",
@@ -78,8 +79,11 @@ class TestFallbackBehavior:
             user_template="{symbol}",
         )
         result = client.complete(claude_prompt, {"symbol": "X"})
+        # Qwen call will fail (no server) but it should attempt Qwen, not
+        # return no_claude_api_key immediately
         assert result.success is False
-        assert result.error == "no_claude_api_key"
+        assert result.used_fallback is True
+        assert "no_claude_api_key" not in (result.error or "")
 
 
 class TestResponseParsing:

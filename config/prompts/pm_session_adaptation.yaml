@@ -1,6 +1,6 @@
 version: 1
-model: claude
-timeout_ms: 3000
+model: qwen
+timeout_ms: 5000
 max_tokens: 512
 fallback_action: hold
 temperature: 0.0

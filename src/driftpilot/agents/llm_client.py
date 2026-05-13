@@ -76,7 +76,11 @@ class LLMClient:
         if model_type == "qwen":
             return self._call_qwen(prompt, user_content)
         elif model_type == "claude":
-            return self._call_claude(prompt, user_content)
+            if self._claude_api_key:
+                return self._call_claude(prompt, user_content)
+            # No Claude API key — route through Qwen instead
+            logger.info("No Claude API key, routing '%s' through Qwen", prompt.name)
+            return self._call_qwen(prompt, user_content)
         else:
             logger.error("Unknown model type: %s", model_type)
             return self._fallback_response(prompt, "unknown_model_type")
