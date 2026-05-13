@@ -118,6 +118,7 @@ class DriftPilotStateMachine:
         catalyst_event_bus: CatalystEventBusProtocol | None = None,
         catalyst_universe_filter: CatalystUniverseFilter | None = None,
         orchestrator: AgentOrchestrator | None = None,
+        market_adapter: Any | None = None,
     ) -> None:
         self.repository = repository
         self.settings = settings
@@ -130,6 +131,7 @@ class DriftPilotStateMachine:
         self.catalyst_event_bus = catalyst_event_bus
         self.catalyst_universe_filter = catalyst_universe_filter
         self.orchestrator = orchestrator
+        self.market_adapter = market_adapter
         # TODO(operator-runtime): the SCANNING-state scanner pipeline currently
         # encapsulates symbol selection inside `ScannerService.scan()`. The
         # operator runtime should construct the scanner with this same
@@ -251,10 +253,13 @@ class DriftPilotStateMachine:
             self._tick_agents_pm()
 
             if self.position_monitor is not None:
-                # ── Agent tick: per-position observation (before algo acts) ──
-                self._tick_agents_slots()
-
-                monitor_result = await self.position_monitor.monitor()
+                # Use decide/execute split when orchestrator is active
+                if self.orchestrator is not None and self.orchestrator.running and hasattr(self.position_monitor, "decide"):
+                    decisions = self.position_monitor.decide()
+                    decisions = self._agent_intercept_exits(decisions)
+                    monitor_result = await self.position_monitor.execute(decisions)
+                else:
+                    monitor_result = await self.position_monitor.monitor()
                 if monitor_result.halted_reason == "daily_loss_limit":
                     await self._transition(
                         OperatorState.HALTED_RISK,
@@ -361,27 +366,104 @@ class DriftPilotStateMachine:
         except Exception:
             logger.exception("agent PM tick failed (non-fatal)")
 
-    def _tick_agents_slots(self) -> None:
-        """Per-position observation tick. Reads open positions and lets slot
-        agents record their opinions before the algo executes exits."""
-        if self.orchestrator is None:
-            return
+    def _agent_intercept_exits(self, decisions: list) -> list:
+        """Let slot agents observe and potentially override exit decisions.
+
+        Each ExitDecision is passed to the slot agent for that position.
+        The agent can:
+        - Agree with the algo (no change)
+        - Request an early cut (flip HOLD → EXIT) — subject to guardrail
+        - Veto an exit (flip EXIT → HOLD) — subject to override rate limit
+
+        Returns the (possibly modified) decision list.
+        """
+        if self.orchestrator is None or not self.orchestrator.running:
+            return decisions
+
         try:
             from driftpilot.agents.state_machine_bridge import tick_slots_from_positions
+            from driftpilot.services import ExitDecision
 
-            positions = self.repository.positions.list_open()
-            # In Wave 1 (observe-only), we pass empty exit_decisions — the
-            # agents see position state but the algo's exit signals are not
-            # yet shared.  Wave 2 will split the monitor into decide/execute
-            # phases so agents can see algo intent before it acts.
-            exit_decisions: dict[int, tuple[str | None, float]] = {}
-            results = tick_slots_from_positions(
-                self.orchestrator, positions, exit_decisions, self.settings,
+            # Build exit_decisions map for the bridge
+            positions = [d.position for d in decisions]
+            exit_map: dict[int, tuple[str | None, float]] = {}
+            for d in decisions:
+                exit_map[d.position.id] = (d.exit_reason, d.reference_price)
+
+            # Run agents — they log opinions and return verdicts
+            agent_results = tick_slots_from_positions(
+                self.orchestrator, positions, exit_map, self.settings,
             )
-            if results:
-                logger.debug("agent slot ticks: %s", results)
+
+            if agent_results:
+                logger.info("agent slot verdicts: %s", agent_results)
+
+            # Check override rate before applying any agent overrides
+            override_rate = self.orchestrator.get_override_rate()
+            max_rate = self.orchestrator._config.max_override_rate
+            rate_exceeded = override_rate >= max_rate
+
+            if rate_exceeded:
+                logger.warning(
+                    "agent override rate %.1f%% >= limit %.1f%%, blocking new overrides",
+                    override_rate * 100, max_rate * 100,
+                )
+
+            # Apply agent overrides to decisions (Phase 2 — active overrides)
+            new_decisions = []
+            for d in decisions:
+                slot_id = d.position.slot_id
+                agent_action = agent_results.get(slot_id) if slot_id is not None else None
+
+                if agent_action is None:
+                    new_decisions.append(d)
+                    continue
+
+                # Agent wants early cut but algo says HOLD
+                if rate_exceeded:
+                    new_decisions.append(d)  # rate exceeded, don't override
+                    continue
+
+                if agent_action == "request_early_cut" and d.exit_reason is None:
+                    new_decisions.append(
+                        ExitDecision(
+                            position=d.position,
+                            exit_reason="AGENT_CUT",
+                            reference_price=d.reference_price,
+                            overridden_by_agent=True,
+                            agent_action=agent_action,
+                        )
+                    )
+                    logger.info(
+                        "agent override: slot %d %s HOLD→EXIT (early cut)",
+                        slot_id, d.position.symbol,
+                    )
+                # Agent wants to hold but algo says EXIT — agent vetoes
+                elif agent_action == "hold" and d.exit_reason is not None:
+                    # Only non-mechanical exits can be vetoed (not TIME/STOP)
+                    if d.exit_reason not in ("TIME", "STOP"):
+                        new_decisions.append(
+                            ExitDecision(
+                                position=d.position,
+                                exit_reason=None,  # vetoed → HOLD
+                                reference_price=d.reference_price,
+                                overridden_by_agent=True,
+                                agent_action=agent_action,
+                            )
+                        )
+                        logger.info(
+                            "agent override: slot %d %s EXIT→HOLD (agent veto)",
+                            slot_id, d.position.symbol,
+                        )
+                    else:
+                        new_decisions.append(d)  # mechanical exits can't be vetoed
+                else:
+                    new_decisions.append(d)
+
+            return new_decisions
         except Exception:
-            logger.exception("agent slot tick failed (non-fatal)")
+            logger.exception("agent exit intercept failed (non-fatal, using original decisions)")
+            return decisions
 
     def _tick_agents_scanner(self, scan_result: ScanResult) -> None:
         """Scanner entry-approval tick. Lets agents weigh in on candidates."""

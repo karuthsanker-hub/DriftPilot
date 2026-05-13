@@ -198,6 +198,62 @@ class QwenEnricher:
         )
 
 
+_CATEGORY_HINTS: dict[str, str] = {
+    "earnings/report": (
+        "CATEGORY PRIOR: Earnings reports almost always move a stock. "
+        "A beat → positive. A miss → negative. Only neutral if the headline "
+        "gives NO indication of beat/miss (rare for earnings reports)."
+    ),
+    "earnings/beat": (
+        "CATEGORY PRIOR: This is explicitly tagged as an earnings beat. "
+        "Default sentiment is positive unless the headline mentions negative "
+        "guidance or a revenue miss that outweighs the EPS beat."
+    ),
+    "earnings/miss": (
+        "CATEGORY PRIOR: This is explicitly tagged as an earnings miss. "
+        "Default sentiment is negative unless there's a strong offset "
+        "(raised guidance, one-time charges excluded)."
+    ),
+    "earnings/guidance_up": (
+        "CATEGORY PRIOR: Raised guidance is a strong positive signal. "
+        "Default: positive with priority_modifier ≥ +0.08."
+    ),
+    "earnings/guidance_down": (
+        "CATEGORY PRIOR: Lowered guidance is a strong negative signal. "
+        "Default: negative with priority_modifier ≤ -0.08."
+    ),
+    "analyst/target_raise": (
+        "CATEGORY PRIOR: Analyst target raise is mildly positive. "
+        "Default: positive with priority_modifier +0.03 to +0.08."
+    ),
+    "analyst/target_cut": (
+        "CATEGORY PRIOR: Analyst target cut is mildly negative. "
+        "Default: negative with priority_modifier -0.03 to -0.08."
+    ),
+    "analyst/upgrade": (
+        "CATEGORY PRIOR: Analyst upgrade is positive. "
+        "Default: positive with priority_modifier +0.05 to +0.12."
+    ),
+    "analyst/downgrade": (
+        "CATEGORY PRIOR: Analyst downgrade is negative. "
+        "Default: negative with priority_modifier -0.05 to -0.12."
+    ),
+    "m_and_a/acquires": (
+        "CATEGORY PRIOR: Acquisition target usually gaps up. Acquirer is mixed. "
+        "If the headline is about the TARGET company → positive."
+    ),
+    "filing/8a": (
+        "CATEGORY PRIOR: 8-A filings are routine SEC registrations. "
+        "Usually neutral unless the filing content signals dilution or a new product. "
+        "Read the headline carefully — if it's just a filing notice, neutral."
+    ),
+    "filing/8k": (
+        "CATEGORY PRIOR: 8-K filings can be anything. Read the headline for "
+        "the actual content (executive change, material event, etc.)."
+    ),
+}
+
+
 def _build_user_prompt(
     headline: str,
     category: str,
@@ -205,16 +261,39 @@ def _build_user_prompt(
     *,
     context: EnrichmentContext | None = None,
 ) -> str:
+    cat_key = f"{category}/{subcategory}"
+    hint = _CATEGORY_HINTS.get(cat_key, "")
+
     if context is None:
+        hint_line = f"{hint}\n" if hint else ""
         return (
             f"/no_think Headline: \"{headline}\"\n"
             f"Category: {category}/{subcategory}\n"
+            f"{hint_line}"
             f"Symbol context: this headline was tagged to a specific stock. "
             f"Will it move that stock's price in the next 60 minutes?"
         )
-    return (
-        f"/no_think Headline: \"{headline}\"\n"
-        f"Category: {category}/{subcategory}\n\n"
-        f"CONTEXT:\n{context.to_prompt_block()}\n\n"
-        "Based on the headline AND the context above, predict the 60-minute price direction."
+
+    # Build context block, noting which fields have real data vs unknown
+    ctx_block = context.to_prompt_block()
+    has_data = context.eps_beat_pct is not None or context.market_cap_m is not None
+
+    guidance = (
+        "Based on the headline, category prior, AND the context above, "
+        "predict the 60-minute price direction."
+        if has_data
+        else "Context data is limited. Rely heavily on the headline text and "
+        "category prior to determine sentiment. Do NOT default to neutral "
+        "just because context is missing — the category and headline alone "
+        "are often sufficient for a directional call."
     )
+
+    parts = [
+        f'/no_think Headline: "{headline}"',
+        f"Category: {category}/{subcategory}",
+    ]
+    if hint:
+        parts.append(f"\n{hint}")
+    parts.append(f"\nCONTEXT:\n{ctx_block}")
+    parts.append(f"\n{guidance}")
+    return "\n".join(parts)

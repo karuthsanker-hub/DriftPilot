@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from driftpilot.agents.market_data_adapter import MarketDataAdapter
     from driftpilot.agents.orchestrator import AgentOrchestrator
     from driftpilot.execution.slot_allocator import AllocationCandidate
     from driftpilot.settings import DriftPilotSettings
@@ -137,6 +138,7 @@ def tick_slots_from_positions(
     positions: list[PositionRecord],
     exit_decisions: dict[int, tuple[str | None, float]],
     settings: DriftPilotSettings,
+    market_adapter: MarketDataAdapter | None = None,
 ) -> dict[int, str]:
     """Run tick_slot for each open position.
 
@@ -146,6 +148,7 @@ def tick_slots_from_positions(
         exit_decisions: Map of position.id -> (exit_reason, reference_price)
             from the algo's _exit_signal. None exit_reason means algo says HOLD.
         settings: DriftPilot settings.
+        market_adapter: Optional adapter for live market data fields.
 
     Returns:
         Map of slot_id -> agent action string (for logging).
@@ -164,8 +167,44 @@ def tick_slots_from_positions(
             reference_price = algo_exit[1] if algo_exit[1] > 0 else pos.entry_price
 
             metadata = pos.metadata or {}
-            current_price = float(metadata.get("current_price", reference_price))
+            sector = str(metadata.get("sector", "unknown"))
             entry = pos.entry_price
+
+            # Use market adapter for live data, fall back to metadata/placeholders
+            if market_adapter is not None:
+                mkt = market_adapter.compute(
+                    symbol=pos.symbol,
+                    sector=sector,
+                    entry_time=pos.opened_at,
+                )
+                current_price = mkt.current_price or float(
+                    metadata.get("current_price", reference_price)
+                )
+                last_10_closes = mkt.last_10_closes or [current_price]
+                last_10_volumes = mkt.last_10_volumes or [0]
+                recent_vol = mkt.recent_vol
+                avg_vol = mkt.avg_vol
+                rvol = mkt.rvol
+                consolidation_bars = mkt.consolidation_bars
+                spy_move_pct = mkt.spy_move_pct
+                sector_move_pct = mkt.sector_move_pct
+                vix = mkt.vix
+                new_headlines = mkt.new_headlines
+            else:
+                current_price = float(
+                    metadata.get("current_price", reference_price)
+                )
+                last_10_closes = [current_price]
+                last_10_volumes = [0]
+                recent_vol = 0.0
+                avg_vol = 0
+                rvol = 1.0
+                consolidation_bars = 0
+                spy_move_pct = 0.0
+                sector_move_pct = 0.0
+                vix = 0.0
+                new_headlines = ""
+
             unrealized_pct = ((current_price - entry) / entry * 100) if entry > 0 else 0.0
             target_pct = ((pos.target_price - entry) / entry) if entry > 0 else 0.01
             stop_pct = ((entry - pos.stop_price) / entry) if entry > 0 else 0.015
@@ -186,18 +225,18 @@ def tick_slots_from_positions(
                 stop_pct=stop_pct,
                 hold_minutes=age_minutes,
                 max_hold_minutes=settings.max_hold_minutes,
-                last_10_closes=[current_price] * 10,  # placeholder
-                last_10_volumes=[0] * 10,  # placeholder
+                last_10_closes=last_10_closes,
+                last_10_volumes=last_10_volumes,
                 high_pct=high_pct,
                 low_pct=low_pct,
-                consolidation_bars=0,
-                recent_vol=0,
-                avg_vol=0,
-                rvol=1.0,
-                sector_move_pct=0.0,
-                spy_move_pct=0.0,
-                vix=0.0,
-                new_headlines="",
+                consolidation_bars=consolidation_bars,
+                recent_vol=recent_vol,
+                avg_vol=avg_vol,
+                rvol=rvol,
+                sector_move_pct=sector_move_pct,
+                spy_move_pct=spy_move_pct,
+                vix=vix,
+                new_headlines=new_headlines,
                 signal_name=str(metadata.get("signal_name", settings.active_signal)),
             )
 

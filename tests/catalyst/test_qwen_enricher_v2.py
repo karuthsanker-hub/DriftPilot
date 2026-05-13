@@ -53,6 +53,9 @@ def test_v1_prompt_remains_backward_compatible_without_context() -> None:
 
     assert "Symbol context: this headline was tagged" in prompt
     assert "CONTEXT:" not in prompt
+    # v2 adds category-specific hints to the v1 path
+    assert "CATEGORY PRIOR" in prompt
+    assert "Earnings reports" in prompt
 
 
 @pytest.mark.asyncio

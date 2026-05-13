@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import logging
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -11,6 +12,19 @@ from driftpilot.execution.slot_allocator import AllocationCandidate, AllocationR
 from driftpilot.settings import DriftPilotSettings
 from driftpilot.state_machine import PositionMonitorResult, ScanResult
 from driftpilot.storage.repositories import DriftPilotRepository, PositionRecord
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class ExitDecision:
+    """An exit decision for one position (before execution)."""
+
+    position: PositionRecord
+    exit_reason: str | None  # None = HOLD
+    reference_price: float
+    overridden_by_agent: bool = False
+    agent_action: str | None = None  # e.g. "request_early_cut", "hold"
 
 
 @dataclass(frozen=True, slots=True)
@@ -214,16 +228,43 @@ class PaperPositionMonitor:
         self.clock = clock or DriftPilotClock(settings.timezone)
         self.fills = PaperFillEngine(repository, settings, clock=self.clock)
 
-    async def monitor(self) -> PositionMonitorResult:
+    def decide(self) -> list[ExitDecision]:
+        """Phase 1: Compute exit decisions for all open positions.
+
+        Returns a list of ExitDecision objects. Positions where
+        exit_reason is None are HOLDs. This does NOT execute any exits.
+        """
+        now = self.clock.now_utc()
+        decisions: list[ExitDecision] = []
+        for position in self.repository.positions.list_open():
+            exit_reason, reference_price = self._exit_signal(position, now)
+            self._update_slot_mark(position, reference_price, now)
+            decisions.append(
+                ExitDecision(
+                    position=position,
+                    exit_reason=exit_reason,
+                    reference_price=reference_price,
+                )
+            )
+        return decisions
+
+    async def execute(self, decisions: list[ExitDecision]) -> PositionMonitorResult:
+        """Phase 2: Execute a list of exit decisions.
+
+        Only decisions where exit_reason is not None will be executed.
+        """
         now = self.clock.now_utc()
         recycled = 0
         exits = 0
         realized_today = 0.0
-        for position in self.repository.positions.list_open():
-            exit_reason, reference_price = self._exit_signal(position, now)
-            self._update_slot_mark(position, reference_price, now)
-            if exit_reason is None:
+
+        for decision in decisions:
+            if decision.exit_reason is None:
                 continue
+            position = decision.position
+            exit_reason = decision.exit_reason
+            reference_price = decision.reference_price
+
             exits += 1
             order = self.repository.orders.create(
                 symbol=position.symbol,
@@ -234,7 +275,11 @@ class PaperPositionMonitor:
                 position_id=position.id,
                 slot_id=position.slot_id,
                 limit_price=round(reference_price * 0.998, 4),
-                metadata={"exit_reason": exit_reason},
+                metadata={
+                    "exit_reason": exit_reason,
+                    "overridden_by_agent": decision.overridden_by_agent,
+                    "agent_action": decision.agent_action,
+                },
                 submitted_at=now,
             )
             applied = await self.fills.apply_exit(
@@ -274,6 +319,7 @@ class PaperPositionMonitor:
                     at=now,
                 )
                 recycled += 1
+
         halted = None
         if realized_today <= -(self.settings.paper_capital * self.settings.daily_loss_limit_pct):
             halted = "daily_loss_limit"
@@ -284,6 +330,11 @@ class PaperPositionMonitor:
             halted_reason=halted,
             metadata={"realized_pnl": realized_today, "checked_at": datetime_to_storage(now)},
         )
+
+    async def monitor(self) -> PositionMonitorResult:
+        """Backward-compatible: decide then execute in one call."""
+        decisions = self.decide()
+        return await self.execute(decisions)
 
     def _exit_signal(self, position: PositionRecord, now: datetime) -> tuple[str | None, float]:
         age_minutes = (now - position.opened_at).total_seconds() / 60
