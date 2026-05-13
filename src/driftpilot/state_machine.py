@@ -320,12 +320,17 @@ class DriftPilotStateMachine:
                 {"candidate_count": len(scan_result.candidates)},
             )
             allocation_result = await self.allocator.allocate(scan_result.candidates)
+            # Build per-reason rejection counts for dashboard diagnostics.
+            rejection_reasons: dict[str, int] = {}
+            for rej in allocation_result.rejections:
+                rejection_reasons[rej.reason] = rejection_reasons.get(rej.reason, 0) + 1
             await self._transition(
                 OperatorState.IN_POSITION,
                 "allocation_complete",
                 {
                     "allocated": len(allocation_result.allocations),
                     "rejected": len(allocation_result.rejections),
+                    "rejection_reasons": rejection_reasons,
                 },
             )
             self._error_count = 0

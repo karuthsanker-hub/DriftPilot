@@ -73,7 +73,7 @@ def test_allocator_lock_prevents_duplicate_allocation_with_two_simultaneous_free
 def test_allocator_sector_cap_limits_five_same_sector_candidates_to_three(tmp_path) -> None:
     async def run() -> None:
         repo = _repo(tmp_path)
-        allocator = SlotAllocator(repo, _settings(), clock=FixedClock(fixed_now=NOW))
+        allocator = SlotAllocator(repo, _settings(), clock=FixedClock(fixed_now=NOW), max_slots_per_sector=3)
         candidates = [_candidate(f"T{i}", sector="Technology", rank=i) for i in range(1, 6)]
 
         result = await allocator.allocate(candidates)

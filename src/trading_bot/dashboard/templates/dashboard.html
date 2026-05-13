@@ -154,6 +154,36 @@
           <div class="section-title"><span>Recycle Log</span><span class="mono">last events</span></div>
           <div id="recycle" class="log"></div>
         </section>
+        <!-- Diagnostics panels -->
+        <section class="panel" id="diag-catalyst-panel">
+          <div class="section-title"><span>🔬 Catalyst Pool Health</span><span id="diag-catalyst-summary" class="mono">loading...</span></div>
+          <div id="diag-catalyst" style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:12px;">
+          </div>
+          <div id="diag-catalyst-types"></div>
+        </section>
+        <section class="panel" id="diag-scanner-panel">
+          <div class="section-title"><span>📊 Scanner &amp; Allocator Pipeline</span><span id="diag-scanner-summary" class="mono"></span></div>
+          <div id="diag-scanner" style="display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-bottom:12px;"></div>
+          <div id="diag-rejections"></div>
+        </section>
+        <section class="panel" id="diag-signal-panel">
+          <div class="section-title"><span>📈 Signal P&amp;L Breakdown</span><span class="mono">today by signal</span></div>
+          <table class="trades-table">
+            <thead><tr><th>Signal</th><th>Trades</th><th>W/L</th><th>Win%</th><th>P&amp;L</th></tr></thead>
+            <tbody id="diag-signal-body"></tbody>
+          </table>
+        </section>
+        <section class="panel" id="diag-symbol-panel">
+          <div class="section-title"><span>💰 Per-Symbol P&amp;L</span><span class="mono">today top/bottom</span></div>
+          <table class="trades-table">
+            <thead><tr><th>Symbol</th><th>Trades</th><th>W/L</th><th>Avg</th><th>Best</th><th>Worst</th><th>Total</th></tr></thead>
+            <tbody id="diag-symbol-body"></tbody>
+          </table>
+        </section>
+        <section class="panel" id="diag-slots-panel">
+          <div class="section-title"><span>🔲 Slot Utilisation</span><span id="diag-slots-summary" class="mono"></span></div>
+          <div id="diag-slots" style="display:grid;grid-template-columns:repeat(5,1fr);gap:8px;"></div>
+        </section>
       </section>
       <aside class="rail">
         <div class="section-title"><span>Ranked Queue</span><span id="queue-count" class="mono"></span></div>
@@ -367,10 +397,111 @@
       document.getElementById("catalyst-modal").addEventListener("click", (event) => {
         if (event.target.id === "catalyst-modal") event.currentTarget.classList.remove("open");
       });
+      // ── Diagnostics panel rendering ──
+      function diagMetric(label, value, cls) {
+        return `<div style="padding:10px;border:1px solid var(--line-soft);border-radius:6px;background:var(--panel-2);">
+          <div class="label">${label}</div>
+          <div class="mono" style="margin-top:6px;font-size:18px;font-weight:700;${cls ? `color:var(--${cls})` : ''}">${value}</div>
+        </div>`;
+      }
+      function renderDiagnostics(d) {
+        // Catalyst pool health
+        const cp = d.catalyst_pool || {};
+        document.getElementById("diag-catalyst-summary").textContent =
+          cp.status === "ok" ? `${cp.total_4h} events (4h) · ${cp.sentiment_pct}% enriched` : cp.status || "?";
+        document.getElementById("diag-catalyst").innerHTML = cp.status === "ok" ? [
+          diagMetric("Events (4h)", cp.total_4h, "blue"),
+          diagMetric("Last hour", cp.total_1h, cp.total_1h > 0 ? "green" : "red"),
+          diagMetric("Sentiment %", `${cp.sentiment_pct}%`, cp.sentiment_pct > 80 ? "green" : cp.sentiment_pct > 50 ? "amber" : "red"),
+          diagMetric("Positive", cp.positive, "green"),
+        ].join("") : `<div class="sub">Catalyst DB not available</div>`;
+        const types = (cp.by_type || []);
+        document.getElementById("diag-catalyst-types").innerHTML = types.length ? `
+          <table class="trades-table"><thead><tr><th>Type</th><th>Count</th><th>+Pos</th><th>-Neg</th></tr></thead>
+          <tbody>${types.map(t => `<tr>
+            <td class="mono">${t.category}/${t.subcategory}</td>
+            <td class="mono">${t.count}</td>
+            <td class="mono green">${t.positive}</td>
+            <td class="mono red">${t.negative}</td>
+          </tr>`).join("")}</tbody></table>` : "";
+
+        // Scanner & allocator stats
+        const sc = d.scanner_stats || {};
+        document.getElementById("diag-scanner-summary").textContent =
+          `${sc.scan_cycles_today || 0} cycles · ${sc.acceptance_rate || 0}% accepted`;
+        document.getElementById("diag-scanner").innerHTML = [
+          diagMetric("Scan Cycles", sc.scan_cycles_today || 0, "blue"),
+          diagMetric("Candidates", sc.total_candidates_seen || 0, ""),
+          diagMetric("Allocated", sc.total_allocated || 0, "green"),
+          diagMetric("Rejected", sc.total_rejected || 0, sc.total_rejected > 0 ? "red" : ""),
+          diagMetric("Accept %", `${sc.acceptance_rate || 0}%`, sc.acceptance_rate > 50 ? "green" : "amber"),
+        ].join("");
+        // Rejection reasons
+        const rj = d.rejection_summary || [];
+        document.getElementById("diag-rejections").innerHTML = rj.length ?
+          `<div class="label" style="margin-bottom:8px">REJECTION REASONS</div>` +
+          rj.map(r => `<div style="display:flex;justify-content:space-between;padding:6px 8px;border-bottom:1px solid var(--line-soft);">
+            <span class="mono" style="color:var(--amber)">${r.reason}</span>
+            <span class="mono" style="font-weight:700">${r.count}</span>
+          </div>`).join("") : `<div class="sub">No rejection data</div>`;
+
+        // Signal P&L breakdown
+        const signals = d.signal_breakdown || [];
+        document.getElementById("diag-signal-body").innerHTML = signals.length ? signals.map(s => {
+          const pnlCls = s.total_pnl >= 0 ? "green" : "red";
+          return `<tr>
+            <td class="mono">${s.signal}</td>
+            <td class="mono">${s.trades}</td>
+            <td class="mono">${s.wins}W ${s.losses}L</td>
+            <td class="mono">${s.win_rate}%</td>
+            <td class="mono ${pnlCls}">${s.total_pnl >= 0 ? "+" : ""}${fmtMoney(s.total_pnl)}</td>
+          </tr>`;
+        }).join("") : `<tr><td colspan="5" class="sub">No signal data today</td></tr>`;
+
+        // Per-symbol P&L
+        const symbols = d.symbol_pnl || [];
+        document.getElementById("diag-symbol-body").innerHTML = symbols.length ? symbols.map(s => {
+          const pnlCls = s.total_pnl >= 0 ? "green" : "red";
+          return `<tr>
+            <td><strong class="mono">${s.symbol}</strong></td>
+            <td class="mono">${s.trades}</td>
+            <td class="mono">${s.wins}W ${s.losses}L</td>
+            <td class="mono">${fmtMoney(s.avg_pnl)}</td>
+            <td class="mono green">${fmtMoney(s.best)}</td>
+            <td class="mono red">${fmtMoney(s.worst)}</td>
+            <td class="mono ${pnlCls}" style="font-weight:700">${s.total_pnl >= 0 ? "+" : ""}${fmtMoney(s.total_pnl)}</td>
+          </tr>`;
+        }).join("") : `<tr><td colspan="7" class="sub">No trades today</td></tr>`;
+
+        // Slot utilisation
+        const slots = d.slot_analysis || [];
+        const open = slots.filter(s => s.status !== "EMPTY").length;
+        const empty = slots.filter(s => s.status === "EMPTY").length;
+        document.getElementById("diag-slots-summary").textContent = `${open} active · ${empty} empty of ${slots.length}`;
+        document.getElementById("diag-slots").innerHTML = slots.map(s => {
+          const isEmpty = s.status === "EMPTY";
+          const bgColor = isEmpty ? "rgba(255,64,84,.06)" : "rgba(37,211,154,.06)";
+          const borderColor = isEmpty ? "rgba(255,64,84,.25)" : "var(--line-soft)";
+          return `<div style="padding:8px;border:1px solid ${borderColor};border-radius:6px;background:${bgColor};font-size:12px;">
+            <div class="mono" style="font-weight:700;margin-bottom:4px;">SLOT ${s.slot_id}</div>
+            <div class="mono ${isEmpty ? "red" : "green"}" style="font-weight:600;">${s.status}</div>
+            ${s.symbol ? `<div class="mono" style="margin-top:4px;">${s.symbol}</div>` : ""}
+            ${s.empty_reason ? `<div style="color:var(--amber);margin-top:4px;font-size:11px;">${s.empty_reason}</div>` : ""}
+            ${s.hold_minutes != null ? `<div class="mono" style="color:var(--muted);margin-top:4px;">${s.hold_minutes}m held</div>` : ""}
+            ${s.last_symbol ? `<div style="color:var(--dim);margin-top:4px;font-size:11px;">prev: ${s.last_symbol} (${s.last_exit_reason || "?"})</div>` : ""}
+          </div>`;
+        }).join("") || `<div class="sub">No slot data</div>`;
+      }
+      async function loadDiagnostics() {
+        try { renderDiagnostics(await apiJson("/api/operator/diagnostics")); }
+        catch (e) { /* keep last frame */ }
+      }
       load();
       loadTicker();
+      loadDiagnostics();
       setInterval(load, 5000);
       setInterval(loadTicker, 30000);
+      setInterval(loadDiagnostics, 15000);
     </script>
   </body>
 </html>

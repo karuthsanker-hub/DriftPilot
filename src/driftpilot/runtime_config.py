@@ -32,6 +32,7 @@ EDITABLE_FIELDS: dict[str, dict[str, Any]] = {
             "filing_8a_v1",
             "analyst_target_raise_v1",
             "earnings_report_v1,filing_8a_v1",
+            "earnings_report_v1,filing_8a_v1,analyst_target_raise_v1",
         ],
         "label": "Active signal(s) (RESTART)",
         "help": (
@@ -130,16 +131,41 @@ EDITABLE_FIELDS: dict[str, dict[str, Any]] = {
         "label": "Trailing distance %",
         "help": "Trailing stop sits this far below peak. Smaller = locks in gains faster, exits more often.",
     },
+    "max_price_drift_pct": {
+        "type": float,
+        "min": 0.5,
+        "max": 20.0,
+        "label": "Max price drift % (HOT)",
+        "help": (
+            "Reject a candidate if the live quote has moved more than this % from "
+            "the first-seen price at the time the catalyst event was scanned. "
+            "Prevents chasing moves that already happened. "
+            "3.0 = block entry if stock moved >3% since we first saw the event. "
+            "JXN was 8% above reference — this would have blocked all 5 entries."
+        ),
+    },
+    "min_reentry_minutes": {
+        "type": float,
+        "min": 0.0,
+        "max": 120.0,
+        "label": "Min re-entry cooldown (minutes)",
+        "help": (
+            "After closing a position on a symbol, wait at least this many minutes "
+            "before entering the same symbol again. Prevents machine-gun re-entry "
+            "where a fresh catalyst event triggers immediate re-buy after an exit. "
+            "15 = wait 15 min between trades on the same symbol."
+        ),
+    },
 }
 
 
 @dataclass
 class RuntimeConfig:
-    active_signal: str = "earnings_report_v1"
+    active_signal: str = "earnings_report_v1,filing_8a_v1,analyst_target_raise_v1"
     scanning_paused: str = "false"
     slot_value: float = 1000.0
-    max_trades_per_symbol_per_day: int = 1
-    max_slots_per_sector: int = 3
+    max_trades_per_symbol_per_day: int = 5
+    max_slots_per_sector: int = 4
     catalyst_universe_lookback_minutes: int = 240
     earnings_max_event_age_minutes: int = 240
     earnings_profit_take_pct: float = 1.0
@@ -149,6 +175,8 @@ class RuntimeConfig:
     earnings_trailing_enabled: str = "true"
     earnings_trailing_activation_pct: float = 1.0
     earnings_trailing_distance_pct: float = 2.0
+    max_price_drift_pct: float = 3.0
+    min_reentry_minutes: float = 15.0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -166,6 +194,8 @@ class RuntimeConfig:
             "earnings_trailing_enabled": self.earnings_trailing_enabled,
             "earnings_trailing_activation_pct": self.earnings_trailing_activation_pct,
             "earnings_trailing_distance_pct": self.earnings_trailing_distance_pct,
+            "max_price_drift_pct": self.max_price_drift_pct,
+            "min_reentry_minutes": self.min_reentry_minutes,
         }
 
 

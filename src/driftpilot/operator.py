@@ -239,9 +239,20 @@ async def _run(once: bool, mock_stream: bool, env_file: str, paper_live: bool = 
             if name == "analyst_target_raise_v1":
                 logger.warning(
                     "🟠 %s — backtest verdict FAIL (edge_ratio=0.85). "
-                    "Trading at known-negative expected value.", name,
+                    "Trading at known-negative expected value. "
+                    "Qwen sentiment gate=%r active.", name, require_sent,
                 )
-                return AnalystTargetRaiseV1Signal(AnalystTargetRaiseConfig(), catalyst_bus)
+                _analyst_sent = None if require_sent == "any" else require_sent
+                return AnalystTargetRaiseV1Signal(
+                    AnalystTargetRaiseConfig(
+                        max_hold_minutes=rcfg.earnings_max_hold_minutes,
+                        profit_take_pct=0.8,   # locked spec from catalyst_horizons
+                        stop_loss_pct=1.0,     # locked spec from catalyst_horizons
+                        max_event_age_minutes=rcfg.earnings_max_event_age_minutes,
+                        require_sentiment=_analyst_sent,
+                    ),
+                    catalyst_bus,
+                )
             if name == "filing_8a_v1":
                 return Filing8ASignal(
                     Filing8AConfig(
@@ -303,6 +314,7 @@ async def _run(once: bool, mock_stream: bool, env_file: str, paper_live: bool = 
             clock=clock,
             universe_path=settings.universe_file,
             runtime_config_path="data/driftpilot/runtime_config.json",
+            repository=repository,
         )
         # Inject the same signal instance into the monitor so it skips the registry
         monitor_service._signal = live_signal

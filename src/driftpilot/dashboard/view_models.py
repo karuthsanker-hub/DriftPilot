@@ -608,6 +608,291 @@ def _float_or_none(value: Any) -> float | None:
         return None
 
 
+def diagnostics_payload(settings: DriftPilotSettings) -> dict[str, Any]:
+    """Build the diagnostics payload for the operator dashboard.
+
+    Surfaces data that previously required CLI forensics:
+    - Catalyst pool health (freshness, sentiment coverage)
+    - Per-symbol P&L breakdown
+    - Slot utilisation analysis (why are slots empty?)
+    - Signal-level P&L breakdown
+    - Allocator rejection summary (from transition metadata)
+    - Scanner/drift rejection stats
+    """
+    db_path = settings.sqlite_path_obj
+    catalyst_db = "data/driftpilot/catalyst_events.sqlite3"
+    result: dict[str, Any] = {
+        "catalyst_pool": _catalyst_pool_health(catalyst_db),
+        "symbol_pnl": [],
+        "slot_analysis": [],
+        "signal_breakdown": [],
+        "rejection_summary": [],
+        "scanner_stats": {},
+    }
+    if not db_path.exists():
+        return result
+    try:
+        repo = DriftPilotRepository.open(db_path)
+        result["symbol_pnl"] = _per_symbol_pnl(repo)
+        result["slot_analysis"] = _slot_analysis(repo)
+        result["signal_breakdown"] = _signal_pnl_breakdown(repo)
+        result["rejection_summary"] = _rejection_summary(repo)
+        result["scanner_stats"] = _scanner_stats(repo)
+    except Exception:
+        pass
+    return result
+
+
+def _catalyst_pool_health(
+    db_path: str = "data/driftpilot/catalyst_events.sqlite3",
+) -> dict[str, Any]:
+    """Catalyst event pool health: total events, sentiment coverage,
+    freshness distribution, per-signal-type counts."""
+    import sqlite3
+    from datetime import timedelta, timezone
+
+    p = Path(db_path)
+    if not p.exists():
+        return {"status": "no_db", "total": 0}
+    try:
+        conn = sqlite3.connect(p)
+        conn.row_factory = sqlite3.Row
+        now = datetime.now(timezone.utc)
+        cutoff_4h = (now - timedelta(hours=4)).isoformat()
+        cutoff_1h = (now - timedelta(hours=1)).isoformat()
+
+        total = conn.execute(
+            "SELECT COUNT(*) AS n FROM catalyst_events WHERE event_ts >= ?",
+            (cutoff_4h,),
+        ).fetchone()["n"]
+        total_1h = conn.execute(
+            "SELECT COUNT(*) AS n FROM catalyst_events WHERE event_ts >= ?",
+            (cutoff_1h,),
+        ).fetchone()["n"]
+        with_sentiment = conn.execute(
+            "SELECT COUNT(*) AS n FROM catalyst_events WHERE event_ts >= ? AND sentiment IS NOT NULL AND sentiment != ''",
+            (cutoff_4h,),
+        ).fetchone()["n"]
+        positive = conn.execute(
+            "SELECT COUNT(*) AS n FROM catalyst_events WHERE event_ts >= ? AND sentiment = 'positive'",
+            (cutoff_4h,),
+        ).fetchone()["n"]
+        negative = conn.execute(
+            "SELECT COUNT(*) AS n FROM catalyst_events WHERE event_ts >= ? AND sentiment = 'negative'",
+            (cutoff_4h,),
+        ).fetchone()["n"]
+        neutral = conn.execute(
+            "SELECT COUNT(*) AS n FROM catalyst_events WHERE event_ts >= ? AND sentiment = 'neutral'",
+            (cutoff_4h,),
+        ).fetchone()["n"]
+
+        # Per category/subcategory breakdown
+        by_type = conn.execute(
+            "SELECT category, subcategory, COUNT(*) AS n, "
+            "SUM(CASE WHEN sentiment = 'positive' THEN 1 ELSE 0 END) AS pos, "
+            "SUM(CASE WHEN sentiment = 'negative' THEN 1 ELSE 0 END) AS neg "
+            "FROM catalyst_events WHERE event_ts >= ? "
+            "GROUP BY category, subcategory ORDER BY n DESC",
+            (cutoff_4h,),
+        ).fetchall()
+
+        # Most recent event timestamp
+        latest = conn.execute(
+            "SELECT event_ts FROM catalyst_events ORDER BY event_ts DESC LIMIT 1"
+        ).fetchone()
+        latest_ts = latest["event_ts"] if latest else None
+
+        conn.close()
+        return {
+            "status": "ok",
+            "total_4h": total,
+            "total_1h": total_1h,
+            "with_sentiment": with_sentiment,
+            "sentiment_pct": round(with_sentiment / total * 100, 1) if total else 0,
+            "positive": positive,
+            "negative": negative,
+            "neutral": neutral,
+            "by_type": [
+                {
+                    "category": r["category"],
+                    "subcategory": r["subcategory"],
+                    "count": r["n"],
+                    "positive": r["pos"],
+                    "negative": r["neg"],
+                }
+                for r in by_type
+            ],
+            "latest_event_ts": latest_ts,
+        }
+    except Exception:
+        return {"status": "error", "total": 0}
+
+
+def _per_symbol_pnl(repo: DriftPilotRepository) -> list[dict[str, Any]]:
+    """Per-symbol realised P&L breakdown for today."""
+    today_iso = datetime.now(UTC).strftime("%Y-%m-%d")
+    rows = repo.connection.execute(
+        "SELECT symbol, "
+        "COUNT(*) AS trades, "
+        "SUM(realized_pnl) AS total_pnl, "
+        "SUM(CASE WHEN realized_pnl > 0 THEN 1 ELSE 0 END) AS wins, "
+        "SUM(CASE WHEN realized_pnl <= 0 THEN 1 ELSE 0 END) AS losses, "
+        "AVG(realized_pnl) AS avg_pnl, "
+        "MIN(realized_pnl) AS worst, "
+        "MAX(realized_pnl) AS best "
+        "FROM positions WHERE status = 'closed' AND closed_at >= ? "
+        "GROUP BY symbol ORDER BY total_pnl DESC",
+        (today_iso,),
+    ).fetchall()
+    return [
+        {
+            "symbol": r["symbol"],
+            "trades": r["trades"],
+            "total_pnl": round(float(r["total_pnl"] or 0), 2),
+            "wins": r["wins"],
+            "losses": r["losses"],
+            "avg_pnl": round(float(r["avg_pnl"] or 0), 2),
+            "worst": round(float(r["worst"] or 0), 2),
+            "best": round(float(r["best"] or 0), 2),
+        }
+        for r in rows
+    ]
+
+
+def _slot_analysis(repo: DriftPilotRepository) -> list[dict[str, Any]]:
+    """Slot-by-slot analysis: current state + reason for emptiness."""
+    slots = repo.slots.list_all()
+    positions = {p.id: p for p in repo.positions.list_open()}
+    out: list[dict[str, Any]] = []
+    for slot in slots:
+        md = slot.metadata or {}
+        status = (slot.status or "EMPTY").upper()
+        pos = positions.get(slot.position_id or -1)
+        entry: dict[str, Any] = {
+            "slot_id": slot.slot_id,
+            "status": status,
+            "symbol": slot.symbol,
+        }
+        if status == "EMPTY":
+            entry["empty_reason"] = md.get("empty_reason") or "awaiting_candidate"
+            entry["last_symbol"] = md.get("last_symbol")
+            entry["last_exit_reason"] = md.get("last_exit_reason")
+            entry["empty_since"] = md.get("emptied_at")
+        elif pos is not None:
+            try:
+                hold_min = int(
+                    (datetime.now(UTC) - pos.opened_at.astimezone(UTC)).total_seconds() // 60
+                )
+            except Exception:
+                hold_min = 0
+            entry["hold_minutes"] = hold_min
+            entry["entry_price"] = float(pos.entry_price) if pos.entry_price else None
+            entry["sector"] = md.get("sector")
+        out.append(entry)
+    return out
+
+
+def _signal_pnl_breakdown(repo: DriftPilotRepository) -> list[dict[str, Any]]:
+    """P&L breakdown by signal type (from position metadata)."""
+    today_iso = datetime.now(UTC).strftime("%Y-%m-%d")
+    rows = repo.connection.execute(
+        "SELECT metadata_json, realized_pnl FROM positions "
+        "WHERE status = 'closed' AND closed_at >= ?",
+        (today_iso,),
+    ).fetchall()
+    signal_stats: dict[str, dict[str, Any]] = {}
+    for r in rows:
+        try:
+            md = json.loads(r["metadata_json"] or "{}")
+        except (TypeError, json.JSONDecodeError):
+            md = {}
+        sig = md.get("signal_name") or md.get("catalyst_category") or "unknown"
+        pnl = float(r["realized_pnl"] or 0)
+        if sig not in signal_stats:
+            signal_stats[sig] = {"trades": 0, "total_pnl": 0.0, "wins": 0, "losses": 0}
+        signal_stats[sig]["trades"] += 1
+        signal_stats[sig]["total_pnl"] += pnl
+        if pnl > 0:
+            signal_stats[sig]["wins"] += 1
+        else:
+            signal_stats[sig]["losses"] += 1
+    return [
+        {
+            "signal": sig,
+            "trades": s["trades"],
+            "total_pnl": round(s["total_pnl"], 2),
+            "wins": s["wins"],
+            "losses": s["losses"],
+            "win_rate": round(s["wins"] / s["trades"] * 100, 1) if s["trades"] else 0,
+        }
+        for sig, s in sorted(signal_stats.items(), key=lambda x: x[1]["total_pnl"], reverse=True)
+    ]
+
+
+def _rejection_summary(repo: DriftPilotRepository) -> list[dict[str, Any]]:
+    """Parse allocator rejection counts from transition metadata.
+
+    The state machine stores per-reason counts in the ``rejection_reasons``
+    field of each ``allocation_complete`` transition. Sum them up for today.
+    """
+    today_iso = datetime.now(UTC).strftime("%Y-%m-%d")
+    transitions = repo.transitions.list_latest(limit=500)
+    reason_counts: dict[str, int] = {}
+    for t in transitions:
+        if t.timestamp.isoformat() < today_iso:
+            continue
+        md = t.metadata or {}
+        rr = md.get("rejection_reasons")
+        if isinstance(rr, dict):
+            for reason, cnt in rr.items():
+                reason_counts[reason] = reason_counts.get(reason, 0) + int(cnt)
+    # Also look at candidate blocked reasons in the candidate_queue table
+    try:
+        blocked = repo.connection.execute(
+            "SELECT blocked_reason, COUNT(*) AS n FROM candidate_queue "
+            "WHERE blocked_reason IS NOT NULL AND blocked_reason != '' "
+            "AND updated_at >= ? GROUP BY blocked_reason ORDER BY n DESC",
+            (today_iso,),
+        ).fetchall()
+        for b in blocked:
+            reason = b["blocked_reason"]
+            reason_counts[reason] = reason_counts.get(reason, 0) + int(b["n"])
+    except Exception:
+        pass
+    out = [{"reason": k, "count": v} for k, v in sorted(reason_counts.items(), key=lambda x: -x[1])]
+    return out
+
+
+def _scanner_stats(repo: DriftPilotRepository) -> dict[str, Any]:
+    """High-level scanner health stats from today's transitions."""
+    today_iso = datetime.now(UTC).strftime("%Y-%m-%d")
+    transitions = repo.transitions.list_latest(limit=200)
+    scan_cycles = 0
+    total_candidates = 0
+    total_allocated = 0
+    total_rejected = 0
+    for t in transitions:
+        if t.timestamp.isoformat() < today_iso:
+            continue
+        md = t.metadata or {}
+        if t.reason in ("allocating_ranked_candidates", "allocation_complete"):
+            if md.get("candidate_count") is not None:
+                scan_cycles += 1
+                total_candidates += int(md.get("candidate_count", 0))
+            if md.get("allocated") is not None:
+                total_allocated += int(md.get("allocated", 0))
+                total_rejected += int(md.get("rejected", 0))
+    return {
+        "scan_cycles_today": scan_cycles,
+        "total_candidates_seen": total_candidates,
+        "total_allocated": total_allocated,
+        "total_rejected": total_rejected,
+        "acceptance_rate": round(total_allocated / (total_allocated + total_rejected) * 100, 1)
+        if (total_allocated + total_rejected)
+        else 0,
+    }
+
+
 def _equity_curve(starting_capital: float, realized: float) -> list[dict[str, float]]:
     return [
         {"t": index, "equity": starting_capital + (realized * index / 23 if index else 0)}

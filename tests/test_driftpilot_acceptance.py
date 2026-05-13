@@ -153,7 +153,7 @@ def test_acceptance_time_stop_fires_after_max_hold_minutes() -> None:
 def test_acceptance_sector_cap_blocks_fourth_same_sector_candidate(tmp_path) -> None:
     async def run() -> None:
         repo = _repo(tmp_path, slots=5)
-        allocator = SlotAllocator(repo, DriftPilotSettings(), clock=FixedClock(fixed_now=NOW))
+        allocator = SlotAllocator(repo, DriftPilotSettings(), clock=FixedClock(fixed_now=NOW), max_slots_per_sector=3)
         result = await allocator.allocate([_candidate(f"T{i}", rank=i) for i in range(1, 6)])
         assert len(result.allocations) == 3
         assert [rejection.reason for rejection in result.rejections] == ["sector_cap_reached", "sector_cap_reached"]

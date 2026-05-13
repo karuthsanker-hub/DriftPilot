@@ -19,7 +19,7 @@ import asyncio
 import inspect
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from driftpilot.broker.alpaca_client import AlpacaBrokerClient, OrderSubmissionResult
@@ -77,19 +77,33 @@ class LiveBrokerReconciler:
 
         # Translate alpaca BrokerPosition → list of dicts the repo expects
         # (or empty list — mock-equivalent for "no open positions").
+        # Defect #7 fix: include metadata the signals need (entry_ts,
+        # entry_price, sector) so evaluate_exit() doesn't return None
+        # and positions don't become zombies.
         try:
+            # Look up sectors from universe.csv for reconciled positions
+            sector_map = self._load_sector_map()
+            now_iso = self.alpaca.clock.now_utc().isoformat() if hasattr(self.alpaca, "clock") else __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()
+
+            def _build_pos(p):
+                sym = getattr(p, "symbol", "").upper()
+                entry = float(getattr(p, "avg_entry_price", 0) or getattr(p, "average_entry_price", 0) or 0)
+                return {
+                    "symbol": sym,
+                    "quantity": float(getattr(p, "quantity", 0)),
+                    "entry_price": entry,
+                    "avg_entry_price": entry,
+                    "metadata": {
+                        "reconciled": "broker_truth_at_boot",
+                        "entry_ts": now_iso,
+                        "entry_price": entry,
+                        "sector": sector_map.get(sym, "Unknown"),
+                        "signal_name": "reconciled_boot",
+                    },
+                }
+
             return self.repository.positions.reconcile_broker_open_positions(
-                broker_positions=[
-                    {
-                        "symbol": getattr(p, "symbol", "").upper(),
-                        "quantity": float(getattr(p, "quantity", 0)),
-                        # Repo expects "entry_price"; AlpacaBrokerClient surfaces
-                        # `avg_entry_price` (Alpaca's name). Pass both for safety.
-                        "entry_price": float(getattr(p, "avg_entry_price", 0) or getattr(p, "average_entry_price", 0) or 0),
-                        "avg_entry_price": float(getattr(p, "avg_entry_price", 0) or getattr(p, "average_entry_price", 0) or 0),
-                    }
-                    for p in broker_positions
-                ],
+                broker_positions=[_build_pos(p) for p in broker_positions],
                 slot_value=self.settings.slot_value,
                 target_pct=self.settings.target_pct,
                 stop_pct=self.settings.stop_pct,
@@ -98,6 +112,32 @@ class LiveBrokerReconciler:
         except Exception as exc:
             logger.warning("repo reconcile failed: %s — continuing with no-op", exc)
             return "live_reconcile_noop"
+
+    def _load_sector_map(self) -> dict[str, str]:
+        """Load symbol→sector mapping from universe.csv."""
+        sector_map: dict[str, str] = {}
+        try:
+            universe_file = getattr(self.settings, "universe_file", "config/universe.csv")
+            with open(universe_file) as f:
+                header = next(f, None)
+                if header is None:
+                    return sector_map
+                # Find sector column index
+                cols = [c.strip().lower() for c in header.split(",")]
+                sym_idx = 0
+                sec_idx = cols.index("sector") if "sector" in cols else -1
+                if sec_idx < 0:
+                    return sector_map
+                for line in f:
+                    parts = line.split(",")
+                    if len(parts) > sec_idx:
+                        sym = parts[sym_idx].strip().upper()
+                        sec = parts[sec_idx].strip()
+                        if sym and sec:
+                            sector_map[sym] = sec
+        except Exception as exc:
+            logger.warning("sector map load failed: %s", exc)
+        return sector_map
 
     # Pass-through for any other broker calls the state machine might make
     def __getattr__(self, name):
@@ -253,11 +293,13 @@ class CatalystScannerService:
         universe_path: str | None = None,
         runtime_config_path: str | None = None,
         router: Any | None = None,
+        repository: Any | None = None,
     ) -> None:
         self.signal = signal
         self.quote_provider = quote_provider
         self.clock = clock
         self._router = router  # Optional Phase 1 signal router
+        self._repository = repository  # For blocked-symbol pre-filter
         # Hot-reload tracking — only re-read the file when its mtime changes.
         self._runtime_config_path = runtime_config_path
         self._runtime_config_mtime: float = 0.0
@@ -265,6 +307,19 @@ class CatalystScannerService:
         # Lazy-load real sectors so catalyst candidates spread across the
         # allocator's per-sector cap. Otherwise all our candidates end up in
         # "Unknown" and cap fires after 3.
+        # Price drift protection: record the first-seen price for each
+        # symbol-event pair. If price drifts beyond max_price_drift_pct from
+        # the first-seen price, skip the candidate — we'd be chasing a move
+        # that already happened. Keyed by (symbol, headline_hash) so a new
+        # event on the same symbol resets the baseline.
+        self._first_seen_prices: dict[tuple[str, str], float] = {}
+        self._max_price_drift_pct: float = 3.0  # default; hot-reloaded
+        # Blocked symbol cache: symbols that the allocator permanently rejects
+        # (day-cap, consecutive-loss cooldown) are cached here so the scanner
+        # skips them without fetching a quote or sending to the allocator.
+        # Cleared on each new trading day (UTC date).
+        self._blocked_symbols: set[str] = set()
+        self._blocked_date: str = ""  # YYYY-MM-DD; reset when date changes
         self._sector_map: dict[str, str] = {}
         if universe_path:
             try:
@@ -296,9 +351,10 @@ class CatalystScannerService:
                 return
             from driftpilot.runtime_config import load_runtime_config
             from driftpilot.signals.earnings_report_v1.config import EarningsReportConfig
+            from driftpilot.signals.analyst_target_raise_v1.config import AnalystTargetRaiseConfig
             cfg = load_runtime_config(p)
             require_sent = cfg.earnings_require_sentiment
-            new_signal_cfg = EarningsReportConfig(
+            new_earnings_cfg = EarningsReportConfig(
                 max_hold_minutes=cfg.earnings_max_hold_minutes,
                 profit_take_pct=cfg.earnings_profit_take_pct,
                 stop_loss_pct=cfg.earnings_stop_loss_pct,
@@ -308,21 +364,113 @@ class CatalystScannerService:
                 trailing_activation_pct=cfg.earnings_trailing_activation_pct,
                 trailing_distance_pct=cfg.earnings_trailing_distance_pct,
             )
-            # Earnings signal hot-reload (only meaningful for earnings_report_v1)
+            new_analyst_cfg = AnalystTargetRaiseConfig(
+                max_hold_minutes=cfg.earnings_max_hold_minutes,
+                profit_take_pct=0.8,   # locked spec from catalyst_horizons
+                stop_loss_pct=1.0,     # locked spec from catalyst_horizons
+                max_event_age_minutes=cfg.earnings_max_event_age_minutes,
+                require_sentiment=None if require_sent == "any" else require_sent,
+            )
+            # Hot-reload: update each sub-signal's config by type.
+            # MultiSignal._config setter fans out to compatible sub-signals.
             if hasattr(self.signal, "_config"):
-                self.signal._config = new_signal_cfg  # type: ignore[attr-defined]
+                self.signal._config = new_earnings_cfg  # type: ignore[attr-defined]
+            # Also reload analyst config for MultiSignal sub-signals
+            if hasattr(self.signal, "_signals"):
+                for s in self.signal._signals:
+                    if isinstance(getattr(s, "config", None), AnalystTargetRaiseConfig):
+                        s.config = new_analyst_cfg
             # Hot kill switch
             self._scanning_paused = str(cfg.scanning_paused).lower() == "true"
+            self._max_price_drift_pct = cfg.max_price_drift_pct
             self._runtime_config_mtime = mtime
             logger.info(
                 "🔄 hot-reloaded: max_hold=%dm profit=%.2f%% stop=%.2f%% "
-                "max_age=%dm sentiment=%s scanning_paused=%s",
+                "max_age=%dm sentiment=%s max_drift=%.1f%% scanning_paused=%s",
                 cfg.earnings_max_hold_minutes, cfg.earnings_profit_take_pct,
                 cfg.earnings_stop_loss_pct, cfg.earnings_max_event_age_minutes,
-                require_sent, cfg.scanning_paused,
+                require_sent, cfg.max_price_drift_pct, cfg.scanning_paused,
             )
         except Exception as exc:
             logger.warning("hot-reload failed: %s", exc)
+
+    def _refresh_blocked_symbols(self, now: datetime) -> None:
+        """Rebuild the set of symbols that can't be allocated RIGHT NOW.
+
+        Rebuilt from scratch each cycle (not accumulated) so that symbols
+        become eligible again when the blocking condition clears — e.g.
+        a slot goes EMPTY, the reentry cooldown expires, or a winning
+        trade breaks a consecutive-loss streak.
+
+        Includes:
+        - Symbols currently in active slots (duplicate_symbol)
+        - Symbols at the max_trades_per_symbol_per_day cap
+        - Symbols in consecutive-loss cooldown (3+ consecutive losses)
+        - Symbols in reentry cooldown (exited < min_reentry_minutes ago)
+        """
+        today_str = now.strftime("%Y-%m-%d")
+        self._blocked_date = today_str
+
+        if self._repository is None:
+            self._blocked_symbols = set()
+            return
+
+        # Rebuild from scratch — never accumulate
+        blocked: set[str] = set()
+
+        try:
+            slots = self._repository.slots.list_all()
+            # Symbols currently in active slots → duplicate_symbol
+            for slot in slots:
+                if slot.symbol and (slot.status or "").upper() not in ("EMPTY",):
+                    blocked.add(slot.symbol.upper())
+
+            # Symbols at the per-day trade cap
+            from driftpilot.runtime_config import load_runtime_config
+            rcfg = load_runtime_config()
+            max_per_day = rcfg.max_trades_per_symbol_per_day
+            rows = self._repository.connection.execute(
+                "SELECT symbol, COUNT(*) AS n FROM positions "
+                "WHERE closed_at >= ? GROUP BY symbol HAVING n >= ?",
+                (today_str, max_per_day),
+            ).fetchall()
+            for r in rows:
+                blocked.add(r["symbol"].upper())
+
+            # Symbols in consecutive-loss cooldown (3+ consecutive losses today)
+            traded = self._repository.connection.execute(
+                "SELECT DISTINCT symbol FROM positions WHERE closed_at >= ?",
+                (today_str,),
+            ).fetchall()
+            for r in traded:
+                sym = r["symbol"].upper()
+                if sym in blocked:
+                    continue  # already blocked
+                losses = self._repository.connection.execute(
+                    "SELECT realized_pnl FROM positions "
+                    "WHERE symbol = ? AND status = 'closed' AND closed_at >= ? "
+                    "ORDER BY closed_at DESC LIMIT 3",
+                    (sym, today_str),
+                ).fetchall()
+                if len(losses) >= 3 and all(float(l["realized_pnl"]) <= 0 for l in losses):
+                    blocked.add(sym)
+
+            # Reentry cooldown — block symbols exited too recently
+            min_reentry = rcfg.min_reentry_minutes
+            if min_reentry > 0:
+                cutoff_ts = (now - timedelta(minutes=min_reentry)).isoformat()
+                recent_exits = self._repository.connection.execute(
+                    "SELECT DISTINCT symbol FROM positions "
+                    "WHERE status = 'closed' AND closed_at >= ? AND closed_at > ?",
+                    (today_str, cutoff_ts),
+                ).fetchall()
+                for r in recent_exits:
+                    blocked.add(r["symbol"].upper())
+
+        except Exception as exc:
+            logger.warning("blocked-symbol refresh failed: %s", exc)
+
+        self._blocked_symbols = blocked
 
     async def scan(self):
         self._maybe_hot_reload()
@@ -334,6 +482,17 @@ class CatalystScannerService:
         if getattr(self, "_scanning_paused", False):
             logger.info("catalyst scanner: scanning_paused=true (UI lever) — 0 candidates")
             return _build_scan_result([], now)
+        # Periodic cleanup of price drift cache — cap at 500 entries to
+        # prevent unbounded growth over a full trading day.
+        if len(self._first_seen_prices) > 500:
+            self._first_seen_prices.clear()
+
+        # Pre-filter: refresh the set of blocked symbols (day-cap, open,
+        # consecutive-loss) BEFORE calling signal.scan(). Candidates for
+        # blocked symbols are skipped without fetching a quote, eliminating
+        # the 5700+ wasted rejections/day pattern.
+        self._refresh_blocked_symbols(now)
+
         try:
             import inspect
             res = self.signal.scan(now=now)
@@ -342,7 +501,12 @@ class CatalystScannerService:
             logger.exception("catalyst scanner: signal.scan raised: %s", exc)
             return _build_scan_result([], now)
 
+        skipped_blocked = 0
         for rank, sc in enumerate(sig_candidates, start=1):
+            # Skip symbols that we already know the allocator will reject.
+            if sc.symbol.upper() in self._blocked_symbols:
+                skipped_blocked += 1
+                continue
             quote = await asyncio.to_thread(self.quote_provider.latest_quote, sc.symbol)
             if quote is None:
                 logger.info(
@@ -352,6 +516,28 @@ class CatalystScannerService:
                 continue
             ref_price = (quote.bid_price + quote.ask_price) / 2.0
             features = sc.features or {}
+
+            # --- Price drift protection ---
+            # Track the first-seen price for each (symbol, headline_hash).
+            # If the stock has already moved beyond max_price_drift_pct from
+            # first-seen, skip — we'd be buying the top of an already-played move.
+            _hh = features.get("headline_hash") or ""
+            _drift_key = (sc.symbol.upper(), _hh)
+            first_price = self._first_seen_prices.get(_drift_key)
+            if first_price is None:
+                self._first_seen_prices[_drift_key] = ref_price
+                first_price = ref_price
+            drift_pct = abs(ref_price - first_price) / first_price * 100.0 if first_price > 0 else 0.0
+            max_drift = getattr(self, "_max_price_drift_pct", 3.0)
+            if drift_pct > max_drift:
+                logger.warning(
+                    "DRIFT REJECT %s: price moved %.1f%% from first-seen $%.2f → $%.2f "
+                    "(max_drift=%.1f%%) | %s",
+                    sc.symbol, drift_pct, first_price, ref_price, max_drift,
+                    (features.get("headline") or "")[:80],
+                )
+                continue
+
             cat_ts_val = features.get("catalyst_event_ts")
             cat_ts_str = (
                 cat_ts_val.isoformat() if hasattr(cat_ts_val, "isoformat") else cat_ts_val
@@ -375,6 +561,8 @@ class CatalystScannerService:
                     "event_age_minutes": features.get("event_age_minutes"),
                     "horizon_minutes": features.get("horizon_minutes"),
                     "source": features.get("source", "catalyst_bus"),
+                    "price_drift_pct": round(drift_pct, 2),
+                    "first_seen_price": first_price,
                     # signal_name lets the position monitor route evaluate_exit
                     # to the right signal under MultiSignal mode (mixed
                     # filing_8a + earnings_report etc).
@@ -383,11 +571,11 @@ class CatalystScannerService:
             )
             candidates.append(ac)
             logger.info(
-                "CANDIDATE %s rank=%d score=%+.2f sentiment=%s age=%.1fmin ref=%.2f | %s",
+                "CANDIDATE %s rank=%d score=%+.2f sentiment=%s age=%.1fmin ref=%.2f drift=%.1f%% | %s",
                 ac.symbol, rank, ac.score,
                 features.get("sentiment") or "NONE",
                 float(features.get("event_age_minutes") or 0),
-                ref_price,
+                ref_price, drift_pct,
                 (features.get("headline") or "")[:80],
             )
 
@@ -399,7 +587,20 @@ class CatalystScannerService:
             candidates = self._annotate_with_routing(candidates, now)
 
         if not candidates:
-            logger.info("catalyst scanner: 0 candidates this cycle (no admitted events)")
+            if skipped_blocked > 0:
+                logger.info(
+                    "catalyst scanner: 0 candidates this cycle "
+                    "(%d skipped as blocked: %s)",
+                    skipped_blocked,
+                    ", ".join(sorted(self._blocked_symbols)[:10]),
+                )
+            else:
+                logger.info("catalyst scanner: 0 candidates this cycle (no admitted events)")
+        elif skipped_blocked > 0:
+            logger.info(
+                "catalyst scanner: %d candidates, %d pre-filtered as blocked",
+                len(candidates), skipped_blocked,
+            )
         return _build_scan_result(candidates, now)
 
     def _annotate_with_routing(
@@ -492,7 +693,8 @@ class LiveAlpacaAllocator:
         self.broker = broker
         self.clock = clock or DriftPilotClock(settings.timezone)
         self.allocator = SlotAllocator(
-            repository, settings, clock=self.clock, catalyst_db_path=catalyst_db_path
+            repository, settings, clock=self.clock, catalyst_db_path=catalyst_db_path,
+            consecutive_loss_limit=settings.consecutive_loss_limit,
         )
 
     async def allocate(self, candidates: list[AllocationCandidate]) -> AllocationResult:
@@ -688,6 +890,31 @@ class LiveAlpacaPositionMonitor:
         # within one operator session; operator restart loses it (acceptable —
         # the position's first cycle after restart starts fresh peak).
         self._peak_by_position_id: dict[int, float] = {}
+        # Lazy-loaded sector map from universe.csv for reconciled positions
+        self.__sector_map: dict[str, str] | None = None
+
+    @property
+    def _sector_map(self) -> dict[str, str]:
+        if self.__sector_map is None:
+            self.__sector_map = {}
+            try:
+                universe_file = getattr(self.settings, "universe_file", "config/universe.csv")
+                with open(universe_file) as f:
+                    header = next(f, None)
+                    if header:
+                        cols = [c.strip().lower() for c in header.split(",")]
+                        sec_idx = cols.index("sector") if "sector" in cols else -1
+                        if sec_idx >= 0:
+                            for line in f:
+                                parts = line.split(",")
+                                if len(parts) > sec_idx:
+                                    sym = parts[0].strip().upper()
+                                    sec = parts[sec_idx].strip()
+                                    if sym and sec:
+                                        self.__sector_map[sym] = sec
+            except Exception:
+                pass
+        return self.__sector_map
 
     async def monitor(self):
         """State-machine-protocol entrypoint. Returns PositionMonitorResult."""
@@ -757,8 +984,12 @@ class LiveAlpacaPositionMonitor:
             entry_price = float(ap.average_entry_price)
             opened_at = slot_md.get("reserved_at") or datetime.now(timezone.utc).isoformat()
 
+            # Look up sector from candidate metadata, falling back to universe.csv
+            sector = cand.get("sector") or slot_md.get("sector")
+            if not sector or sector == "Unknown":
+                sector = self._sector_map.get(sym, "Unknown")
             position_md = {
-                "sector": cand.get("sector", "Unknown"),
+                "sector": sector,
                 "broker_order_id": ap.broker_position_id,
                 "reference_price": cand.get("reference_price", entry_price),
                 "current_price": entry_price,
@@ -855,11 +1086,44 @@ class LiveAlpacaPositionMonitor:
                     decision = await decision
             except Exception as exc:
                 logger.exception("monitor: evaluate_exit raised for %s: %s", symbol, exc)
-                return 0
+                decision = None
 
             should_close = getattr(decision, "should_exit", None)
             if should_close is None:
                 should_close = getattr(decision, "close", False)
+
+            # FAILSAFE TIME-STOP: if the signal didn't produce a decision
+            # (e.g. reconciled position with no metadata), enforce a hard
+            # time-stop from opened_at. Without this, zombie positions stay
+            # open forever — MAS was held 480 min with max_hold=60 min.
+            if decision is None or not should_close:
+                opened_at = getattr(position, "opened_at", None)
+                if opened_at is not None:
+                    try:
+                        if isinstance(opened_at, str):
+                            opened_at = datetime.fromisoformat(
+                                opened_at.replace("Z", "+00:00")
+                            )
+                        hold_minutes = (now - opened_at.astimezone(now.tzinfo)).total_seconds() / 60.0
+                        max_hold = self.settings.max_hold_minutes
+                        if hold_minutes > max_hold:
+                            logger.warning(
+                                "FAILSAFE TIME-STOP: %s held %.0f min (max=%d) — "
+                                "signal returned None (likely reconciled position "
+                                "with no metadata). Forcing close.",
+                                symbol, hold_minutes, max_hold,
+                            )
+                            should_close = True
+                            # Create a minimal decision-like object
+                            class _FailsafeExit:
+                                should_exit = True
+                                exit_reason = "FAILSAFE_TIME_STOP"
+                                reason = "FAILSAFE_TIME_STOP"
+                                metadata = {"hold_minutes": hold_minutes, "max_hold": max_hold}
+                            decision = _FailsafeExit()
+                    except Exception as ts_exc:
+                        logger.debug("failsafe time-stop check failed: %s", ts_exc)
+
             if decision is None or not should_close:
                 return 0
 
@@ -906,13 +1170,41 @@ class LiveAlpacaPositionMonitor:
                 position_gone = False
 
             if exit_result and exit_result.submitted:
-                exit_price = exit_result.limit_price or mid
                 broker_oid = exit_result.broker_order_id
                 close_reason_label = "submitted"
+                # Try to get the ACTUAL fill price from Alpaca instead of
+                # using the order's limit_price. Paper orders fill instantly
+                # at a price that can differ from the limit.
+                actual_fill = None
+                if broker_oid:
+                    try:
+                        actual_fill = await self.broker.get_fill_price(broker_oid)
+                    except Exception:
+                        pass
+                exit_price = actual_fill or exit_result.limit_price or mid
+                if actual_fill:
+                    logger.info(
+                        "LIVE: exit fill price for %s: actual=$%.2f (limit=$%.2f mid=$%.2f)",
+                        symbol, actual_fill, exit_result.limit_price or 0, mid,
+                    )
             elif broker_race_filled or position_gone:
-                exit_price = mid
-                broker_oid = None
+                broker_oid = getattr(exit_result, "broker_order_id", None) if exit_result else None
                 close_reason_label = "reconciled_after_race"
+                # Race condition: position already gone at Alpaca. Try to
+                # retrieve the actual fill price from the order. Falls back
+                # to mid if unavailable.
+                actual_fill = None
+                if broker_oid:
+                    try:
+                        actual_fill = await self.broker.get_fill_price(broker_oid)
+                    except Exception:
+                        pass
+                exit_price = actual_fill or mid
+                if actual_fill:
+                    logger.info(
+                        "LIVE: race-reconciled exit fill for %s: actual=$%.2f (mid=$%.2f)",
+                        symbol, actual_fill, mid,
+                    )
             else:
                 return 0
 
@@ -936,6 +1228,12 @@ class LiveAlpacaPositionMonitor:
                         self.repository.slots.upsert(
                             slot_id, status="EMPTY", symbol=None,
                             slot_value=self.settings.slot_value,
+                            metadata={
+                                "last_symbol": symbol,
+                                "last_exit_reason": exit_reason,
+                                "emptied_at": self.clock.now_utc().isoformat(),
+                                "empty_reason": f"Closed: {exit_reason}",
+                            },
                             updated_at=self.clock.now_utc(),
                         )
                     except Exception as slot_exc:

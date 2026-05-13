@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -10,6 +11,8 @@ from driftpilot.clock import DriftPilotClock, datetime_to_storage, require_aware
 from driftpilot.settings import DriftPilotSettings
 from driftpilot.states import BlockedReason
 from driftpilot.storage.repositories import DriftPilotRepository, SlotRecord
+
+logger = logging.getLogger(__name__)
 
 
 def _has_negative_catalyst(
@@ -33,12 +36,14 @@ def _has_negative_catalyst(
         conn.close()
 
 
+DEFAULT_CONSECUTIVE_LOSS_LIMIT = 2
+
 FREE_SLOT_STATUSES = {"EMPTY", "RECYCLING"}
 # OCCUPIED was a legacy status string written by reconcile_broker_open_positions.
 # Keep it in the active set so any stale rows on disk still gate duplicates
 # until they're rewritten as OPEN.
 ACTIVE_SLOT_STATUSES = {"RESERVED", "ENTERING", "OPEN", "EXITING", "OCCUPIED"}
-DEFAULT_MAX_SLOTS_PER_SECTOR = 3
+DEFAULT_MAX_SLOTS_PER_SECTOR = 4
 
 
 class SlotRepositoryProtocol(Protocol):
@@ -109,6 +114,7 @@ class SlotAllocator:
         max_slots_per_sector: int = DEFAULT_MAX_SLOTS_PER_SECTOR,
         catalyst_db_path: str | None = None,
         catalyst_lookback_minutes: int = 240,
+        consecutive_loss_limit: int = DEFAULT_CONSECUTIVE_LOSS_LIMIT,
     ) -> None:
         self.repository = repository
         self.settings = settings
@@ -116,6 +122,7 @@ class SlotAllocator:
         self.max_slots_per_sector = max_slots_per_sector
         self.catalyst_db_path = catalyst_db_path
         self.catalyst_lookback_minutes = catalyst_lookback_minutes
+        self.consecutive_loss_limit = consecutive_loss_limit
         self._lock = asyncio.Lock()
 
     async def allocate(self, candidates: list[AllocationCandidate]) -> AllocationResult:
@@ -198,6 +205,30 @@ class SlotAllocator:
                     ))
                     continue
 
+                # Consecutive-loss cooldown: if the last N closed trades on
+                # this symbol were ALL losses, skip it.  The catalyst may be
+                # "fresh" but the price action is clearly against us.
+                if self.consecutive_loss_limit > 0:
+                    consec = self._consecutive_losses_today(symbol)
+                    if consec >= self.consecutive_loss_limit:
+                        rejections.append(AllocationRejection(
+                            symbol, "consecutive_loss_cooldown",
+                            {"consecutive_losses": consec, "limit": self.consecutive_loss_limit},
+                        ))
+                        continue
+
+                # Defect #5 fix: machine-gun re-entry cooldown.
+                # Prevent re-entering a symbol within N minutes of the last exit.
+                reentry_wait = self._minutes_since_last_exit(symbol)
+                min_reentry = self._min_reentry_minutes()
+                if reentry_wait is not None and reentry_wait < min_reentry:
+                    rejections.append(AllocationRejection(
+                        symbol, "reentry_cooldown",
+                        {"minutes_since_exit": round(reentry_wait, 1),
+                         "min_reentry_minutes": min_reentry},
+                    ))
+                    continue
+
                 sector = candidate.sector
                 if sector_counts.get(sector, 0) >= self.max_slots_per_sector:
                     rejections.append(AllocationRejection(symbol, "sector_cap_reached", {"sector": sector}))
@@ -237,15 +268,34 @@ class SlotAllocator:
                     )
                 )
 
+            reason_counts = _reason_counts(rejections)
             self._persist_allocator_state(
                 "IDLE",
                 now,
                 {
                     "allocated": len(allocations),
                     "rejected": len(rejections),
-                    "reasons": _reason_counts(rejections),
+                    "reasons": reason_counts,
                 },
             )
+
+            # Enhanced logging for sustainability diagnostics
+            if allocations:
+                logger.info(
+                    "[ALLOCATOR] %d allocated, %d rejected | reasons: %s | free_slots_remaining: %d",
+                    len(allocations), len(rejections), reason_counts, len(free_slots),
+                )
+            elif rejections:
+                logger.warning(
+                    "[ALLOCATOR] 0 allocated from %d candidates! All %d rejected | reasons: %s | "
+                    "free_slots: %d | active_symbols: %d | day_caps_hit: %s",
+                    len(candidates), len(rejections), reason_counts, len(free_slots),
+                    len(active_symbols),
+                    {s: c for s, c in symbol_day_counts.items() if c >= self.settings.max_trades_per_symbol_per_day},
+                )
+            elif not candidates:
+                logger.info("[ALLOCATOR] no candidates to allocate (signal pool empty)")
+
             return AllocationResult(tuple(allocations), tuple(rejections))
 
     def _active_sector_counts(self, slots: list[SlotRecord]) -> dict[str, int]:
@@ -287,6 +337,74 @@ class SlotAllocator:
             # Best-effort fallback: allocator still has the active-slot duplicate gate.
             return counts
         return counts
+
+    def _consecutive_losses_today(self, symbol: str) -> int:
+        """Count how many of the most-recent closed trades on *symbol* today
+        were losses (realized_pnl <= 0), reading backwards from the newest.
+
+        Returns 0 if the most-recent closed trade was a winner, or if
+        there are no closed trades today for this symbol.
+        """
+        connection = getattr(self.repository, "connection", None)
+        if connection is None:
+            return 0
+        today_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        try:
+            rows = connection.execute(
+                "SELECT realized_pnl FROM positions "
+                "WHERE symbol = ? AND opened_at >= ? AND status = 'closed' "
+                "ORDER BY closed_at DESC",
+                (symbol, today_iso),
+            ).fetchall()
+        except Exception:
+            return 0
+        streak = 0
+        for (pnl,) in rows:
+            if pnl is not None and pnl <= 0:
+                streak += 1
+            else:
+                break  # most-recent winner breaks the streak
+        return streak
+
+    def _min_reentry_minutes(self) -> float:
+        """Read min_reentry_minutes from runtime_config.json (hot-reloadable)."""
+        try:
+            from driftpilot.runtime_config import load_runtime_config
+            rcfg = load_runtime_config()
+            val = getattr(rcfg, "min_reentry_minutes", None)
+            if val is not None:
+                return float(val)
+        except Exception:
+            pass
+        return 15.0  # safe default
+
+    def _minutes_since_last_exit(self, symbol: str) -> float | None:
+        """Minutes since the most recent closed position on *symbol* today.
+
+        Returns ``None`` if there are no closed positions today for this symbol.
+        """
+        connection = getattr(self.repository, "connection", None)
+        if connection is None:
+            return None
+        today_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        try:
+            row = connection.execute(
+                "SELECT closed_at FROM positions "
+                "WHERE symbol = ? AND status = 'closed' AND closed_at >= ? "
+                "ORDER BY closed_at DESC LIMIT 1",
+                (symbol, today_iso),
+            ).fetchone()
+        except Exception:
+            return None
+        if row is None or row[0] is None:
+            return None
+        try:
+            closed_at = datetime.fromisoformat(str(row[0]).replace("Z", "+00:00"))
+            if closed_at.tzinfo is None:
+                closed_at = closed_at.replace(tzinfo=timezone.utc)
+            return (datetime.now(timezone.utc) - closed_at).total_seconds() / 60.0
+        except Exception:
+            return None
 
     def _persist_allocator_state(self, status: str, timestamp: datetime, metadata: dict[str, Any]) -> None:
         allocator_state = getattr(self.repository, "allocator_state", None)

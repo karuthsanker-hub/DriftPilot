@@ -288,6 +288,8 @@ async def test_live_monitor_calls_signal_evaluate_exit(settings, repo, monkeypat
         submitted=True, broker_order_id="ord-123", symbol="AAPL", side="sell",
         quantity=5, order_type="limit", limit_price=205.0, reason="exit_submitted",
     ))
+    fake_broker.get_fill_price = AsyncMock(return_value=205.0)
+    fake_broker.get_open_positions = AsyncMock(return_value=[])
 
     fake_qp = MagicMock(spec=AlpacaRestQuoteProvider)
     fake_qp.latest_quote = MagicMock(return_value=MarketQuote(

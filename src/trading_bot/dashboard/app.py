@@ -19,7 +19,7 @@ from datetime import date
 from pydantic import BaseModel, SecretStr
 
 from driftpilot.dashboard.agent_views import agent_dashboard_payload, agent_decision_detail
-from driftpilot.dashboard.view_models import admin_state_payload, backtest_report_payload, operator_state_payload
+from driftpilot.dashboard.view_models import admin_state_payload, backtest_report_payload, diagnostics_payload, operator_state_payload
 from driftpilot.settings import load_settings as load_driftpilot_settings
 from driftpilot.storage.repositories import DriftPilotRepository
 from trading_bot.backtesting import BacktestTrade, run_backtest, run_split_backtest
@@ -341,6 +341,16 @@ def create_app(env_path: Path | str = ".env") -> FastAPI:
             return _catalyst_detail(event_id)
         except Exception as exc:
             _raise_api_error(exc, "catalyst_event_detail")
+
+    @app.get("/api/operator/diagnostics")
+    def operator_diagnostics():
+        """Operator diagnostics: catalyst pool, per-symbol P&L, slot analysis,
+        rejection pipeline, signal breakdown. Surfaces data that previously
+        required CLI forensics."""
+        try:
+            return diagnostics_payload(load_driftpilot_settings(env_path))
+        except Exception as exc:
+            _raise_api_error(exc, "operator_diagnostics")
 
     @app.get("/agents", response_class=HTMLResponse)
     def agents_page(request: Request):
