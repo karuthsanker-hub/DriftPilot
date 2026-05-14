@@ -351,6 +351,33 @@ class PgVectorBrainDB:
                 continue
         return experiences
 
+    def list_recent_experiences(self, limit: int = 20) -> list[Experience]:
+        """Return recent experiences ordered by timestamp descending."""
+        conn = self._get_conn()
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT experience_id, timestamp, exp_type, context, decision, outcome, metadata "
+                "FROM experiences ORDER BY timestamp DESC LIMIT %s",
+                (max(1, limit),),
+            )
+            rows = cur.fetchall()
+
+        experiences: list[Experience] = []
+        for row in rows:
+            try:
+                experiences.append(Experience(
+                    experience_id=row[0],
+                    timestamp=str(row[1]),
+                    exp_type=row[2],
+                    context=row[3] if isinstance(row[3], dict) else json.loads(row[3]),
+                    decision=row[4] if isinstance(row[4], dict) else json.loads(row[4]),
+                    outcome=(row[5] if isinstance(row[5], dict) else json.loads(row[5])) if row[5] else None,
+                    metadata=row[6] if isinstance(row[6], dict) else json.loads(row[6] or "{}"),
+                ))
+            except (json.JSONDecodeError, KeyError, TypeError):
+                continue
+        return experiences
+
     # ── Skill Storage ──
 
     def save_skill(self, skill: Skill, embedding: list[float] | None = None) -> str:
@@ -478,6 +505,37 @@ class PgVectorBrainDB:
             )
             row = cur.fetchone()
         return row[0] if row else 0
+
+    def list_reflections(self, limit: int = 20) -> list[dict[str, Any]]:
+        """Return recent reflection summaries."""
+        conn = self._get_conn()
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, date, summary_json, skills_created, skills_retired, "
+                "experiences_analyzed, created_at FROM reflections "
+                "ORDER BY date DESC, created_at DESC LIMIT %s",
+                (max(1, limit),),
+            )
+            rows = cur.fetchall()
+
+        reflections: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                summary = row[2] if isinstance(row[2], dict) else json.loads(row[2] or "{}")
+            except json.JSONDecodeError:
+                summary = {}
+            reflections.append(
+                {
+                    "id": row[0],
+                    "date": row[1],
+                    "summary": summary,
+                    "skills_created": row[3],
+                    "skills_retired": row[4],
+                    "experiences_analyzed": row[5],
+                    "created_at": str(row[6]),
+                }
+            )
+        return reflections
 
     def get_stats(self) -> dict[str, Any]:
         """Return brain health stats."""

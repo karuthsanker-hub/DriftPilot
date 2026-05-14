@@ -322,6 +322,30 @@ def list_skills(status: str = "active", applies_to: str | None = None):
     }
 
 
+@app.get("/brain/experiences/recent")
+def recent_experiences(limit: int = 20):
+    """List recent brain experiences for dashboard inspection."""
+    if not db:
+        raise HTTPException(status_code=503, detail="Brain DB not initialized")
+    experiences = db.list_recent_experiences(limit=limit)
+    return {
+        "experiences": [asdict(exp) for exp in experiences],
+        "count": len(experiences),
+    }
+
+
+@app.get("/brain/reflections")
+def list_reflections(limit: int = 20):
+    """List recent EOD reflection summaries."""
+    if not db:
+        raise HTTPException(status_code=503, detail="Brain DB not initialized")
+    reflections = db.list_reflections(limit=limit)
+    return {
+        "reflections": reflections,
+        "count": len(reflections),
+    }
+
+
 @app.post("/brain/skills/create")
 def create_skill(req: SkillCreate):
     """Manually create a skill (for bootstrap from defects/playbook)."""

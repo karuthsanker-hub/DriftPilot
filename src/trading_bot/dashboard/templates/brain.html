@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>DriftPilot Brain</title>
+    <style>
+      @import url("https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap");
+      :root { --bg:#080c16; --panel:#111722; --panel2:#151c2a; --line:#283249; --line-soft:#1d2639; --text:#e8edf7; --muted:#8792aa; --dim:#59647b; --green:#25d39a; --red:#ff4054; --amber:#ffae2b; --blue:#4da3ff; --purple:#a371f7; font-family:"IBM Plex Sans",system-ui,sans-serif; }
+      *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--text)} .mono{font-family:"JetBrains Mono",ui-monospace,monospace;font-variant-numeric:tabular-nums}
+      .nav{height:48px;display:flex;align-items:center;gap:24px;padding:0 18px;background:var(--panel);border-bottom:1px solid var(--line)} .brand{display:flex;align-items:center;gap:10px;font-weight:700}.mark{width:28px;height:28px;border-radius:6px;display:grid;place-items:center;background:linear-gradient(135deg,var(--blue),var(--purple));font:700 11px "JetBrains Mono"}
+      .tabs{display:flex;gap:4px}.tabs a,.nav>a{color:var(--muted);text-decoration:none;padding:7px 12px;border-radius:6px;font-size:14px}.tabs a.active,.tabs a:hover,.nav>a.active,.nav>a:hover{color:var(--text);background:var(--panel2)}
+      main{width:min(1400px,calc(100% - 32px));margin:20px auto 44px;display:grid;gap:20px}.summary-bar{display:flex;gap:16px;flex-wrap:wrap}.stat-card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px 18px;min-width:150px}.stat-card .label{font-size:11px;color:var(--dim);text-transform:uppercase;letter-spacing:.5px}.stat-card .value{font-size:22px;font-weight:700;margin-top:4px}
+      .section{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:16px}.section-title{font-size:14px;font-weight:600;margin-bottom:12px;display:flex;align-items:center;gap:8px}.section-count{font-size:12px;color:var(--dim);font-weight:400}
+      table{width:100%;border-collapse:collapse;font-size:13px}th{text-align:left;padding:8px 10px;background:var(--panel2);color:var(--dim);font-size:11px;text-transform:uppercase;letter-spacing:.5px;border-bottom:1px solid var(--line)}td{padding:8px 10px;border-bottom:1px solid var(--line-soft);vertical-align:top}tr:hover td{background:var(--panel2)}
+      .tag{display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600}.tag.active{background:rgba(37,211,154,.15);color:var(--green)}.tag.retired{background:rgba(89,100,123,.2);color:var(--muted)}.tag.warn{background:rgba(255,174,43,.15);color:var(--amber)}.green{color:var(--green)}.red{color:var(--red)}.muted{color:var(--muted)}.rule{max-width:560px;line-height:1.4;color:var(--muted)}.json{white-space:pre-wrap;max-width:480px;color:var(--muted);font-size:11px}.no-data{text-align:center;padding:42px;color:var(--dim)}
+      #loading{padding:60px;text-align:center;color:var(--muted)}#offline{display:none;padding:14px 18px;border:1px solid var(--amber);border-radius:8px;background:rgba(255,174,43,.08);color:var(--amber)}
+      @media(max-width:900px){main{width:calc(100% - 20px)}.stat-card{flex:1 1 44%}table{font-size:12px}}
+    </style>
+  </head>
+  <body>
+    <nav class="nav">
+      <div class="brand"><div class="mark">DP</div><span>DriftPilot Operator</span></div>
+      <div class="tabs">
+        <a href="/">Operator</a>
+        <a href="/pipeline">Pipeline</a>
+        <a class="active" href="/brain">Brain</a>
+        <a href="/agents">Agents</a>
+        <a href="/admin">Admin</a>
+        <a href="/backtest">Backtest</a>
+        <a href="/llm">LLM</a>
+      </div>
+    </nav>
+    <main>
+      <div id="loading">Loading brain state...</div>
+      <div id="offline"></div>
+      <div id="content" style="display:none">
+        <section class="summary-bar" id="stats"></section>
+        <section class="section">
+          <div class="section-title">Active Skills <span class="section-count" id="skill-count"></span></div>
+          <div style="overflow-x:auto"><table><thead><tr><th>Skill</th><th>Rule</th><th>Applies To</th><th>Confidence</th><th>Evidence</th><th>Created</th></tr></thead><tbody id="skills"></tbody></table></div>
+        </section>
+        <section class="section">
+          <div class="section-title">Recent Experiences <span class="section-count" id="experience-count"></span></div>
+          <div style="overflow-x:auto"><table><thead><tr><th>Time</th><th>Type</th><th>Symbol</th><th>Decision</th><th>Outcome</th><th>Context</th></tr></thead><tbody id="experiences"></tbody></table></div>
+        </section>
+        <section class="section">
+          <div class="section-title">Reflection History <span class="section-count" id="reflection-count"></span></div>
+          <div style="overflow-x:auto"><table><thead><tr><th>Date</th><th>Summary</th><th>Skills</th><th>Experiences</th><th>Created</th></tr></thead><tbody id="reflections"></tbody></table></div>
+        </section>
+      </div>
+    </main>
+    <script>
+      const esc = value => String(value ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
+      const num = value => Number(value || 0).toLocaleString();
+      const pct = value => value == null ? "-" : `${(Number(value) * 100).toFixed(0)}%`;
+      const dateText = value => value ? new Date(value).toLocaleString() : "-";
+      const jsonText = value => esc(JSON.stringify(value || {}, null, 2));
+
+      function renderStats(stats) {
+        document.getElementById("stats").innerHTML = `
+          <div class="stat-card"><div class="label">Experiences</div><div class="value mono">${num(stats.total_experiences)}</div></div>
+          <div class="stat-card"><div class="label">Active Skills</div><div class="value mono green">${num(stats.active_skills)}</div></div>
+          <div class="stat-card"><div class="label">Reflections</div><div class="value mono">${num(stats.total_reflections)}</div></div>
+          <div class="stat-card"><div class="label">Last Reflection</div><div class="value mono" style="font-size:14px">${esc(stats.last_reflection_date || "-")}</div></div>
+          <div class="stat-card"><div class="label">Avg Confidence</div><div class="value mono">${stats.avg_confidence == null ? "-" : pct(stats.avg_confidence)}</div></div>
+        `;
+      }
+
+      function renderSkills(skills) {
+        document.getElementById("skill-count").textContent = `(${skills.length})`;
+        document.getElementById("skills").innerHTML = skills.map(skill => `
+          <tr>
+            <td><strong class="mono">${esc(skill.skill_id)}</strong><div class="muted">${esc(skill.title || skill.category || "")}</div></td>
+            <td><div class="rule">${esc(skill.rule || skill.description || "")}</div></td>
+            <td class="mono">${esc(skill.applies_to || "-")}</td>
+            <td class="mono green">${pct(skill.confidence)}</td>
+            <td class="mono">${Array.isArray(skill.evidence) ? skill.evidence.length : Number(skill.evidence_count || 0)}</td>
+            <td class="mono">${dateText(skill.created_at)}</td>
+          </tr>
+        `).join("") || `<tr><td colspan="6" class="no-data">No active skills yet</td></tr>`;
+      }
+
+      function renderExperiences(experiences) {
+        document.getElementById("experience-count").textContent = `(${experiences.length})`;
+        document.getElementById("experiences").innerHTML = experiences.map(exp => {
+          const ctx = exp.context || {};
+          const dec = exp.decision || {};
+          const outcome = exp.outcome || null;
+          const pnl = outcome && outcome.pnl_pct != null ? Number(outcome.pnl_pct) : null;
+          return `<tr>
+            <td class="mono">${dateText(exp.timestamp)}</td>
+            <td><span class="tag warn">${esc(exp.exp_type)}</span></td>
+            <td class="mono">${esc(ctx.symbol || "-")}</td>
+            <td><strong>${esc(dec.action || dec.decision || "-")}</strong><div class="muted">${esc(dec.reasoning || "")}</div></td>
+            <td class="mono ${pnl > 0 ? "green" : pnl < 0 ? "red" : ""}">${outcome ? `${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}% ${esc(outcome.exit_reason || "")}` : "pending"}</td>
+            <td><pre class="json">${jsonText(ctx)}</pre></td>
+          </tr>`;
+        }).join("") || `<tr><td colspan="6" class="no-data">No experiences stored yet</td></tr>`;
+      }
+
+      function renderReflections(reflections) {
+        document.getElementById("reflection-count").textContent = `(${reflections.length})`;
+        document.getElementById("reflections").innerHTML = reflections.map(item => {
+          const summary = item.summary || {};
+          return `<tr>
+            <td class="mono">${esc(item.date || "-")}</td>
+            <td><pre class="json">${jsonText(summary)}</pre></td>
+            <td class="mono green">+${num(item.skills_created)} / -${num(item.skills_retired)}</td>
+            <td class="mono">${num(item.experiences_analyzed)}</td>
+            <td class="mono">${dateText(item.created_at)}</td>
+          </tr>`;
+        }).join("") || `<tr><td colspan="5" class="no-data">No reflections yet</td></tr>`;
+      }
+
+      async function load() {
+        const loading = document.getElementById("loading");
+        const offline = document.getElementById("offline");
+        const content = document.getElementById("content");
+        try {
+          const resp = await fetch("/api/brain/status");
+          const data = await resp.json();
+          loading.style.display = "none";
+          if (data.status !== "ok") {
+            offline.style.display = "block";
+            offline.textContent = data.message || "Brain offline";
+          } else {
+            offline.style.display = "none";
+          }
+          content.style.display = "";
+          renderStats(data.stats || {});
+          renderSkills(data.skills || []);
+          renderExperiences(data.experiences || []);
+          renderReflections(data.reflections || []);
+        } catch (err) {
+          loading.textContent = `Error loading brain state: ${err}`;
+        }
+      }
+      load();
+      setInterval(load, 30000);
+    </script>
+  </body>
+</html>

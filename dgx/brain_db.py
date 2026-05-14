@@ -304,6 +304,28 @@ class BrainDB:
                     continue
         return experiences
 
+    def list_recent_experiences(self, limit: int = 20) -> list[Experience]:
+        """Return recent experiences ordered by timestamp descending."""
+        results = self.experiences.get(include=["documents"])
+        experiences: list[Experience] = []
+        if results and results["documents"]:
+            for doc_json in results["documents"]:
+                try:
+                    data = json.loads(doc_json)
+                    experiences.append(
+                        Experience(
+                            **{
+                                k: data[k]
+                                for k in Experience.__dataclass_fields__
+                                if k in data
+                            }
+                        )
+                    )
+                except (json.JSONDecodeError, KeyError, TypeError) as exc:
+                    logger.warning("experience_parse_error", extra={"error": str(exc)})
+        experiences.sort(key=lambda exp: exp.timestamp, reverse=True)
+        return experiences[: max(1, limit)]
+
     # ── Skill Storage ──
 
     def save_skill(self, skill: Skill, embedding: list[float] | None = None) -> str:
@@ -428,6 +450,37 @@ class BrainDB:
         reflection_id = cursor.lastrowid
         conn.close()
         return reflection_id
+
+    def list_reflections(self, limit: int = 20) -> list[dict[str, Any]]:
+        """Return recent reflection summaries."""
+        conn = sqlite3.connect(self.sqlite_path)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT id, date, summary_json, skills_created, skills_retired, "
+            "experiences_analyzed, created_at FROM reflections "
+            "ORDER BY date DESC, created_at DESC LIMIT ?",
+            (max(1, limit),),
+        ).fetchall()
+        conn.close()
+        reflections: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                summary = json.loads(row["summary_json"] or "{}")
+            except json.JSONDecodeError as exc:
+                logger.warning("reflection_parse_error", extra={"error": str(exc)})
+                summary = {}
+            reflections.append(
+                {
+                    "id": row["id"],
+                    "date": row["date"],
+                    "summary": summary,
+                    "skills_created": row["skills_created"],
+                    "skills_retired": row["skills_retired"],
+                    "experiences_analyzed": row["experiences_analyzed"],
+                    "created_at": row["created_at"],
+                }
+            )
+        return reflections
 
     def get_stats(self) -> dict[str, Any]:
         """Return brain health stats."""

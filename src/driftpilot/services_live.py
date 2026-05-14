@@ -17,9 +17,12 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import logging
-from dataclasses import dataclass
+import sqlite3
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+from typing import Any
 
 from driftpilot.broker.alpaca_client import AlpacaBrokerClient, OrderSubmissionResult
 from driftpilot.clock import DriftPilotClock
@@ -30,6 +33,7 @@ from driftpilot.execution.slot_allocator import (
 )
 from driftpilot.market_data.rest_quotes import AlpacaRestQuoteProvider
 from driftpilot.settings import DriftPilotSettings
+from driftpilot.signal_router import RoutingAction, RuleBasedRouter
 from driftpilot.signals import get_signal
 from driftpilot.signals.earnings_report_v1 import (
     EarningsReportConfig,
@@ -80,14 +84,19 @@ class DynamicBands:
 
 
 def compute_dynamic_bands(
-    *,
+    *price_args: float,
     atr_pct: float | None = None,
     drift_pct: float = 0.0,
     rvol: float = 1.0,
-    beta: float = 1.0,
+    beta: float | None = 1.0,
     catalyst: str | None = None,
     time_of_day: str = "morning",
     spread_pct: float = 0.0,
+    default_target_pct: float | None = None,
+    default_stop_pct: float | None = None,
+    entry_time: datetime | None = None,
+    category: str | None = None,
+    subcategory: str | None = None,
 ) -> DynamicBands:
     """Compute adaptive target/stop bands for a trade.
 
@@ -114,6 +123,18 @@ def compute_dynamic_bands(
     DynamicBands
         Contains ``target_pct``, ``stop_pct``, and ``reasoning`` string.
     """
+    if price_args or default_target_pct is not None or default_stop_pct is not None or entry_time is not None:
+        return _compute_legacy_dynamic_bands(
+            atr_pct=atr_pct,
+            drift_pct=drift_pct,
+            beta=beta,
+            default_target_pct=default_target_pct,
+            default_stop_pct=default_stop_pct,
+            entry_time=entry_time,
+            category=category,
+            subcategory=subcategory,
+        )
+
     reasons: list[str] = []
 
     # --- ATR base -------------------------------------------------------
@@ -139,7 +160,7 @@ def compute_dynamic_bands(
         reasons.append(f"RVOL boost +{boost:.2%} (rvol={rvol:.1f}x)")
 
     # --- Beta profile ---------------------------------------------------
-    if beta > HIGH_BETA_THRESHOLD:
+    if beta is not None and beta > HIGH_BETA_THRESHOLD:
         target *= (1 + BETA_WIDEN_FACTOR)
         stop *= (1 + BETA_WIDEN_FACTOR)
         reasons.append(f"high-beta widen 20% (beta={beta:.2f})")
@@ -174,6 +195,84 @@ def compute_dynamic_bands(
     )
 
 
+def _compute_legacy_dynamic_bands(
+    *,
+    atr_pct: float | None,
+    drift_pct: float,
+    beta: float | None,
+    default_target_pct: float | None,
+    default_stop_pct: float | None,
+    entry_time: datetime | None,
+    category: str | None,
+    subcategory: str | None,
+) -> DynamicBands:
+    """Compatibility path for the pre-Task-8 dynamic-bands call shape."""
+    target = default_target_pct if default_target_pct is not None else BASE_TARGET_PCT
+    stop = default_stop_pct if default_stop_pct is not None else BASE_STOP_PCT
+    reasons: list[str] = []
+
+    if atr_pct is None:
+        reasons.append("atr_profile=default")
+    else:
+        reasons.append(f"atr_pct={atr_pct}")
+
+    if beta is not None and beta > HIGH_BETA_THRESHOLD:
+        target *= 1.20
+        stop *= 1.20
+        reasons.append("beta_profile=high_beta")
+    elif beta is not None and beta < 0.8:
+        target *= 0.85
+        stop *= 0.85
+        reasons.append("beta_profile=low_beta")
+    else:
+        reasons.append("beta_profile=normal")
+
+    if entry_time is not None:
+        try:
+            from zoneinfo import ZoneInfo
+
+            et_time = entry_time.astimezone(ZoneInfo("America/New_York")).time()
+        except Exception as exc:
+            logger.warning("dynamic bands legacy time conversion failed: %s", exc)
+            et_time = entry_time.time()
+
+        if et_time < datetime.strptime("10:00", "%H:%M").time():
+            stop *= 1.30
+            reasons.append("time_profile=opening_volatility")
+        elif datetime.strptime("12:00", "%H:%M").time() <= et_time < datetime.strptime("13:30", "%H:%M").time():
+            stop *= 0.80
+            reasons.append("time_profile=midday_quiet")
+        elif et_time >= datetime.strptime("15:30", "%H:%M").time():
+            stop *= 1.20
+            reasons.append("time_profile=closing_volatility")
+        else:
+            reasons.append("time_profile=regular")
+
+    if category and subcategory:
+        if category == "earnings" and subcategory == "report":
+            target *= 1.60
+            stop *= 1.20
+        elif category == "analyst" and subcategory == "target_raise":
+            target *= 1.20
+            stop *= 1.10
+        reasons.append(f"catalyst_profile={category}/{subcategory}")
+
+    if drift_pct > 0:
+        drift_fraction = drift_pct / 100.0 if drift_pct > 0.5 else drift_pct
+        target = max(target - (drift_fraction * DRIFT_TAX_FACTOR), 0.001)
+        reasons.append("drift_adj")
+
+    if stop > MAX_STOP_LOSS_PCT:
+        stop = MAX_STOP_LOSS_PCT
+        reasons.append("stop_clamped")
+
+    return DynamicBands(
+        target_pct=round(target, 6),
+        stop_pct=round(stop, 6),
+        reasoning="; ".join(reasons),
+    )
+
+
 # Use the production ScanResult so the state machine's REGIME_CHECK
 # (which reads spy_bar_at) is happy.
 def _build_scan_result(candidates, now):
@@ -184,6 +283,105 @@ def _build_scan_result(candidates, now):
         regime="catalyst_event_driven",
         metadata={"source": "catalyst_scanner", "n_candidates": len(candidates)},
     )
+
+
+class MultiSignal:
+    """Fan-out/fan-in wrapper for live paper signals."""
+
+    name: str = "multi_signal"
+
+    def __init__(self, signals: list[Any]) -> None:
+        if not signals:
+            raise ValueError("MultiSignal requires at least one sub-signal")
+        self._signals = signals
+        self._by_name: dict[str, Any] = {
+            getattr(signal, "name", None) or signal.__class__.__name__: signal
+            for signal in signals
+        }
+
+    @property
+    def signals(self) -> list[Any]:
+        return list(self._signals)
+
+    async def subscribe(self) -> None:
+        for signal in self._signals:
+            subscribe = getattr(signal, "subscribe", None)
+            if subscribe is None:
+                continue
+            result = subscribe()
+            if inspect.isawaitable(result):
+                await result
+
+    def bootstrap_from_db(self, db_path: str) -> int:
+        total = 0
+        for signal in self._signals:
+            bootstrap = getattr(signal, "bootstrap_from_db", None)
+            if bootstrap is None:
+                continue
+            try:
+                total += int(bootstrap(db_path) or 0)
+            except Exception as exc:
+                logger.warning("MultiSignal bootstrap %s failed: %s", signal.name, exc)
+        return total
+
+    async def scan(self, now: datetime | None = None) -> list[Any]:
+        merged: dict[str, Any] = {}
+        order: list[str] = []
+        for signal in self._signals:
+            try:
+                params = inspect.signature(signal.scan).parameters
+                result = signal.scan(now=now) if "now" in params else signal.scan()
+                candidates = await result if inspect.isawaitable(result) else result
+            except Exception as exc:
+                logger.exception("MultiSignal: %s.scan raised: %s", signal.name, exc)
+                continue
+
+            for candidate in candidates or []:
+                features = dict(getattr(candidate, "features", None) or {})
+                features.setdefault("signal_name", getattr(signal, "name", None))
+                try:
+                    candidate = candidate.__class__(
+                        symbol=candidate.symbol,
+                        score=candidate.score,
+                        sector=candidate.sector,
+                        allowed=candidate.allowed,
+                        blocked_reason=candidate.blocked_reason,
+                        features=features,
+                    )
+                except Exception as exc:
+                    logger.debug("MultiSignal candidate reconstruction skipped: %s", exc)
+                symbol = str(getattr(candidate, "symbol", "")).upper()
+                if not symbol:
+                    continue
+                if symbol not in merged:
+                    order.append(symbol)
+                    merged[symbol] = candidate
+                    continue
+                if float(getattr(candidate, "score", 0.0)) > float(getattr(merged[symbol], "score", 0.0)):
+                    merged[symbol] = candidate
+        return [merged[symbol] for symbol in order]
+
+    def evaluate_exit(self, position, now, *args, **kwargs):
+        metadata = getattr(position, "metadata", {}) or {}
+        signal_name = metadata.get("signal_name")
+        target = self._by_name.get(signal_name) if signal_name else None
+        if target is None:
+            target = self._signals[0]
+        try:
+            return target.evaluate_exit(position, now, *args, **kwargs)
+        except Exception as exc:
+            logger.exception("MultiSignal.evaluate_exit %s raised: %s", signal_name, exc)
+            return None
+
+
+@dataclass(frozen=True, slots=True)
+class _RoutingEventStub:
+    """Minimal event shape accepted by RuleBasedRouter."""
+
+    category: str
+    subcategory: str
+    sentiment: str | None = None
+    priority_modifier: float = 0.0
 
 
 class LiveBrokerReconciler:
@@ -260,10 +458,19 @@ class CatalystScannerService:
         clock: DriftPilotClock,
         universe_path: str | None = None,
         runtime_config_path: str | None = None,
+        repository: DriftPilotRepository | None = None,
+        router: RuleBasedRouter | None = None,
     ) -> None:
         self.signal = signal
         self.quote_provider = quote_provider
         self.clock = clock
+        self.repository = repository
+        self._router = router or RuleBasedRouter()
+        self._brain_client = None
+        self._last_eod_reflection_date: str | None = None
+        self._last_eod_reflection_context: dict[str, Any] | None = None
+        self._max_price_drift_pct = 3.0
+        self._max_entry_atr_pct = 6.0
         # Hot-reload tracking — only re-read the file when its mtime changes.
         self._runtime_config_path = runtime_config_path
         self._runtime_config_mtime: float = 0.0
@@ -285,6 +492,182 @@ class CatalystScannerService:
             except FileNotFoundError:
                 logger.warning("universe path not found: %s — sector cap will fire on Unknown", universe_path)
 
+    def _load_context_json(self, symbol: str, headline_hash: str | None, features: dict[str, Any]) -> dict[str, Any]:
+        raw = features.get("context_json")
+        if raw is None and headline_hash:
+            db_path = getattr(self.signal, "_db_path", None)
+            if db_path:
+                try:
+                    conn = sqlite3.connect(db_path)
+                    try:
+                        row = conn.execute(
+                            """
+                            SELECT context_json
+                            FROM catalyst_events
+                            WHERE symbol = ? AND headline_hash = ?
+                            ORDER BY event_ts DESC
+                            LIMIT 1
+                            """,
+                            (symbol.upper(), headline_hash),
+                        ).fetchone()
+                    finally:
+                        conn.close()
+                    raw = row[0] if row else None
+                except sqlite3.Error as exc:
+                    logger.warning("context lookup failed for %s/%s: %s", symbol, headline_hash, exc)
+        if not raw:
+            return {}
+        try:
+            decoded = json.loads(str(raw))
+        except json.JSONDecodeError as exc:
+            logger.warning("context_json parse failed for %s/%s: %s", symbol, headline_hash, exc)
+            return {}
+        if not isinstance(decoded, dict):
+            logger.warning("context_json for %s/%s was not an object", symbol, headline_hash)
+            return {}
+        return decoded
+
+    def _record_price_drift(
+        self,
+        *,
+        symbol: str,
+        event_key: str | None,
+        price: float,
+        now: datetime,
+        metadata: dict[str, Any],
+    ) -> bool:
+        if self.repository is None or not event_key:
+            return True
+        baseline = self.repository.price_drift_baselines.update_seen(
+            symbol=symbol,
+            event_key=event_key,
+            price=price,
+            seen_at=now,
+            metadata={"headline": metadata.get("headline")},
+        )
+        metadata["first_seen_price"] = baseline.first_seen_price
+        metadata["price_drift_pct"] = baseline.drift_pct
+        if baseline.drift_pct <= self._max_price_drift_pct:
+            return True
+        self.repository.candidate_queue.mark_blocked(
+            symbol,
+            reason="price_drift",
+            features=metadata,
+            updated_at=now,
+        )
+        logger.info(
+            "catalyst scanner: blocked %s price drift %.2f%% > %.2f%%",
+            symbol,
+            baseline.drift_pct,
+            self._max_price_drift_pct,
+        )
+        return False
+
+    def _passes_atr_guardrail(
+        self,
+        *,
+        symbol: str,
+        atr_pct: Any,
+        now: datetime,
+        metadata: dict[str, Any],
+    ) -> bool:
+        if atr_pct is None:
+            return True
+        try:
+            atr_value = float(atr_pct)
+        except (TypeError, ValueError):
+            logger.warning("invalid atr_pct for %s: %r", symbol, atr_pct)
+            return True
+        metadata["atr_pct"] = atr_value
+        if atr_value <= self._max_entry_atr_pct:
+            return True
+        if self.repository is not None:
+            self.repository.candidate_queue.mark_blocked(
+                symbol,
+                reason="high_volatility_atr",
+                features=metadata,
+                updated_at=now,
+            )
+        logger.info(
+            "catalyst scanner: blocked %s ATR %.2f%% > %.2f%%",
+            symbol,
+            atr_value,
+            self._max_entry_atr_pct,
+        )
+        return False
+
+    def _annotate_with_routing(
+        self,
+        candidates: list[AllocationCandidate],
+        now: datetime,
+    ) -> list[AllocationCandidate]:
+        """Attach signal-router decisions and filter router-blocked candidates."""
+        router = getattr(self, "_router", None)
+        if router is None:
+            return candidates
+
+        routed: list[AllocationCandidate] = []
+        for candidate in candidates:
+            metadata = dict(candidate.metadata or {})
+            category = metadata.get("category")
+            subcategory = metadata.get("subcategory")
+            if not category or not subcategory:
+                routed.append(candidate)
+                continue
+
+            event = _RoutingEventStub(
+                category=str(category),
+                subcategory=str(subcategory),
+                sentiment=metadata.get("sentiment"),
+                priority_modifier=float(metadata.get("priority_modifier") or 0.0),
+            )
+            try:
+                decisions = router.route(event, time_et=now)
+            except Exception as exc:
+                logger.warning(
+                    "signal router failed for %s %s/%s: %s — keeping candidate",
+                    candidate.symbol,
+                    category,
+                    subcategory,
+                    exc,
+                )
+                routed.append(candidate)
+                continue
+
+            metadata["routing_decisions"] = [
+                {
+                    "action": decision.action.value,
+                    "signal_name": decision.signal_name,
+                    "horizon_minutes": decision.horizon_minutes,
+                    "conviction": decision.conviction,
+                    "rule_id": decision.rule_id,
+                    "reason": decision.reason,
+                }
+                for decision in decisions
+            ]
+            if any(decision.action == RoutingAction.BLOCK for decision in decisions):
+                logger.info(
+                    "signal router blocked %s: %s",
+                    candidate.symbol,
+                    "; ".join(d.reason for d in decisions if d.action == RoutingAction.BLOCK),
+                )
+                continue
+
+            routed_signal = next(
+                (
+                    decision.signal_name
+                    for decision in decisions
+                    if decision.action in {RoutingAction.ROUTE, RoutingAction.DEFERRED}
+                    and decision.signal_name
+                ),
+                None,
+            )
+            if routed_signal:
+                metadata["routed_signal"] = routed_signal
+                metadata["signal_name"] = routed_signal
+            routed.append(replace(candidate, metadata=metadata))
+        return routed
+
     def _maybe_hot_reload(self) -> None:
         """If the runtime_config.json file changed since last check, swap
         the signal's _config. Caller-driven so it runs once per scan cycle.
@@ -302,6 +685,8 @@ class CatalystScannerService:
             from driftpilot.runtime_config import load_runtime_config
             from driftpilot.signals.earnings_report_v1.config import EarningsReportConfig
             cfg = load_runtime_config(p)
+            self._max_price_drift_pct = cfg.max_price_drift_pct
+            self._max_entry_atr_pct = cfg.max_entry_atr_pct
             require_sent = cfg.earnings_require_sentiment
             new_signal_cfg = EarningsReportConfig(
                 max_hold_minutes=cfg.earnings_max_hold_minutes,
@@ -330,7 +715,8 @@ class CatalystScannerService:
         now = self.clock.now_utc()
         candidates: list[AllocationCandidate] = []
         try:
-            sig_candidates = await self.signal.scan(now=now)
+            scan_result = self.signal.scan(now=now)
+            sig_candidates = await scan_result if inspect.isawaitable(scan_result) else scan_result
         except Exception as exc:
             logger.exception("catalyst scanner: signal.scan raised: %s", exc)
             return _build_scan_result([], now)
@@ -350,22 +736,50 @@ class CatalystScannerService:
                 cat_ts_val.isoformat() if hasattr(cat_ts_val, "isoformat") else cat_ts_val
             )
             sector = sc.sector or self._sector_map.get(sc.symbol.upper()) or "Unknown"
+            headline_hash = features.get("headline_hash")
+            context = self._load_context_json(sc.symbol, headline_hash, features)
+            metadata = {
+                "reference_price": ref_price,
+                "catalyst_event_ts": cat_ts_str,
+                "headline": features.get("headline"),
+                "headline_hash": headline_hash,
+                "sentiment": features.get("sentiment"),
+                "priority_modifier": features.get("priority_modifier"),
+                "category": features.get("category"),
+                "subcategory": features.get("subcategory"),
+                "event_age_minutes": features.get("event_age_minutes"),
+                "horizon_minutes": features.get("horizon_minutes"),
+                "source": features.get("source", "catalyst_bus"),
+            }
+            atr_pct = context.get("atr_pct", features.get("atr_pct"))
+            beta = context.get("beta", features.get("beta"))
+            if beta is not None:
+                try:
+                    metadata["beta"] = float(beta)
+                except (TypeError, ValueError):
+                    logger.warning("invalid beta for %s: %r", sc.symbol, beta)
+            if not self._passes_atr_guardrail(
+                symbol=sc.symbol,
+                atr_pct=atr_pct,
+                now=now,
+                metadata=metadata,
+            ):
+                continue
+            if not self._record_price_drift(
+                symbol=sc.symbol,
+                event_key=str(headline_hash) if headline_hash else None,
+                price=ref_price,
+                now=now,
+                metadata=metadata,
+            ):
+                continue
             ac = AllocationCandidate(
                 symbol=sc.symbol,
                 score=float(sc.score),
                 sector=sector,
                 latest_bar_at=now,
                 rank=rank,
-                metadata={
-                    "reference_price": ref_price,
-                    "catalyst_event_ts": cat_ts_str,
-                    "headline": features.get("headline"),
-                    "headline_hash": features.get("headline_hash"),
-                    "sentiment": features.get("sentiment"),
-                    "event_age_minutes": features.get("event_age_minutes"),
-                    "horizon_minutes": features.get("horizon_minutes"),
-                    "source": features.get("source", "catalyst_bus"),
-                },
+                metadata=metadata,
             )
             candidates.append(ac)
             logger.info(
@@ -379,7 +793,83 @@ class CatalystScannerService:
 
         if not candidates:
             logger.info("catalyst scanner: 0 candidates this cycle (no admitted events)")
+        candidates = self._annotate_with_routing(candidates, now)
         return _build_scan_result(candidates, now)
+
+    async def _trigger_eod_reflection(self, now: datetime, *, reason: str) -> asyncio.Task | None:
+        try:
+            from zoneinfo import ZoneInfo
+
+            now_et = now.astimezone(ZoneInfo("America/New_York"))
+        except Exception as exc:
+            logger.warning("eod reflection timezone conversion failed: %s", exc)
+            now_et = now
+        if now_et.hour < 16:
+            return None
+        date_str = now_et.date().isoformat()
+        if self._last_eod_reflection_date == date_str:
+            return None
+
+        context = self._build_eod_reflection_context(date_str)
+        self._last_eod_reflection_context = context
+        self._last_eod_reflection_date = date_str
+
+        async def _run_reflection() -> None:
+            brain = self._brain_client
+            if brain is None:
+                from driftpilot.agents.brain_client import BrainClient
+
+                brain = BrainClient()
+                self._brain_client = brain
+            try:
+                result = brain.reflect(date_str)
+                if inspect.isawaitable(result):
+                    await result
+            except Exception as exc:
+                logger.warning("eod reflection failed for %s: %s", date_str, exc)
+
+        logger.info("triggering eod reflection for %s (%s)", date_str, reason)
+        return asyncio.create_task(_run_reflection())
+
+    def _build_eod_reflection_context(self, date_str: str) -> dict[str, Any]:
+        if self.repository is None:
+            return {"date": date_str, "closed_trade_count": 0, "symbols": [], "closed_trades": []}
+        rows = self.repository.connection.execute(
+            """
+            SELECT symbol, quantity, entry_price, closed_at, exit_reason, realized_pnl, metadata_json
+            FROM positions
+            WHERE status = 'closed' AND substr(closed_at, 1, 10) = ?
+            ORDER BY closed_at
+            """,
+            (date_str,),
+        ).fetchall()
+        trades: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                metadata = json.loads(row["metadata_json"] or "{}")
+            except json.JSONDecodeError:
+                metadata = {}
+            quantity = float(row["quantity"] or 0.0)
+            entry_price = float(row["entry_price"] or 0.0)
+            realized_pnl = float(row["realized_pnl"] or 0.0)
+            cost_basis = quantity * entry_price
+            pnl_pct = (realized_pnl / cost_basis * 100.0) if cost_basis > 0 else 0.0
+            trades.append(
+                {
+                    "symbol": row["symbol"],
+                    "closed_at": row["closed_at"],
+                    "exit_reason": row["exit_reason"],
+                    "realized_pnl": realized_pnl,
+                    "pnl_pct": pnl_pct,
+                    "signal_name": metadata.get("signal_name"),
+                }
+            )
+        return {
+            "date": date_str,
+            "closed_trade_count": len(trades),
+            "symbols": sorted({str(trade["symbol"]) for trade in trades}),
+            "closed_trades": trades,
+        }
 
 
 class LiveAlpacaAllocator:
@@ -409,7 +899,54 @@ class LiveAlpacaAllocator:
         for allocation in result.allocations:
             candidate = candidate_by_symbol[allocation.symbol.upper()]
             reference_price = float(candidate.metadata.get("reference_price", 100.0))
-            quantity = max(1, int(allocation.slot_value // reference_price))
+            try:
+                slot_value_multiplier = float(candidate.metadata.get("slot_value_multiplier", 1.0) or 1.0)
+            except (TypeError, ValueError):
+                logger.warning(
+                    "LIVE: invalid slot_value_multiplier for %s: %r",
+                    allocation.symbol,
+                    candidate.metadata.get("slot_value_multiplier"),
+                )
+                slot_value_multiplier = 1.0
+            effective_slot_value = allocation.slot_value * slot_value_multiplier
+            quantity = max(1, int(effective_slot_value // reference_price))
+
+            raw_beta = candidate.metadata.get("beta")
+            band_beta: float | None
+            band_beta_profile = "unknown"
+            try:
+                band_beta = float(raw_beta) if raw_beta is not None else None
+            except (TypeError, ValueError):
+                band_beta = None
+                logger.warning("LIVE: invalid beta metadata for %s: %r", allocation.symbol, raw_beta)
+            if band_beta is not None:
+                if band_beta > HIGH_BETA_THRESHOLD:
+                    band_beta_profile = "high_beta"
+                elif band_beta < 0.8:
+                    band_beta_profile = "low_beta"
+                else:
+                    band_beta_profile = "normal"
+            band_catalyst_profile = None
+            if candidate.metadata.get("category") and candidate.metadata.get("subcategory"):
+                band_catalyst_profile = (
+                    f"{candidate.metadata.get('category')}/{candidate.metadata.get('subcategory')}"
+                )
+            bands = compute_dynamic_bands(
+                reference_price,
+                reference_price,
+                atr_pct=candidate.metadata.get("atr_pct"),
+                beta=band_beta,
+                default_target_pct=self.settings.target_pct,
+                default_stop_pct=max(self.settings.stop_pct, DEFAULT_ATR_PCT),
+                entry_time=allocation.reserved_at,
+                category=candidate.metadata.get("category"),
+                subcategory=candidate.metadata.get("subcategory"),
+            )
+            band_time_profile = "regular"
+            for token in bands.reasoning.split("; "):
+                if token.startswith("time_profile="):
+                    band_time_profile = token.split("=", 1)[1]
+                    break
 
             # Catalyst-event audit fields — passed through from the candidate
             # so we can post-hoc join trade rows back to the triggering event.
@@ -435,6 +972,7 @@ class LiveAlpacaAllocator:
                     symbol=allocation.symbol,
                     quantity=quantity,
                     slot_id=allocation.slot_id,
+                    protective_stop_pct=bands.stop_pct,
                 )
             except Exception as exc:
                 # Broker race: paper orders can fill faster than _wait_for_fill
@@ -495,21 +1033,34 @@ class LiveAlpacaAllocator:
             # Order submitted AND filled (broker waited). Record the position
             # locally so the monitor can track it for exit.
             entry_price = submission.limit_price or reference_price
+            submission_metadata = submission.metadata or {}
             position = self.repository.positions.create_open(
                 symbol=allocation.symbol,
                 quantity=quantity,
                 entry_price=entry_price,
-                target_price=entry_price * (1 + self.settings.target_pct),
-                stop_price=entry_price * (1 - self.settings.stop_pct),
+                target_price=entry_price * (1 + bands.target_pct),
+                stop_price=entry_price * (1 - bands.stop_pct),
                 slot_id=allocation.slot_id,
                 opened_at=allocation.reserved_at,
                 metadata={
                     "sector": allocation.sector,
                     "broker_order_id": submission.broker_order_id,
+                    "protective_stop_order_id": submission_metadata.get("protective_stop_order_id"),
+                    "protective_stop_price": submission_metadata.get("protective_stop_price"),
+                    "protective_stop_pct": submission_metadata.get("protective_stop_pct"),
                     "reference_price": reference_price,
                     "current_price": entry_price,
                     "entry_ts": allocation.reserved_at.isoformat(),
                     "entry_price": entry_price,
+                    "slot_value_multiplier": slot_value_multiplier,
+                    "effective_slot_value": effective_slot_value,
+                    "band_target_pct": bands.target_pct,
+                    "band_stop_pct": bands.stop_pct,
+                    "band_reasoning": bands.reasoning,
+                    "band_beta": band_beta,
+                    "band_beta_profile": band_beta_profile,
+                    "band_catalyst_profile": band_catalyst_profile,
+                    "band_time_profile": band_time_profile,
                     "source": "live_alpaca_paper",
                     # Catalyst event chain — for forensic analysis
                     "catalyst_event_ts": (
@@ -597,8 +1148,62 @@ class LiveAlpacaPositionMonitor:
             return 0
         local_open = self.repository.positions.list_open()
         local_symbols = {(p.symbol or "").upper() for p in local_open}
+        alpaca_symbols = {(p.symbol or "").upper() for p in alpaca_positions}
 
         added = 0
+        for position in local_open:
+            sym = (position.symbol or "").upper()
+            if sym in alpaca_symbols:
+                continue
+            metadata = dict(position.metadata or {})
+            stop_order_id = metadata.get("protective_stop_order_id")
+            if not stop_order_id:
+                continue
+            try:
+                fill_price = await self.broker.get_fill_price(stop_order_id)
+            except Exception as exc:
+                logger.warning(
+                    "monitor reconcile: protective stop fill lookup failed for %s/%s: %s",
+                    sym,
+                    stop_order_id,
+                    exc,
+                )
+                continue
+            if fill_price is None:
+                fill_price = metadata.get("protective_stop_price")
+            if fill_price is None:
+                continue
+            realized = (float(fill_price) - float(position.entry_price)) * float(position.quantity)
+            try:
+                self.repository.positions.close(
+                    position.id,
+                    exit_reason="broker_protective_stop_filled",
+                    realized_pnl=realized,
+                    closed_at=self.clock.now_utc(),
+                    metadata={
+                        "exit_price": float(fill_price),
+                        "broker_exit_order_id": stop_order_id,
+                        "exit_close_path": "protective_stop_reconcile",
+                    },
+                )
+                if position.slot_id is not None:
+                    self.repository.slots.upsert(
+                        position.slot_id,
+                        status="EMPTY",
+                        symbol=None,
+                        slot_value=self.settings.slot_value,
+                        updated_at=self.clock.now_utc(),
+                    )
+                added += 1
+                local_symbols.discard(sym)
+                logger.info(
+                    "monitor reconcile: closed local %s from filled protective stop %s",
+                    sym,
+                    stop_order_id,
+                )
+            except Exception as exc:
+                logger.warning("monitor reconcile: failed to close stopped %s: %s", sym, exc)
+
         for ap in alpaca_positions:
             sym = (ap.symbol or "").upper()
             if sym in local_symbols:
@@ -747,7 +1352,10 @@ class LiveAlpacaPositionMonitor:
             )
             exit_result = None
             broker_race_filled = False
+            protective_stop_order_id = position_metadata.get("protective_stop_order_id")
             try:
+                if protective_stop_order_id:
+                    await self.broker.cancel_order(protective_stop_order_id)
                 exit_result = await self.broker.submit_exit_order(
                     symbol=symbol,
                     quantity=quantity,

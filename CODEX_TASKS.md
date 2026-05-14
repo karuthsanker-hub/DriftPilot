@@ -114,7 +114,7 @@ python -m pytest tests/ -x -q
 
 ---
 
-## TASK 5: Build /brain dashboard page  🔓 UNBLOCKED
+## TASK 5: Build /brain dashboard page  ✅ DONE
 
 **Priority: LOW** | **Files:** `src/trading_bot/dashboard/app.py`, `src/trading_bot/dashboard/templates/brain.html`
 
@@ -156,7 +156,7 @@ python -m pytest tests/ -x -q
 
 ---
 
-## TASK 7: Add position P&L tracking to pipeline dashboard  🔓 UNBLOCKED
+## TASK 7: Add position P&L tracking to pipeline dashboard  ✅ DONE
 
 **Priority: LOW** | **Files:** `src/trading_bot/dashboard/app.py`, `src/trading_bot/dashboard/templates/pipeline.html`
 
@@ -239,9 +239,9 @@ pass on both backends. Brain server now defaults to pgvector.
 | 2 | Beta values | ✅ Done |
 | 3 | BrainClient in PM Agent | ✅ Done |
 | 4 | EOD reflection trigger | ✅ Done |
-| 5 | /brain dashboard page | 🔓 Unblocked — ready for Codex |
+| 5 | /brain dashboard page | ✅ Done |
 | 6 | Volume spike signal | ✅ Done |
-| 7 | P&L tracking dashboard | 🔓 Unblocked — ready for Codex |
+| 7 | P&L tracking dashboard | ✅ Done |
 | 8 | Dynamic bands tests | ✅ Done (39 tests) |
 | 9 | pgvector migration | ✅ Done & deployed |
 | 10 | Sector data | ✅ Done |

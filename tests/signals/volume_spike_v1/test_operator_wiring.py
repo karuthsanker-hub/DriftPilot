@@ -125,16 +125,11 @@ def test_volume_spike_candidates_include_signal_name_and_rvol() -> None:
 
 def test_dynamic_bands_accept_volume_spike_rvol_without_atr() -> None:
     bands = compute_dynamic_bands(
-        entry_price=10.0,
-        reference_price=10.0,
         atr_pct=None,
         rvol=3.0,
-        signal_name="volume_spike_v1",
-        default_target_pct=0.01,
-        default_stop_pct=0.01,
+        catalyst="volume_spike_v1",
     )
 
     assert bands.target_pct > bands.stop_pct
-    assert "no ATR" in bands.reasoning
-    assert "catalyst_profile=volume_spike_v1" in bands.reasoning
-    assert "rvol_boost" in bands.reasoning
+    assert "ATR missing" in bands.reasoning
+    assert "RVOL boost" in bands.reasoning

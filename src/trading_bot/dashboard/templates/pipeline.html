@@ -32,6 +32,9 @@
       .stat-card .value.red { color: var(--red); }
       .stat-card .value.amber { color: var(--amber); }
       .stat-card .value.blue { color: var(--blue); }
+      .green { color: var(--green); }
+      .red { color: var(--red); }
+      .amber { color: var(--amber); }
 
       .cycle-selector { display: flex; gap: 8px; align-items: center; margin-bottom: 16px; flex-wrap: wrap; }
       .cycle-btn { background: var(--panel-2); border: 1px solid var(--line); color: var(--muted); padding: 6px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; }
@@ -92,6 +95,7 @@
       <div class="brand"><div class="mark">DP</div> DriftPilot</div>
       <a href="/">Dashboard</a>
       <a href="/pipeline" class="active">Pipeline</a>
+      <a href="/brain">Brain</a>
       <a href="/agents">Agents</a>
       <a href="/admin">Admin</a>
     </div>
@@ -114,7 +118,7 @@
           <table>
             <thead>
               <tr>
-                <th>Slot</th><th>Symbol</th><th>Entry</th><th>Stop</th><th>Target</th>
+                <th>Slot</th><th>Symbol</th><th>Entry</th><th>Current</th><th>P&L</th><th>P&L %</th><th>Held</th><th>Stop</th><th>Target</th>
                 <th>Band</th><th>Signal</th><th>Headline</th>
               </tr>
             </thead>
@@ -232,19 +236,28 @@
         document.getElementById("positions-table").innerHTML = positions.map(p => {
           const slot = slots.find(s => s.symbol === p.symbol);
           const ep = Number(p.entry_price) || 1;
+          const current = Number(p.current_price || p.entry_price || 0);
+          const pnl = Number(p.unrealized_pnl || 0);
+          const pnlPct = Number(p.unrealized_pct || 0);
+          const pnlClass = pnl > 0 ? "green" : pnl < 0 ? "red" : "";
+          const held = p.time_held_minutes != null ? `${Number(p.time_held_minutes).toFixed(0)}m` : "-";
           const stopPct = p.dynamic_stop_pct ? (p.dynamic_stop_pct * 100).toFixed(2) : ((ep - Number(p.stop_price || 0)) / ep * 100).toFixed(2);
           const targetPct = p.dynamic_target_pct ? (p.dynamic_target_pct * 100).toFixed(2) : ((Number(p.target_price || 0) - ep) / ep * 100).toFixed(2);
           return `<tr>
             <td class="mono">${slot ? slot.slot_id : "-"}</td>
             <td><strong class="mono">${p.symbol}</strong><div style="font-size:10px;color:var(--dim)">${p.sector || ""}</div></td>
             <td class="mono">$${Number(p.entry_price).toFixed(2)}</td>
+            <td class="mono">$${current.toFixed(2)}</td>
+            <td class="mono ${pnlClass}">${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}</td>
+            <td class="mono ${pnlClass}">${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%</td>
+            <td class="mono">${held}</td>
             <td class="mono" style="color:var(--red)">$${Number(p.stop_price).toFixed(2)} <span style="font-size:10px">(-${stopPct}%)</span></td>
             <td class="mono" style="color:var(--green)">$${Number(p.target_price).toFixed(2)} <span style="font-size:10px">(+${targetPct}%)</span></td>
             <td>${bandVisual(Number(stopPct), Number(targetPct))}</td>
             <td><span class="tag ${catClass(p.signal_name)}">${p.signal_name || "?"}</span></td>
             <td class="headline">${p.catalyst_headline || ""}</td>
           </tr>`;
-        }).join("") || `<tr><td colspan="8" class="no-data">No open positions</td></tr>`;
+        }).join("") || `<tr><td colspan="12" class="no-data">No open positions</td></tr>`;
       }
 
       function renderCycle(cycle) {
@@ -255,6 +268,7 @@
           <div class="stat-card"><div class="label">Rejected</div><div class="value red mono">${cycle.rejected_count}</div></div>
           <div class="stat-card"><div class="label">Blocked</div><div class="value mono">${cycle.blocked_count}</div></div>
           <div class="stat-card"><div class="label">Free Slots</div><div class="value ${pipelineData.free_slots > 0 ? 'green' : 'amber'} mono">${pipelineData.free_slots || 0}/${pipelineData.total_slots || 10}</div></div>
+          <div class="stat-card"><div class="label">Unrealized P&L</div><div class="value ${Number(pipelineData.total_unrealized_pnl || 0) >= 0 ? 'green' : 'red'} mono">${Number(pipelineData.total_unrealized_pnl || 0) >= 0 ? '+' : ''}$${Number(pipelineData.total_unrealized_pnl || 0).toFixed(2)}</div></div>
           <div class="stat-card"><div class="label">Scan Time</div><div class="value mono" style="font-size:14px">${new Date(cycle.ts).toLocaleTimeString()}</div></div>
         `;
 
@@ -335,7 +349,10 @@
           renderPositions();
 
           if (allCycles.length === 0) {
-            document.getElementById("summary").innerHTML = `<div class="stat-card"><div class="label">Status</div><div class="value mono" style="font-size:14px">Waiting for first scan cycle...</div></div>`;
+            document.getElementById("summary").innerHTML = `
+              <div class="stat-card"><div class="label">Status</div><div class="value mono" style="font-size:14px">Waiting for first scan cycle...</div></div>
+              <div class="stat-card"><div class="label">Unrealized P&L</div><div class="value ${Number(pipelineData.total_unrealized_pnl || 0) >= 0 ? 'green' : 'red'} mono">${Number(pipelineData.total_unrealized_pnl || 0) >= 0 ? '+' : ''}$${Number(pipelineData.total_unrealized_pnl || 0).toFixed(2)}</div></div>
+            `;
             document.getElementById("cycles").innerHTML = "";
             document.getElementById("accepted-table").innerHTML = `<tr><td colspan="14" class="no-data">No scan cycles yet</td></tr>`;
             document.getElementById("rejected-table").innerHTML = "";

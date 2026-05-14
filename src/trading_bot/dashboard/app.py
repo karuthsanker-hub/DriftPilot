@@ -5,7 +5,7 @@ import os
 import time
 import uuid
 from pathlib import Path
-from typing import NoReturn
+from typing import Any, NoReturn
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
@@ -143,6 +143,7 @@ def create_app(env_path: Path | str = ".env") -> FastAPI:
         try:
             import json as _json
             import sqlite3
+            from datetime import datetime, timezone
             from pathlib import Path as _Path
 
             # Pipeline scan cycles
@@ -154,6 +155,7 @@ def create_app(env_path: Path | str = ".env") -> FastAPI:
             # Slot + position status from operator DB
             slots = []
             positions = []
+            open_symbols_for_quotes: set[str] = set()
             db_path = _Path("data/driftpilot/operator_state.sqlite3")
             if db_path.exists():
                 conn = sqlite3.connect(db_path)
@@ -170,17 +172,21 @@ def create_app(env_path: Path | str = ".env") -> FastAPI:
                         "opened_at": meta.get("opened_at"),
                     })
                 for row in conn.execute(
-                    "SELECT symbol, entry_price, target_price, stop_price, status, "
+                    "SELECT symbol, quantity, entry_price, target_price, stop_price, status, "
                     "opened_at, metadata_json FROM positions WHERE status='open' "
                     "ORDER BY opened_at DESC"
                 ):
                     meta = _json.loads(row["metadata_json"] or "{}")
+                    current_price = _coerce_float(meta.get("current_price"))
+                    open_symbols_for_quotes.add(row["symbol"])
                     positions.append({
                         "symbol": row["symbol"],
+                        "quantity": row["quantity"],
                         "entry_price": row["entry_price"],
                         "target_price": row["target_price"],
                         "stop_price": row["stop_price"],
                         "opened_at": row["opened_at"],
+                        "current_price": current_price,
                         "signal_name": meta.get("signal_name"),
                         "sector": meta.get("sector"),
                         "dynamic_target_pct": meta.get("dynamic_target_pct"),
@@ -194,6 +200,25 @@ def create_app(env_path: Path | str = ".env") -> FastAPI:
                         "catalyst_sentiment": meta.get("catalyst_sentiment"),
                     })
                 conn.close()
+
+            latest_prices = _latest_pipeline_prices(open_symbols_for_quotes, env_path)
+            now_utc = datetime.now(timezone.utc)
+            total_unrealized_pnl = 0.0
+            for position in positions:
+                symbol = position["symbol"]
+                entry_price = _coerce_float(position.get("entry_price")) or 0.0
+                quantity = _coerce_float(position.get("quantity")) or 0.0
+                current_price = latest_prices.get(symbol) or position.get("current_price") or entry_price
+                position["current_price"] = current_price
+                unrealized_pnl = (current_price - entry_price) * quantity
+                position["unrealized_pnl"] = unrealized_pnl
+                position["unrealized_pct"] = (
+                    (current_price / entry_price - 1.0) * 100.0
+                    if entry_price > 0
+                    else 0.0
+                )
+                position["time_held_minutes"] = _held_minutes(position.get("opened_at"), now_utc)
+                total_unrealized_pnl += unrealized_pnl
 
             total_slots = len(slots) or 10
             free_slots = sum(1 for s in slots if s["status"] in ("available", "FREE"))
@@ -216,6 +241,7 @@ def create_app(env_path: Path | str = ".env") -> FastAPI:
                 "total_slots": total_slots,
                 "free_slots": free_slots,
                 "open_count": total_slots - free_slots,
+                "total_unrealized_pnl": total_unrealized_pnl,
                 "status": "ok",
                 "count": len(cycles),
             }
@@ -255,6 +281,51 @@ def create_app(env_path: Path | str = ".env") -> FastAPI:
             return {"status": "ok", "skills": skills, "count": len(skills)}
         except Exception as exc:
             _raise_api_error(exc, "brain_skills")
+
+    @app.get("/api/brain/status")
+    def brain_status():
+        """Combined brain dashboard payload with graceful offline behavior."""
+        try:
+            from driftpilot.agents.brain_client import BrainClient
+
+            client = BrainClient(timeout=2.0)
+            stats = client.get_stats()
+            if stats is None:
+                return {
+                    "status": "unavailable",
+                    "message": "Brain server not reachable",
+                    "stats": {},
+                    "skills": [],
+                    "experiences": [],
+                    "reflections": [],
+                }
+            skills = client.get_skills(status="active")
+            experiences = _brain_get_list(
+                client,
+                "/brain/experiences/recent",
+                "experiences",
+                {"limit": 20},
+            )
+            reflections = _brain_get_list(
+                client,
+                "/brain/reflections",
+                "reflections",
+                {"limit": 20},
+            )
+            last_reflection = reflections[0].get("date") if reflections else None
+            return {
+                "status": "ok",
+                "stats": {**stats, "last_reflection_date": last_reflection},
+                "skills": skills,
+                "experiences": experiences,
+                "reflections": reflections,
+            }
+        except Exception as exc:
+            _raise_api_error(exc, "brain_status")
+
+    @app.get("/brain", response_class=HTMLResponse)
+    def brain_page(request: Request):
+        return templates.TemplateResponse(request, "brain.html")
 
     @app.get("/api/operator/pm-analysis")
     def pm_analysis():
@@ -450,6 +521,70 @@ def _object_dict(value) -> dict:
         for key in dir(value)
         if not key.startswith("_") and not callable(getattr(value, key))
     }
+
+
+def _coerce_float(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _held_minutes(opened_at: Any, now_utc) -> float | None:
+    if not opened_at:
+        return None
+    try:
+        opened = opened_at if hasattr(opened_at, "tzinfo") else None
+        if opened is None:
+            from datetime import datetime, timezone
+
+            opened = datetime.fromisoformat(str(opened_at).replace("Z", "+00:00"))
+            if opened.tzinfo is None:
+                opened = opened.replace(tzinfo=timezone.utc)
+        return max(0.0, round((now_utc - opened.astimezone(now_utc.tzinfo)).total_seconds() / 60.0, 1))
+    except (TypeError, ValueError) as exc:
+        logger.debug("position opened_at parse failed: %s", exc)
+        return None
+
+
+def _latest_pipeline_prices(symbols: set[str], env_path: Path | str) -> dict[str, float]:
+    if not symbols:
+        return {}
+    try:
+        from driftpilot.market_data.rest_quotes import AlpacaRestQuoteProvider
+
+        settings = load_driftpilot_settings(env_path)
+        if not settings.alpaca_key_id or not settings.alpaca_secret_key:
+            return {}
+        quote_provider = AlpacaRestQuoteProvider(
+            settings.alpaca_key_id,
+            settings.alpaca_secret_key,
+            cache_ttl_s=10.0,
+        )
+        prices: dict[str, float] = {}
+        for symbol in sorted(symbols):
+            quote = quote_provider.latest_quote(symbol)
+            if quote is None:
+                continue
+            prices[symbol] = (quote.bid_price + quote.ask_price) / 2.0
+        return prices
+    except Exception as exc:
+        logger.warning("pipeline quote refresh failed: %s", exc)
+        return {}
+
+
+def _brain_get_list(client: Any, path: str, key: str, params: dict[str, Any]) -> list[dict[str, Any]]:
+    try:
+        response = client._client.get(path, params=params)
+        if response.status_code == 404:
+            return []
+        response.raise_for_status()
+        data = response.json()
+        items = data.get(key, [])
+        return items if isinstance(items, list) else []
+    except Exception as exc:
+        logger.warning("brain list fetch failed for %s: %s", path, exc)
+        return []
 
 
 def _safe_error(exc: Exception) -> str:
