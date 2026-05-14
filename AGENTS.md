@@ -6,8 +6,9 @@ authoritative spec is `REFACTOR_PLAN.md` in the repo root. Read it before
 making any decisions.
 
 ## Hard rules for all agents
-- Do not modify code under `src/trading_bot/` (legacy path). New code
-  lives entirely under `src/driftpilot/`.
+- Do not modify code under `src/trading_bot/` (legacy path) **except
+  `src/trading_bot/dashboard/`** which is the active dashboard and may
+  be edited freely. All other new code lives under `src/driftpilot/`.
 - Every commit message: `phase-N: <module> - <change>`.
 - All datetimes are timezone-aware. Time logic comes from
   `src/driftpilot/clock.py` only.

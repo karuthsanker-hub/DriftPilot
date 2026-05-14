@@ -1,11 +1,11 @@
 # Blocked Questions
 
-## 2026-05-14: CODEX_TASKS Tasks 5 and 7 target legacy dashboard path
+_No currently blocked items._
 
-`AGENTS.md` says: "Do not modify code under `src/trading_bot/` (legacy path). New code lives entirely under `src/driftpilot/`."
+## Resolved
 
-`CODEX_TASKS.md` Task 5 requires editing `src/trading_bot/dashboard/app.py` and adding `src/trading_bot/dashboard/templates/brain.html`.
-
-`CODEX_TASKS.md` Task 7 requires editing `src/trading_bot/dashboard/app.py` and `src/trading_bot/dashboard/templates/pipeline.html`.
-
-Question: Should these dashboard tasks be re-scoped to a `src/driftpilot/dashboard/` implementation, or is the `src/trading_bot/dashboard/` hard rule intentionally waived for dashboard-only work?
+### 2026-05-14: Dashboard tasks vs AGENTS.md legacy rule (RESOLVED)
+Tasks 5 and 7 target `src/trading_bot/dashboard/` which was blocked by
+the `src/trading_bot/` legacy rule in AGENTS.md. **Fixed:** AGENTS.md
+updated to explicitly allow edits to `src/trading_bot/dashboard/` since
+it is the active dashboard. Tasks 5 and 7 are now unblocked.

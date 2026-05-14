@@ -7,11 +7,15 @@
 
 ```
 src/driftpilot/           # Core operator, signals, agents
-src/trading_bot/dashboard/ # FastAPI dashboard + Jinja2 templates
+src/trading_bot/dashboard/ # FastAPI dashboard + Jinja2 templates (OK to edit)
 dgx/                      # Brain server (deploys to DGX Spark)
 docs/                     # Design docs
 data/driftpilot/          # Runtime data (SQLite DBs, pipeline_log.json)
 ```
+
+**IMPORTANT:** `AGENTS.md` forbids editing `src/trading_bot/` EXCEPT
+`src/trading_bot/dashboard/` which is the active dashboard. Dashboard
+tasks (5, 7) target that exception and are safe to work on.
 
 ## How to Run Locally
 
@@ -37,7 +41,7 @@ python -m pytest tests/ -x -q
 
 ---
 
-## TASK 1: Fix ATR data flow into candidate features
+## TASK 1: Fix ATR data flow into candidate features  ✅ DONE
 
 **Priority: HIGH** | **Files:** `src/driftpilot/catalyst/context_assembler.py`, `src/driftpilot/services_live.py`
 
@@ -55,7 +59,7 @@ python -m pytest tests/ -x -q
 
 ---
 
-## TASK 2: Fix null beta values in candidate features
+## TASK 2: Fix null beta values in candidate features  ✅ DONE
 
 **Priority: HIGH** | **Files:** `src/driftpilot/catalyst/context_assembler.py`, `src/driftpilot/services_live.py`
 
@@ -71,7 +75,7 @@ python -m pytest tests/ -x -q
 
 ---
 
-## TASK 3: Wire BrainClient into PM Agent
+## TASK 3: Wire BrainClient into PM Agent  ✅ DONE
 
 **Priority: MEDIUM** | **Files:** `src/driftpilot/agents/pm_agent.py`, `src/driftpilot/agents/brain_client.py`
 
@@ -90,7 +94,7 @@ python -m pytest tests/ -x -q
 
 ---
 
-## TASK 4: Add EOD reflection trigger
+## TASK 4: Add EOD reflection trigger  ✅ DONE
 
 **Priority: MEDIUM** | **Files:** `src/driftpilot/services_live.py`, `dgx/brain_server.py`
 
@@ -110,9 +114,12 @@ python -m pytest tests/ -x -q
 
 ---
 
-## TASK 5: Build /brain dashboard page
+## TASK 5: Build /brain dashboard page  🔓 UNBLOCKED
 
 **Priority: LOW** | **Files:** `src/trading_bot/dashboard/app.py`, `src/trading_bot/dashboard/templates/brain.html`
+
+> **Note:** `AGENTS.md` has been updated to allow edits to
+> `src/trading_bot/dashboard/`. This task is safe to work on.
 
 **Problem:** No UI to see what the brain has learned. Skills, experiences, and reflections are only in the brain's SQLite DB.
 
@@ -132,7 +139,7 @@ python -m pytest tests/ -x -q
 
 ---
 
-## TASK 6: Add volume_spike_v1 signal to operator scan loop
+## TASK 6: Add volume_spike_v1 signal to operator scan loop  ✅ DONE
 
 **Priority: MEDIUM** | **Files:** `src/driftpilot/services_live.py`, `src/driftpilot/signals/volume_spike_v1/signal.py`
 
@@ -149,9 +156,12 @@ python -m pytest tests/ -x -q
 
 ---
 
-## TASK 7: Add position P&L tracking to pipeline dashboard
+## TASK 7: Add position P&L tracking to pipeline dashboard  🔓 UNBLOCKED
 
 **Priority: LOW** | **Files:** `src/trading_bot/dashboard/app.py`, `src/trading_bot/dashboard/templates/pipeline.html`
+
+> **Note:** `AGENTS.md` has been updated to allow edits to
+> `src/trading_bot/dashboard/`. This task is safe to work on.
 
 **Problem:** Open positions table shows entry/stop/target but not current P&L or unrealized gain/loss.
 
@@ -194,21 +204,14 @@ python -m pytest tests/ -x -q
 
 ---
 
-## TASK 9: DGX Brain server — add ChromaDB to pgvector migration path ✅ DONE
+## TASK 9: DGX Brain server — pgvector backend  ✅ DONE & DEPLOYED
 
-**Priority: LOW** | **Files:** `dgx/brain_db.py`
+**Priority: LOW** | **Files:** `dgx/brain_db_pgvector.py`, `dgx/brain_server.py`, `dgx/start_brain.sh`
 
-**Problem:** Brain uses ChromaDB for vector storage. For production on DGX Spark, pgvector (PostgreSQL) would be more robust and allow SQL joins with experience/skill metadata.
-
-**What to do:**
-1. Add a `PgVectorBrainDB` class as an alternative to the ChromaDB-based `BrainDB`
-2. Use `asyncpg` + `pgvector` extension
-3. Schema: `experiences` table with `embedding vector(384)` column, `skills` table with `embedding vector(384)` column
-4. Implement same interface as `BrainDB`: `store_experience`, `query_similar`, `backfill_outcome`, `save_skill`, `get_active_skills`
-5. Add env var `BRAIN_DB_BACKEND=chroma|pgvector` to switch between backends
-6. Keep ChromaDB as default for local dev
-
-**Acceptance:** Both backends pass the same test suite. Brain server starts with either backend based on env var.
+PostgreSQL 16 + pgvector running on DGX Spark. `PgVectorBrainDB` class
+implemented with identical interface to ChromaDB `BrainDB`. All 12 tests
+pass on both backends. Brain server now defaults to pgvector.
+`BRAIN_DB_BACKEND=chroma` falls back to ChromaDB for local dev.
 
 ---
 
@@ -228,6 +231,23 @@ python -m pytest tests/ -x -q
 
 ---
 
+## Summary
+
+| Task | Description | Status |
+|------|-------------|--------|
+| 1 | ATR data flow | ✅ Done |
+| 2 | Beta values | ✅ Done |
+| 3 | BrainClient in PM Agent | ✅ Done |
+| 4 | EOD reflection trigger | ✅ Done |
+| 5 | /brain dashboard page | 🔓 Unblocked — ready for Codex |
+| 6 | Volume spike signal | ✅ Done |
+| 7 | P&L tracking dashboard | 🔓 Unblocked — ready for Codex |
+| 8 | Dynamic bands tests | Open |
+| 9 | pgvector migration | ✅ Done & deployed |
+| 10 | Sector data | Open |
+
+---
+
 ## Deployment Notes
 
 ### Local (MacBook)
@@ -237,10 +257,12 @@ python -m pytest tests/ -x -q
 - Qwen LLM on DGX Spark at `http://192.168.x.x:8000`
 
 ### DGX Spark
-- Brain server runs on DGX Spark (port 8077)
-- Requires: ChromaDB, sentence-transformers, FastAPI
-- Start: `cd dgx && bash start_brain.sh`
-- Health check: `curl http://<dgx-ip>:8077/brain/health`
+- Brain server runs on DGX Spark (port 8100)
+- PostgreSQL 16 + pgvector on port 5432 (auto-starts on boot)
+- Requires: psycopg, pgvector, sentence-transformers, FastAPI
+- Start: `cd ~/brain && bash start_brain.sh`
+- Health check: `curl http://<dgx-ip>:8100/brain/health`
+- Backend defaults to pgvector; set `BRAIN_DB_BACKEND=chroma` for ChromaDB fallback
 
 ### Environment Variables
 ```
@@ -248,5 +270,5 @@ ALPACA_API_KEY=...
 ALPACA_SECRET_KEY=...
 ALPACA_BASE_URL=https://paper-api.alpaca.markets
 QWEN_URL=http://<dgx-ip>:8000
-BRAIN_URL=http://<dgx-ip>:8077
+BRAIN_URL=http://<dgx-ip>:8100
 ```
