@@ -135,6 +135,23 @@
     </section>
     <main>
       <section class="left">
+        <!-- PM Analysis Panel -->
+        <section class="panel" id="pm-analysis-panel" style="border-color:var(--purple);background:linear-gradient(135deg,var(--panel),rgba(163,113,247,.04));">
+          <div class="section-title">
+            <span style="display:flex;align-items:center;gap:8px;">
+              <span style="color:var(--purple);font-weight:700;">PM ANALYST</span>
+              <span id="pm-risk-badge" class="tag" style="display:none;"></span>
+            </span>
+            <span style="display:flex;gap:8px;align-items:center;">
+              <span id="pm-meta" class="mono" style="color:var(--dim);font-size:11px;"></span>
+              <button id="pm-refresh-btn" onclick="triggerPMAnalysis()" style="border:1px solid var(--line);border-radius:4px;background:var(--panel-2);color:var(--muted);padding:4px 10px;cursor:pointer;font:600 11px 'JetBrains Mono';">ANALYZE NOW</button>
+            </span>
+          </div>
+          <div id="pm-summary" class="mono" style="font-size:14px;margin-bottom:12px;color:var(--muted);">Waiting for first analysis...</div>
+          <div id="pm-issues" style="display:grid;gap:8px;"></div>
+          <div id="pm-signals" style="display:flex;gap:12px;flex-wrap:wrap;margin-top:12px;"></div>
+          <div id="pm-performers" style="display:flex;gap:24px;margin-top:10px;"></div>
+        </section>
         <div>
           <div class="section-title"><span>Position Slots</span><span class="mono">$1,000 · +1% / -1% · 45m max</span></div>
           <div id="slots" class="slot-grid"></div>
@@ -496,12 +513,93 @@
         try { renderDiagnostics(await apiJson("/api/operator/diagnostics")); }
         catch (e) { /* keep last frame */ }
       }
+      // ── PM Analysis rendering ──
+      function severityColor(sev) {
+        if (sev === "critical") return "red";
+        if (sev === "warning") return "amber";
+        return "blue";
+      }
+      function riskColor(risk) {
+        if (risk === "critical") return "red";
+        if (risk === "high") return "red";
+        if (risk === "moderate") return "amber";
+        return "green";
+      }
+      function renderPMAnalysis(resp) {
+        if (!resp || resp.status !== "ok" || !resp.analysis) {
+          document.getElementById("pm-summary").textContent = resp?.message || "No analysis available yet.";
+          return;
+        }
+        const a = resp.analysis;
+        // Risk badge
+        const badge = document.getElementById("pm-risk-badge");
+        badge.style.display = "inline";
+        badge.textContent = (a.risk_level || "unknown").toUpperCase();
+        badge.style.color = `var(--${riskColor(a.risk_level)})`;
+        badge.style.borderColor = `var(--${riskColor(a.risk_level)})`;
+        badge.style.background = `rgba(${a.risk_level === "low" ? "37,211,154" : a.risk_level === "moderate" ? "255,174,43" : "255,64,84"},.12)`;
+        // P&L status indicator
+        const pnlIcon = a.pnl_status === "winning" ? "▲" : a.pnl_status === "losing" ? "▼" : "●";
+        const pnlCls = a.pnl_status === "winning" ? "green" : a.pnl_status === "losing" ? "red" : "muted";
+        document.getElementById("pm-summary").innerHTML =
+          `<span class="${pnlCls}">${pnlIcon}</span> ${escapeHtml(a.summary || "No summary")}`;
+        // Meta (when analyzed, latency)
+        const meta = a._meta || {};
+        if (meta.analyzed_at) {
+          const t = new Date(meta.analyzed_at).toLocaleTimeString();
+          document.getElementById("pm-meta").textContent =
+            `${t}${meta.latency_ms ? ` · ${meta.latency_ms}ms` : ""}${a._fallback ? " · fallback" : ""}`;
+        }
+        // Issues
+        const issues = a.issues || [];
+        document.getElementById("pm-issues").innerHTML = issues.length ? issues.map(i => `
+          <div style="display:flex;gap:10px;padding:10px;border:1px solid rgba(${i.severity === "critical" ? "255,64,84,.35" : i.severity === "warning" ? "255,174,43,.35" : "77,163,255,.25"});border-radius:6px;background:rgba(${i.severity === "critical" ? "255,64,84" : i.severity === "warning" ? "255,174,43" : "77,163,255"},.06);">
+            <span class="tag ${i.severity === "critical" ? "red" : ""}" style="flex-shrink:0;color:var(--${severityColor(i.severity)})">${(i.severity || "info").toUpperCase()}</span>
+            <div>
+              <div class="mono" style="font-weight:600;font-size:13px;">${escapeHtml(i.title)}</div>
+              <div style="color:var(--muted);font-size:12px;margin-top:4px;">${escapeHtml(i.detail)}</div>
+              <div style="color:var(--purple);font-size:12px;margin-top:4px;font-style:italic;">→ ${escapeHtml(i.recommendation)}</div>
+            </div>
+          </div>
+        `).join("") : `<div class="sub mono">No issues flagged</div>`;
+        // Signal verdicts
+        const sv = a.signal_verdict || {};
+        document.getElementById("pm-signals").innerHTML = Object.entries(sv).map(([name, verdict]) => {
+          const cls = verdict === "effective" ? "green" : verdict === "harmful" ? "red" : "amber";
+          return `<span class="mono" style="font-size:12px;"><span style="color:var(--${cls});font-weight:700;">${verdict.toUpperCase()}</span> ${name}</span>`;
+        }).join("") || "";
+        // Top/worst performers
+        const top = a.top_performers || [];
+        const worst = a.worst_performers || [];
+        document.getElementById("pm-performers").innerHTML = [
+          top.length ? `<div style="font-size:12px;"><span class="mono" style="color:var(--dim);">BEST:</span> ${top.map(s => `<span class="mono green" style="font-weight:600;margin-left:6px;">${s}</span>`).join("")}</div>` : "",
+          worst.length ? `<div style="font-size:12px;"><span class="mono" style="color:var(--dim);">WORST:</span> ${worst.map(s => `<span class="mono red" style="font-weight:600;margin-left:6px;">${s}</span>`).join("")}</div>` : "",
+        ].join("");
+      }
+      async function loadPMAnalysis() {
+        try { renderPMAnalysis(await apiJson("/api/operator/pm-analysis")); }
+        catch (e) { /* keep last frame */ }
+      }
+      async function triggerPMAnalysis() {
+        const btn = document.getElementById("pm-refresh-btn");
+        btn.textContent = "RUNNING...";
+        btn.disabled = true;
+        try {
+          const resp = await fetch(`${API_BASE}/api/operator/pm-analysis/run`, {method:"POST"});
+          const data = await resp.json();
+          renderPMAnalysis(data.status === "ok" ? data : {status:"ok", analysis: data.analysis || data});
+        } catch(e) { /* ignore */ }
+        btn.textContent = "ANALYZE NOW";
+        btn.disabled = false;
+      }
       load();
       loadTicker();
       loadDiagnostics();
+      loadPMAnalysis();
       setInterval(load, 5000);
       setInterval(loadTicker, 30000);
       setInterval(loadDiagnostics, 15000);
+      setInterval(loadPMAnalysis, 60000);
     </script>
   </body>
 </html>

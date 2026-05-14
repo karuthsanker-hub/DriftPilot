@@ -19,6 +19,7 @@ from .guardrail_validator import GuardrailValidator
 from .llm_client import LLMClient
 from .message_bus import MessageBus
 from .pm_agent import PMAgent, PortfolioSnapshot
+from .pm_analyst import PMAnalyst
 from .prompt_loader import PromptLoader
 from .scanner_agent import CandidateInfo, MarketContext, ScannerAgent
 from .slot_agent import PositionSnapshot, SlotAgent, SlotTickResult
@@ -49,6 +50,8 @@ class OrchestratorConfig:
     prompts_dir: str = "config/prompts"
     message_db_path: str = "data/driftpilot/agent_messages.sqlite3"
     message_ttl_seconds: int = 300
+    operator_db_path: str = "state/operator.sqlite3"
+    analyst_interval_minutes: int = 15
 
 
 @dataclass
@@ -59,6 +62,7 @@ class OrchestratorTickResult:
     scanner_entries_requested: int = 0
     slot_actions: dict[int, str] = field(default_factory=dict)
     algo_only_mode: bool = False
+    analyst_ran: bool = False
     error: str | None = None
 
 
@@ -88,6 +92,7 @@ class AgentOrchestrator:
         self._pm: PMAgent | None = None
         self._scanner: ScannerAgent | None = None
         self._slots: dict[int, SlotAgent] = {}
+        self._analyst: PMAnalyst | None = None
 
     @property
     def enabled(self) -> bool:
@@ -98,9 +103,27 @@ class AgentOrchestrator:
         return self._running
 
     def start(self) -> None:
-        """Initialize all agent infrastructure. Idempotent."""
+        """Initialize all agent infrastructure. Idempotent.
+
+        The PM Analyst is always initialized (even when agents are disabled)
+        because it operates independently via Qwen — no agent bus needed.
+        """
+        # Always init analyst, even if agents are disabled
+        if self._analyst is None:
+            try:
+                self._analyst = PMAnalyst(
+                    operator_db_path=self._config.operator_db_path,
+                    qwen_url=self._config.qwen_url,
+                    qwen_model=self._config.qwen_model,
+                    qwen_timeout_ms=10000,
+                    interval_minutes=self._config.analyst_interval_minutes,
+                )
+                logger.info("PM Analyst initialized (interval=%dm)", self._config.analyst_interval_minutes)
+            except Exception as exc:
+                logger.warning("PM Analyst init failed (non-fatal): %s", exc)
+
         if not self._config.enabled:
-            logger.info("Agent orchestrator is DISABLED (agent_enabled=False)")
+            logger.info("Agent orchestrator is DISABLED (agent_enabled=False) — PM Analyst still active")
             return
 
         if self._running:
@@ -151,9 +174,23 @@ class AgentOrchestrator:
                 guardrails=self._guardrails,
             )
 
+        # PM Analyst — runs independently of the agent LLM pipeline
+        try:
+            self._analyst = PMAnalyst(
+                operator_db_path=self._config.operator_db_path,
+                qwen_url=self._config.qwen_url,
+                qwen_model=self._config.qwen_model,
+                qwen_timeout_ms=10000,  # analyst gets longer timeout
+                interval_minutes=self._config.analyst_interval_minutes,
+            )
+            logger.info("PM Analyst initialized (interval=%dm)", self._config.analyst_interval_minutes)
+        except Exception as exc:
+            logger.warning("PM Analyst init failed (non-fatal): %s", exc)
+            self._analyst = None
+
         self._running = True
         logger.info(
-            "Agent orchestrator started: PM + Scanner + %d Slot agents",
+            "Agent orchestrator started: PM + Scanner + %d Slot agents + Analyst",
             self._config.num_slots,
         )
 
@@ -230,6 +267,26 @@ class AgentOrchestrator:
         except Exception as exc:
             logger.exception("Slot agent %d tick failed: %s", slot_id, exc)
             return None
+
+    def tick_analyst(self) -> bool:
+        """Run PM Analyst if interval has elapsed. Returns True if analysis ran.
+
+        Call this every operator tick. The analyst self-throttles to its
+        configured interval (default 15 min), so calling more often is safe.
+        Also works when agent orchestrator is disabled — the analyst only
+        needs Qwen, not the full agent pipeline.
+        """
+        if self._analyst is None:
+            return False
+
+        try:
+            if not self._analyst.should_run():
+                return False
+            result = self._analyst.run()
+            return result is not None
+        except Exception as exc:
+            logger.exception("PM Analyst tick failed: %s", exc)
+            return False
 
     def reload_prompts(self) -> int:
         """Hot-reload prompt configurations. Returns count loaded."""

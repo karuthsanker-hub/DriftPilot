@@ -42,6 +42,7 @@ def build_orchestrator(settings: DriftPilotSettings) -> AgentOrchestrator:
         prompts_dir=settings.agent_prompts_dir,
         message_db_path=settings.agent_db_path,
         message_ttl_seconds=settings.agent_message_ttl_seconds,
+        operator_db_path=settings.sqlite_path,
     )
 
     orch = AgentOrchestrator(config)

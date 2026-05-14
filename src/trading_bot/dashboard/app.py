@@ -356,6 +356,57 @@ def create_app(env_path: Path | str = ".env") -> FastAPI:
     def agents_page(request: Request):
         return templates.TemplateResponse(request, "agents.html")
 
+    @app.get("/api/operator/pm-analysis")
+    def pm_analysis():
+        """Latest PM Analyst analysis — structured trade health report."""
+        try:
+            from driftpilot.agents.pm_analyst import PMAnalyst
+            dp_settings = load_driftpilot_settings(env_path)
+            analyst = PMAnalyst(
+                operator_db_path=dp_settings.sqlite_path,
+                qwen_url=dp_settings.agent_qwen_url,
+                qwen_model=dp_settings.agent_qwen_model,
+            )
+            latest = analyst.get_latest()
+            if latest is None:
+                return {"status": "no_analysis", "message": "No PM analysis yet. Will run on next 15-min cycle."}
+            return {"status": "ok", "analysis": latest}
+        except Exception as exc:
+            _raise_api_error(exc, "pm_analysis")
+
+    @app.post("/api/operator/pm-analysis/run")
+    def pm_analysis_run():
+        """Trigger an immediate PM analysis (for testing or manual refresh)."""
+        try:
+            from driftpilot.agents.pm_analyst import PMAnalyst
+            dp_settings = load_driftpilot_settings(env_path)
+            analyst = PMAnalyst(
+                operator_db_path=dp_settings.sqlite_path,
+                qwen_url=dp_settings.agent_qwen_url,
+                qwen_model=dp_settings.agent_qwen_model,
+            )
+            result = analyst.run()
+            if result is None:
+                return {"status": "skipped", "message": "No trades or positions to analyze."}
+            return {"status": "ok", "analysis": result}
+        except Exception as exc:
+            _raise_api_error(exc, "pm_analysis_run")
+
+    @app.get("/api/operator/pm-analysis/history")
+    def pm_analysis_history(limit: int = 10):
+        """PM analysis history for trend tracking."""
+        try:
+            from driftpilot.agents.pm_analyst import PMAnalyst
+            dp_settings = load_driftpilot_settings(env_path)
+            analyst = PMAnalyst(
+                operator_db_path=dp_settings.sqlite_path,
+                qwen_url=dp_settings.agent_qwen_url,
+                qwen_model=dp_settings.agent_qwen_model,
+            )
+            return {"status": "ok", "history": analyst.get_history(limit=limit)}
+        except Exception as exc:
+            _raise_api_error(exc, "pm_analysis_history")
+
     @app.get("/api/agents/dashboard")
     def agents_dashboard():
         """Full agent dashboard payload — states, decisions, override rate."""
