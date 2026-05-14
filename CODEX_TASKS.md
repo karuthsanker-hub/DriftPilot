@@ -194,7 +194,7 @@ python -m pytest tests/ -x -q
 
 ---
 
-## TASK 9: DGX Brain server — add ChromaDB to pgvector migration path
+## TASK 9: DGX Brain server — add ChromaDB to pgvector migration path ✅ DONE
 
 **Priority: LOW** | **Files:** `dgx/brain_db.py`
 

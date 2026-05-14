@@ -23,7 +23,7 @@ import httpx
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-from brain_db import BrainDB, Experience, Skill
+from brain_db import BrainDB, Experience, Skill, SimilarExperience
 from brain_embedder import BrainEmbedder
 
 logger = logging.getLogger("brain.server")
@@ -35,8 +35,10 @@ logging.basicConfig(
 
 # ── Configuration ──
 
+BRAIN_DB_BACKEND = os.getenv("BRAIN_DB_BACKEND", "chroma")  # "chroma" or "pgvector"
 CHROMA_PATH = os.getenv("BRAIN_CHROMA_PATH", "/home/sankerkr/brain_data/chromadb")
 SQLITE_PATH = os.getenv("BRAIN_SQLITE_PATH", "/home/sankerkr/brain_data/skills.sqlite3")
+PG_DSN = os.getenv("BRAIN_PG_DSN", "postgresql://brain:brain@localhost:5432/brain")
 EMBEDDING_MODEL = os.getenv("BRAIN_EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
 EMBEDDING_DEVICE = os.getenv("BRAIN_EMBEDDING_DEVICE", "cpu")
 QWEN_URL = os.getenv("BRAIN_QWEN_URL", "http://localhost:8000/v1/chat/completions")
@@ -51,11 +53,20 @@ db: BrainDB | None = None
 async def lifespan(app: FastAPI):
     """Initialize embedder and DB on startup."""
     global embedder, db
-    logger.info("brain_server_starting")
+    logger.info("brain_server_starting", extra={"backend": BRAIN_DB_BACKEND})
     embedder = BrainEmbedder(model_name=EMBEDDING_MODEL, device=EMBEDDING_DEVICE)
-    db = BrainDB(chroma_path=CHROMA_PATH, sqlite_path=SQLITE_PATH)
-    logger.info("brain_server_ready", extra={"chroma": CHROMA_PATH, "sqlite": SQLITE_PATH})
+
+    if BRAIN_DB_BACKEND == "pgvector":
+        from brain_db_pgvector import PgVectorBrainDB
+        db = PgVectorBrainDB(dsn=PG_DSN)
+        logger.info("brain_server_ready", extra={"backend": "pgvector", "dsn": PG_DSN.split("@")[-1]})
+    else:
+        db = BrainDB(chroma_path=CHROMA_PATH, sqlite_path=SQLITE_PATH)
+        logger.info("brain_server_ready", extra={"backend": "chroma", "chroma": CHROMA_PATH, "sqlite": SQLITE_PATH})
+
     yield
+    if BRAIN_DB_BACKEND == "pgvector" and hasattr(db, "close"):
+        db.close()
     logger.info("brain_server_shutting_down")
 
 
@@ -118,6 +129,7 @@ def health():
     return {
         "ok": True,
         "service": "pm-trading-brain",
+        "backend": BRAIN_DB_BACKEND,
         "embedding_model": EMBEDDING_MODEL,
         "embedding_dim": embedder.dimension if embedder else None,
     }
