@@ -28,12 +28,23 @@ fi
 
 cd "$BRAIN_DIR"
 
+# Backend: pgvector (default) or chroma
+BACKEND="${BRAIN_DB_BACKEND:-pgvector}"
+PG_DSN="${BRAIN_PG_DSN:-postgresql://brain:brain@localhost:5432/brain}"
+
 echo "Starting PM Trading Brain on port $PORT..."
-echo "  ChromaDB: $DATA_DIR/chromadb"
-echo "  Skills DB: $DATA_DIR/skills.sqlite3"
+echo "  Backend: $BACKEND"
+if [[ "$BACKEND" == "pgvector" ]]; then
+    echo "  PostgreSQL: $PG_DSN"
+else
+    echo "  ChromaDB: $DATA_DIR/chromadb"
+    echo "  Skills DB: $DATA_DIR/skills.sqlite3"
+fi
 echo "  Embedding: sentence-transformers/all-MiniLM-L6-v2"
 echo "  Qwen: http://localhost:8000"
 
+export BRAIN_DB_BACKEND="$BACKEND"
+export BRAIN_PG_DSN="$PG_DSN"
 export BRAIN_CHROMA_PATH="$DATA_DIR/chromadb"
 export BRAIN_SQLITE_PATH="$DATA_DIR/skills.sqlite3"
 export BRAIN_EMBEDDING_MODEL="sentence-transformers/all-MiniLM-L6-v2"
