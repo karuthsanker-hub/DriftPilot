@@ -195,7 +195,9 @@ class ContextAssembler:
                         parsed_surprises.append(parsed)
                 last_4_surprises = parsed_surprises
         elif self._enable_external_fetch:
-            market_cap_m, avg_volume, beta = _fetch_yfinance_profile(symbol)
+            market_cap_m, avg_volume, beta, yf_sector = _fetch_yfinance_profile(symbol)
+            if sector is None and yf_sector:
+                sector = yf_sector
 
         if atr_pct is None and self._enable_external_fetch:
             atr_pct = _fetch_yfinance_atr_pct(symbol)
@@ -318,7 +320,7 @@ def _compute_atr_pct(bar_root: Path, symbol: str, period: int = 20) -> float | N
         return None
 
 
-def _fetch_yfinance_profile(symbol: str) -> tuple[float | None, int | None, float | None]:
+def _fetch_yfinance_profile(symbol: str) -> tuple[float | None, int | None, float | None, str | None]:
     try:
         import yfinance as yf  # type: ignore[import-untyped]
 
@@ -326,14 +328,16 @@ def _fetch_yfinance_profile(symbol: str) -> tuple[float | None, int | None, floa
         market_cap = _as_float(info.get("marketCap"))
         avg_volume = _as_float(info.get("averageVolume") or info.get("averageDailyVolume10Day"))
         beta = _as_float(info.get("beta"))
+        sector = info.get("sector") or None
         return (
             market_cap / 1_000_000 if market_cap is not None else None,
             int(avg_volume) if avg_volume is not None else None,
             beta,
+            sector,
         )
     except Exception as exc:
         logger.debug("yfinance profile unavailable for %s: %s", symbol, exc)
-        return None, None, None
+        return None, None, None, None
 
 
 def _fetch_yfinance_atr_pct(symbol: str, period: int = 14) -> float | None:

@@ -157,16 +157,18 @@ def test_yfinance_profile_helper_reads_beta(monkeypatch: pytest.MonkeyPatch) -> 
                 "marketCap": 100_000_000_000,
                 "averageVolume": 1_234_567,
                 "beta": 0.82,
+                "sector": "Health Care",
             }
 
     fake_yfinance = types.SimpleNamespace(Ticker=_Ticker)
     monkeypatch.setitem(sys.modules, "yfinance", fake_yfinance)
 
-    market_cap_m, avg_volume, beta = _fetch_yfinance_profile("REGN")
+    market_cap_m, avg_volume, beta, sector = _fetch_yfinance_profile("REGN")
 
     assert market_cap_m == pytest.approx(100_000.0)
     assert avg_volume == 1_234_567
     assert beta == pytest.approx(0.82)
+    assert sector == "Health Care"
 
 
 def test_yfinance_atr_helper_computes_daily_atr_pct(monkeypatch: pytest.MonkeyPatch) -> None:
