@@ -71,11 +71,24 @@ class AnalystTargetRaiseV1Signal:
         # Subscribe synchronously at construction. The bus subscribe
         # method is async; resolve it on the running loop or via
         # asyncio.run if no loop is active (test harnesses do this).
-        self._sub_id = self._await(
-            self._bus.subscribe(
-                EVENT_CATEGORY, EVENT_SUBCATEGORY, self._on_event
+        #
+        # We subscribe to all bullish catalyst categories — analyst
+        # upgrades, target raises, product launches, partnerships, and
+        # new coverage initiations all share the same 60-minute drift
+        # thesis: a positive headline → short-term price momentum.
+        _SUBSCRIPTIONS = [
+            (EVENT_CATEGORY, EVENT_SUBCATEGORY),      # analyst/target_raise
+            (EVENT_CATEGORY, "upgrade"),               # analyst/upgrade
+            (EVENT_CATEGORY, "initiates"),             # analyst/initiates
+            ("product", "launch"),                     # product launches
+            ("product", "partnership"),                # strategic partnerships
+        ]
+        self._sub_ids: list = []
+        for cat, sub in _SUBSCRIPTIONS:
+            sid = self._await(
+                self._bus.subscribe(cat, sub, self._on_event)
             )
-        )
+            self._sub_ids.append(sid)
 
     @staticmethod
     def _await(coro: Any) -> Any:
@@ -108,8 +121,10 @@ class AnalystTargetRaiseV1Signal:
             cur = conn.execute(
                 "SELECT symbol, category, subcategory, pillar, event_ts, headline, "
                 "source, horizon_minutes, headline_hash, sentiment, priority_modifier "
-                "FROM catalyst_events WHERE category = 'analyst' "
-                "AND subcategory = 'target_raise' AND event_ts >= ? "
+                "FROM catalyst_events WHERE ("
+                "  (category = 'analyst' AND subcategory IN ('target_raise', 'upgrade', 'initiates'))"
+                "  OR (category = 'product' AND subcategory IN ('launch', 'partnership'))"
+                ") AND event_ts >= ? "
                 "ORDER BY event_ts ASC",
                 (cutoff,),
             )
@@ -170,8 +185,10 @@ class AnalystTargetRaiseV1Signal:
                 f"SELECT symbol, sentiment, priority_modifier "
                 f"FROM catalyst_events "
                 f"WHERE symbol IN ({placeholders}) "
-                f"AND category = 'analyst' AND subcategory = 'target_raise' "
-                f"AND sentiment IS NOT NULL",
+                f"AND ("
+                f"  (category = 'analyst' AND subcategory IN ('target_raise', 'upgrade', 'initiates'))"
+                f"  OR (category = 'product' AND subcategory IN ('launch', 'partnership'))"
+                f") AND sentiment IS NOT NULL",
                 symbols_needing_refresh,
             ).fetchall()
         finally:

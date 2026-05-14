@@ -84,8 +84,19 @@ class EarningsReportSignal:
         return dict(self._last_skip_counts)
 
     async def _on_event(self, event: CatalystEvent) -> None:
-        # Latest event wins, keyed by symbol.
+        # Best event wins: keep the one with the highest priority_modifier.
+        # Neutral transcript events (priority_modifier=0) must NOT overwrite
+        # a positive earnings beat (priority_modifier>0).  See defect: May 14
+        # "Full Earnings Call Transcript" events classified neutral replaced
+        # positive beats, starving the scanner of candidates all day.
         symbol = event.symbol.upper()
+        existing = self._active_events.get(symbol)
+        if existing is not None:
+            new_prio = getattr(event, "priority_modifier", 0.0) or 0.0
+            old_prio = getattr(existing, "priority_modifier", 0.0) or 0.0
+            # Only overwrite if the new event has equal or higher priority
+            if new_prio < old_prio:
+                return
         self._active_events[symbol] = event
         self._event_confidence[symbol] = getattr(event, "confidence", None)
 
@@ -162,6 +173,13 @@ class EarningsReportSignal:
                     priority_modifier=float(row[10] or 0.0),
                 )
                 symbol = event.symbol.upper()
+                # Keep the best event per symbol (highest priority_modifier)
+                existing = self._active_events.get(symbol)
+                if existing is not None:
+                    new_prio = event.priority_modifier or 0.0
+                    old_prio = getattr(existing, "priority_modifier", 0.0) or 0.0
+                    if new_prio < old_prio:
+                        continue
                 self._active_events[symbol] = event
                 self._event_confidence[symbol] = (
                     float(row[11]) if row[11] is not None else None

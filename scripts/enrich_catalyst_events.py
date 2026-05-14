@@ -170,8 +170,13 @@ async def main_async(args) -> None:
             ("analyst", "target_cut"),
             ("analyst", "upgrade"),
             ("analyst", "downgrade"),
+            ("analyst", "initiates"),
+            ("analyst", "reiterates"),
             ("m_and_a", "acquires"),
             ("m_and_a", "merger"),
+            ("product", "launch"),
+            ("product", "partnership"),
+            ("legal", "lawsuit"),
         ]
     init_catalyst_schema(args.db)
     pending = _fetch_pending(

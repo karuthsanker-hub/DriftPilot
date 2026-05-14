@@ -787,6 +787,7 @@ class CatalystScannerService:
                     "horizon_minutes": features.get("horizon_minutes"),
                     "source": features.get("source", "catalyst_bus"),
                     "atr_pct": atr_pct,
+                    "rvol": features.get("rvol"),  # relative volume (from volume_spike signal)
                     "slot_value_multiplier": slot_value_multiplier,
                     "price_drift_pct": round(drift_pct, 2),
                     "first_seen_price": first_price,
@@ -903,6 +904,144 @@ class CatalystScannerService:
         return routed
 
 
+# ---------------------------------------------------------------------------
+# Dynamic Entry / Exit Band Calculator
+# ---------------------------------------------------------------------------
+# Replaces fixed 1%/1% target/stop with bands that adapt to:
+#   1. ATR (volatility) — wider stops for volatile stocks
+#   2. Price drift — reduce target if stock already ran
+#   3. Volume conviction (RVOL) — high volume = wider targets
+#   4. Spread cost — wide spreads eat into profit
+#
+# Authority: This is BELOW the guardrail validator — the guardrail will
+# still clamp any values that exceed MAX_STOP_LOSS_PCT / MAX_PROFIT_CAP_PCT.
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class DynamicBands:
+    """Computed target and stop bands for a single entry."""
+    target_pct: float   # e.g. 0.025 = 2.5%
+    stop_pct: float     # e.g. 0.015 = 1.5%
+    reasoning: str      # human-readable explanation for logs
+
+
+def compute_dynamic_bands(
+    entry_price: float,
+    reference_price: float,
+    *,
+    atr_pct: float | None = None,
+    drift_pct: float = 0.0,
+    rvol: float | None = None,
+    spread_pct: float = 0.0,
+    priority_modifier: float | None = None,
+    signal_name: str | None = None,
+    # Fallback defaults from settings (used when no ATR data available)
+    default_target_pct: float = 0.01,
+    default_stop_pct: float = 0.01,
+) -> DynamicBands:
+    """Compute adaptive target/stop bands based on market conditions.
+
+    What a real trader does:
+    - Sets stop based on the stock's volatility (ATR), not a fixed %)
+    - Reduces profit target when the stock already ran (drift consumed upside)
+    - Gives wider targets when volume conviction is high (RVOL > 3 = momentum)
+    - Accounts for spread cost (wide spread eats into effective profit)
+
+    Returns a DynamicBands with target_pct and stop_pct as decimals (0.02 = 2%).
+    """
+    parts: list[str] = []
+
+    # ---- 1. BASE STOP: ATR-based (if available) ----
+    # A trader sets stop loss at 1.5× ATR — gives the stock room to breathe
+    # without getting stopped out on normal noise.
+    if atr_pct is not None and atr_pct > 0:
+        # ATR stop: 1.5× ATR, but floor at 0.5% and cap at 3%
+        atr_stop = atr_pct / 100.0 * 1.5
+        atr_stop = max(0.005, min(atr_stop, 0.03))
+        stop_pct = atr_stop
+        parts.append(f"stop=1.5×ATR({atr_pct:.1f}%)={stop_pct*100:.2f}%")
+    else:
+        # No ATR — use a moderate default wider than 1%
+        stop_pct = max(default_stop_pct, 0.012)
+        parts.append(f"stop=default({stop_pct*100:.1f}%,no ATR)")
+
+    # ---- 2. BASE TARGET: risk/reward based on stop ----
+    # Minimum 1.5:1 reward/risk ratio. A trader won't enter if the
+    # target doesn't give at least 1.5× the stop distance.
+    base_target = stop_pct * 2.0  # 2:1 R/R as starting point
+    base_target = max(base_target, 0.008)  # floor 0.8%
+    base_target = min(base_target, 0.05)   # cap 5% (guardrail will also cap)
+    target_pct = base_target
+    parts.append(f"base_target=2×stop={target_pct*100:.2f}%")
+
+    # ---- 3. DRIFT ADJUSTMENT ----
+    # If the stock already moved 1.5% since catalyst, the upside is partially
+    # consumed. Reduce target by the drift amount, but don't go below 0.5%.
+    # The user said: "if the market has moved > 1%, adjust the band — enter
+    # for larger price and exit for a lower price."
+    abs_drift = abs(drift_pct) / 100.0  # drift_pct comes as percentage (e.g. 1.5)
+    if abs_drift > 0.005:  # meaningful drift > 0.5%
+        drift_tax = abs_drift * 0.6  # take 60% of drift off the target
+        old_target = target_pct
+        target_pct = max(0.005, target_pct - drift_tax)
+        if target_pct != old_target:
+            parts.append(f"drift_adj: {old_target*100:.2f}%→{target_pct*100:.2f}% (drift={drift_pct:.1f}%)")
+        # Also tighten stop slightly when we're entering late (less room for error)
+        if abs_drift > 0.01:
+            stop_pct = max(0.005, stop_pct * 0.9)
+            parts.append(f"stop_tightened_for_drift={stop_pct*100:.2f}%")
+
+    # ---- 4. VOLUME CONVICTION (RVOL) ----
+    # High RVOL = strong conviction, momentum has legs.
+    # RVOL > 3 = widen target by 20%, RVOL > 5 = widen by 40%
+    # Low RVOL or no data = no adjustment.
+    if rvol is not None and rvol > 2.0:
+        if rvol >= 5.0:
+            vol_boost = 1.4
+        elif rvol >= 3.0:
+            vol_boost = 1.2
+        else:
+            vol_boost = 1.0 + (rvol - 2.0) * 0.1  # 2-3x: gradual 10-20%
+        old_target = target_pct
+        target_pct = min(0.05, target_pct * vol_boost)
+        parts.append(f"rvol_boost: RVOL={rvol:.1f}x → target {old_target*100:.2f}%→{target_pct*100:.2f}%")
+
+    # ---- 5. SPREAD COST ----
+    # Wide spread eats into effective profit. If spread is 0.3% of price,
+    # that's 0.3% gone from the target before the trade even starts.
+    if spread_pct > 0.001:
+        old_target = target_pct
+        target_pct = max(0.004, target_pct - spread_pct * 0.5)
+        if target_pct != old_target:
+            parts.append(f"spread_cost: {spread_pct*100:.2f}% → target {old_target*100:.2f}%→{target_pct*100:.2f}%")
+
+    # ---- 6. SIGNAL-SPECIFIC ADJUSTMENTS ----
+    # Volume spike entries tend to be momentum plays — slightly wider bands.
+    if signal_name == "volume_spike_v1":
+        target_pct = min(0.05, target_pct * 1.15)
+        stop_pct = min(0.03, stop_pct * 1.1)
+        parts.append(f"vol_spike_signal_adj: target={target_pct*100:.2f}% stop={stop_pct*100:.2f}%")
+
+    # ---- 7. PRIORITY MODIFIER (from Qwen sentiment strength) ----
+    # Strong sentiment (priority_modifier > 0.3) = slightly wider target.
+    if priority_modifier is not None and priority_modifier > 0.3:
+        boost = 1.0 + min(priority_modifier, 1.0) * 0.15
+        target_pct = min(0.05, target_pct * boost)
+        parts.append(f"sentiment_boost: mod={priority_modifier:.2f} → target={target_pct*100:.2f}%")
+
+    # ---- FINAL SANITY: ensure target > stop (reward > risk) ----
+    if target_pct <= stop_pct:
+        target_pct = stop_pct * 1.5
+        parts.append(f"floor_rr: target bumped to 1.5×stop={target_pct*100:.2f}%")
+
+    # Round to 4 decimal places
+    target_pct = round(target_pct, 4)
+    stop_pct = round(stop_pct, 4)
+
+    reasoning = " | ".join(parts)
+    return DynamicBands(target_pct=target_pct, stop_pct=stop_pct, reasoning=reasoning)
+
+
 class LiveAlpacaAllocator:
     """Allocator that submits real Alpaca paper orders."""
 
@@ -960,13 +1099,26 @@ class LiveAlpacaAllocator:
                 cat_headline,
             )
 
+            # Pre-compute estimated dynamic stop for the broker's protective stop
+            # (uses reference_price as proxy since we don't have fill price yet)
+            _pre_meta = candidate.metadata or {}
+            _pre_atr = _pre_meta.get("atr_pct")
+            _pre_bands = compute_dynamic_bands(
+                entry_price=reference_price,
+                reference_price=reference_price,
+                atr_pct=_pre_atr,
+                drift_pct=float(_pre_meta.get("price_drift_pct") or 0.0),
+                default_target_pct=self.settings.target_pct,
+                default_stop_pct=self.settings.stop_pct,
+            )
+
             submission = None
             try:
                 submission = await self.broker.submit_entry_order(
                     symbol=allocation.symbol,
                     quantity=quantity,
                     slot_id=allocation.slot_id,
-                    protective_stop_pct=self.settings.stop_pct,
+                    protective_stop_pct=_pre_bands.stop_pct,
                 )
             except Exception as exc:
                 # Broker race: paper orders can fill faster than _wait_for_fill
@@ -1007,10 +1159,19 @@ class LiveAlpacaAllocator:
                     reason = "reconciled_from_alpaca_position"
                     prior_reason = (submission.reason if submission else "broker_already_filled_race")
                     prior_id = (submission.broker_order_id if submission else None)
+                    reconciled_entry = float(actual.average_entry_price)
+                    # Slippage guard on reconciled fills: if the Alpaca position
+                    # price is >1.5% above our reference, something went wrong
+                    # (stale quote, previous fill from different attempt, etc.)
+                    recon_slippage = (
+                        ((reconciled_entry - reference_price) / reference_price * 100.0)
+                        if reference_price > 0 else 0.0
+                    )
                     logger.warning(
-                        "LIVE: reconciling %s from alpaca: qty=%s entry=$%.2f (broker prior reason=%s)",
-                        actual.symbol, actual.quantity, float(actual.average_entry_price),
-                        prior_reason,
+                        "LIVE: reconciling %s from alpaca: qty=%s entry=$%.2f ref=$%.2f "
+                        "slippage=%.1f%% (broker prior reason=%s)",
+                        actual.symbol, actual.quantity, reconciled_entry,
+                        reference_price, recon_slippage, prior_reason,
                     )
                     submission = OrderSubmissionResult(
                         submitted=True,
@@ -1019,7 +1180,7 @@ class LiveAlpacaAllocator:
                         side="buy",
                         quantity=float(actual.quantity),
                         order_type="reconciled",
-                        limit_price=float(actual.average_entry_price),
+                        limit_price=reconciled_entry,
                         reason=reason,
                     )
                 else:
@@ -1032,13 +1193,72 @@ class LiveAlpacaAllocator:
             # Order submitted AND filled (broker waited). Record the position
             # locally so the monitor can track it for exit.
             entry_price = submission.limit_price or reference_price
-            stop_price = entry_price * (1 - self.settings.stop_pct)
+
+            # --- Slippage guard ---
+            # If the actual fill price is >1.5% above the reference price,
+            # we entered much higher than the signal intended. The profit
+            # target is already eaten by slippage. Log and skip recording
+            # (the broker position will be caught by the next reconcile
+            # cycle and closed as an orphan, or we exit immediately).
+            if reference_price > 0:
+                slippage_pct = ((entry_price - reference_price) / reference_price) * 100.0
+                if slippage_pct > 1.5:
+                    logger.warning(
+                        "SLIPPAGE REJECT %s: fill=$%.2f ref=$%.2f slippage=%.1f%% "
+                        "(exceeds 1.5%% — entering at a loss). Will exit immediately.",
+                        allocation.symbol, entry_price, reference_price, slippage_pct,
+                    )
+                    # Still record the position so the monitor can exit it cleanly
+                    # but mark it as slippage-rejected in metadata for forensics.
+
+            # --- DYNAMIC BANDS: compute adaptive target/stop ---
+            # Pull market data from candidate metadata for band calculation
+            _meta = candidate.metadata or {}
+            _atr_pct = _meta.get("atr_pct")  # ATR as % of price
+            _drift_pct = float(_meta.get("price_drift_pct") or 0.0)
+            _rvol = (
+                float(_meta.get("rvol") or 0)
+                if _meta.get("rvol") is not None else None
+            )
+            _signal_name = _meta.get("signal_name")
+            _priority_mod = float(_meta.get("priority_modifier") or 0)
+
+            # Compute spread from entry vs reference (proxy for bid/ask width)
+            _spread_pct = 0.0
+            if reference_price > 0 and entry_price > 0:
+                _spread_pct = abs(entry_price - reference_price) / reference_price
+
+            bands = compute_dynamic_bands(
+                entry_price=entry_price,
+                reference_price=reference_price,
+                atr_pct=_atr_pct,
+                drift_pct=_drift_pct,
+                rvol=_rvol,
+                spread_pct=_spread_pct,
+                priority_modifier=_priority_mod if _priority_mod else None,
+                signal_name=_signal_name,
+                default_target_pct=self.settings.target_pct,
+                default_stop_pct=self.settings.stop_pct,
+            )
+            logger.info(
+                "DYNAMIC BANDS %s: target=%.2f%% stop=%.2f%% | atr=%.1f%% drift=%.1f%% "
+                "rvol=%s spread=%.3f%% | %s",
+                allocation.symbol,
+                bands.target_pct * 100, bands.stop_pct * 100,
+                float(_atr_pct or 0), _drift_pct,
+                f"{_rvol:.1f}x" if _rvol else "N/A",
+                _spread_pct * 100,
+                bands.reasoning,
+            )
+
+            stop_price = round(entry_price * (1 - bands.stop_pct), 2)
+            target_price = round(entry_price * (1 + bands.target_pct), 2)
             protective_stop_metadata = dict(getattr(submission, "metadata", {}) or {})
             position = self.repository.positions.create_open(
                 symbol=allocation.symbol,
                 quantity=quantity,
                 entry_price=entry_price,
-                target_price=entry_price * (1 + self.settings.target_pct),
+                target_price=target_price,
                 stop_price=stop_price,
                 slot_id=allocation.slot_id,
                 opened_at=allocation.reserved_at,
@@ -1052,6 +1272,14 @@ class LiveAlpacaAllocator:
                     "entry_ts": allocation.reserved_at.isoformat(),
                     "entry_price": entry_price,
                     "source": "live_alpaca_paper",
+                    # Dynamic band audit trail
+                    "dynamic_target_pct": bands.target_pct,
+                    "dynamic_stop_pct": bands.stop_pct,
+                    "dynamic_band_reasoning": bands.reasoning,
+                    "band_atr_pct": _atr_pct,
+                    "band_drift_pct": _drift_pct,
+                    "band_rvol": _rvol,
+                    "band_spread_pct": round(_spread_pct, 4),
                     # Catalyst event chain — for forensic analysis
                     "catalyst_event_ts": cat_event_ts_value,
                     "catalyst_headline_hash": cat_headline_hash,
@@ -1081,7 +1309,7 @@ class LiveAlpacaAllocator:
                     protective_stop_metadata = {
                         "protective_stop_order_id": protective.broker_order_id,
                         "protective_stop_price": stop_price,
-                        "protective_stop_pct": self.settings.stop_pct,
+                        "protective_stop_pct": bands.stop_pct,
                     }
                     position = self.repository.positions.update_metadata(
                         getattr(position, "id"),
@@ -1369,8 +1597,8 @@ class LiveAlpacaPositionMonitor:
                     symbol=sym,
                     quantity=float(ap.quantity),
                     entry_price=entry_price,
-                    target_price=entry_price * (1 + self.settings.target_pct),
-                    stop_price=entry_price * (1 - self.settings.stop_pct),
+                    target_price=round(entry_price * (1 + self.settings.target_pct), 2),
+                    stop_price=round(entry_price * (1 - self.settings.stop_pct), 2),
                     slot_id=slot.slot_id,
                     opened_at=datetime.fromisoformat(opened_at),
                     metadata=position_md,

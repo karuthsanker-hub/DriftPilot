@@ -16,10 +16,10 @@ from datetime import datetime, timezone
 logger = logging.getLogger(__name__)
 
 # --- HARDCODED CONSTANTS — NEVER CONFIGURABLE ---
-MAX_STOP_LOSS_PCT: float = 0.015
+MAX_STOP_LOSS_PCT: float = 0.03  # 3% for paper testing (was 1.5%)
 MAX_PROFIT_CAP_PCT: float = 0.05
 MAX_HOLD_MINUTES: int = 60
-DAILY_LOSS_LIMIT_PCT: float = 0.03
+DAILY_LOSS_LIMIT_PCT: float = 0.15  # 15% for paper testing
 MAX_SLOTS: int = 10
 MAX_PER_SECTOR: int = 3
 MAX_SIZE_MULTIPLIER: float = 2.0

@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import Callable
 
 from .classifier import CatalystClassifier
+from .context_assembler import ContextAssembler
 from .db import insert_event, update_enrichment
 from .event import CatalystEvent
 from .event_bus import CatalystEventBus
@@ -53,6 +54,7 @@ class RssNewsFeed:
         db_path: str,
         poll_interval_s: int = 60,
         parser: Callable | None = None,  # injected for tests
+        context_assembler: ContextAssembler | None = None,
     ) -> None:
         self._feed_urls = feed_urls
         self._universe = universe
@@ -62,6 +64,7 @@ class RssNewsFeed:
         self._db_path = db_path
         self._poll_interval_s = poll_interval_s
         self._parser = parser
+        self._context_assembler = context_assembler
 
     def _parse(self, url: str):
         if self._parser is not None:
@@ -144,7 +147,15 @@ class RssNewsFeed:
         if inserted == 0:
             return 0
 
-        enrichment = await self._enricher.enrich(title, category, subcategory)
+        context = None
+        if self._context_assembler is not None:
+            try:
+                context = self._context_assembler.build_context(
+                    event.symbol, title, event.ts, category, subcategory,
+                )
+            except Exception:
+                pass  # fall back to V1
+        enrichment = await self._enricher.enrich(title, category, subcategory, context=context)
         enriched = CatalystEvent(
             symbol=event.symbol, category=event.category, subcategory=event.subcategory,
             pillar=event.pillar, ts=event.ts, headline=event.headline, source=event.source,

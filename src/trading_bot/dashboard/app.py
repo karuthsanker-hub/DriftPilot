@@ -137,6 +137,32 @@ def create_app(env_path: Path | str = ".env") -> FastAPI:
     def agents_page(request: Request):
         return templates.TemplateResponse(request, "agents.html")
 
+    # ── Brain Proxy Endpoints (forward to DGX brain server) ──
+
+    @app.get("/api/brain/stats")
+    def brain_stats():
+        """Brain health stats — proxied from DGX brain server."""
+        try:
+            from driftpilot.agents.brain_client import BrainClient
+            client = BrainClient()
+            stats = client.get_stats()
+            if stats is None:
+                return {"status": "unavailable", "message": "Brain server not reachable"}
+            return {"status": "ok", **stats}
+        except Exception as exc:
+            _raise_api_error(exc, "brain_stats")
+
+    @app.get("/api/brain/skills")
+    def brain_skills(status: str = "active"):
+        """Active brain skills."""
+        try:
+            from driftpilot.agents.brain_client import BrainClient
+            client = BrainClient()
+            skills = client.get_skills(status=status)
+            return {"status": "ok", "skills": skills, "count": len(skills)}
+        except Exception as exc:
+            _raise_api_error(exc, "brain_skills")
+
     @app.get("/api/operator/pm-analysis")
     def pm_analysis():
         """Latest PM Analyst analysis — structured trade health report."""

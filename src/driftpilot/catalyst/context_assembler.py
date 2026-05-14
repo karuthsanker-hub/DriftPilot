@@ -143,6 +143,14 @@ class ContextAssembler:
     def cache_run_context(self) -> None:
         spy_change_pct = _safe_call(lambda: self._market_data_provider.spy_premarket_change_pct()) if self._market_data_provider else None
         vix = _safe_call(lambda: self._macro_provider.current_vix()) if self._macro_provider else None
+
+        # Fallback: fetch VIX and SPY from yfinance when no dedicated provider
+        if self._enable_external_fetch:
+            if spy_change_pct is None:
+                spy_change_pct = _fetch_yfinance_intraday_change("SPY")
+            if vix is None:
+                vix = _fetch_yfinance_current_price("^VIX")
+
         sector_returns = dict(self._run_context.sector_etf_5d_pct_by_etf or {})
         for etf in set(SECTOR_ETF_BY_SECTOR.values()):
             if self._allow_sector_fetch and etf not in sector_returns:
@@ -312,6 +320,37 @@ def _fetch_yfinance_profile(symbol: str) -> tuple[float | None, int | None]:
     except Exception as exc:
         logger.debug("yfinance profile unavailable for %s: %s", symbol, exc)
         return None, None
+
+
+def _fetch_yfinance_intraday_change(symbol: str) -> float | None:
+    """Get today's % change for a symbol (e.g. SPY) via yfinance."""
+    try:
+        import yfinance as yf  # type: ignore[import-untyped]
+
+        ticker = yf.Ticker(symbol)
+        info = ticker.info or {}
+        prev_close = _as_float(info.get("previousClose") or info.get("regularMarketPreviousClose"))
+        current = _as_float(info.get("regularMarketPrice") or info.get("currentPrice"))
+        if prev_close and current and prev_close > 0:
+            return ((current - prev_close) / prev_close) * 100.0
+        return None
+    except Exception as exc:
+        logger.debug("yfinance intraday change unavailable for %s: %s", symbol, exc)
+        return None
+
+
+def _fetch_yfinance_current_price(symbol: str) -> float | None:
+    """Get current price/level for a symbol (e.g. ^VIX) via yfinance."""
+    try:
+        import yfinance as yf  # type: ignore[import-untyped]
+
+        ticker = yf.Ticker(symbol)
+        info = ticker.info or {}
+        price = _as_float(info.get("regularMarketPrice") or info.get("currentPrice"))
+        return price
+    except Exception as exc:
+        logger.debug("yfinance price unavailable for %s: %s", symbol, exc)
+        return None
 
 
 def _fetch_yfinance_5d_return(symbol: str) -> float | None:

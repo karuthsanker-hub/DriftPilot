@@ -894,7 +894,7 @@ def _order_request(
             side=order_side,
             type=OrderType.STOP,
             time_in_force=TimeInForce.DAY,
-            stop_price=stop_price,
+            stop_price=_round_price(stop_price),
             client_order_id=client_order_id,
         )
     if limit_price is None:

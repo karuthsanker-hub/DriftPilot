@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Iterable
 
 from .classifier import CatalystClassifier
+from .context_assembler import ContextAssembler
 from .db import insert_event, update_enrichment
 from .event import CatalystEvent
 from .event_bus import CatalystEventBus
@@ -43,6 +44,7 @@ class AlpacaNewsFeed:
         poll_interval_s: int = 30,
         chunk_size: int = 50,
         client=None,  # injected for tests
+        context_assembler: ContextAssembler | None = None,
     ) -> None:
         self._api_key = api_key
         self._api_secret = api_secret
@@ -54,6 +56,7 @@ class AlpacaNewsFeed:
         self._poll_interval_s = poll_interval_s
         self._chunk_size = chunk_size
         self._client = client
+        self._context_assembler = context_assembler
         self._last_poll_ts = datetime.now(timezone.utc) - timedelta(minutes=10)
 
     def _get_client(self):
@@ -146,8 +149,17 @@ class AlpacaNewsFeed:
             if inserted == 0:
                 continue  # dup
 
+            # Build context for V2 prompt (best-effort; None fields are fine)
+            context = None
+            if self._context_assembler is not None:
+                try:
+                    context = self._context_assembler.build_context(
+                        event.symbol, headline, event.ts, category, subcategory,
+                    )
+                except Exception:
+                    logger.debug("context assembly failed for %s, using V1 prompt", event.symbol)
             # Enrich (best-effort; Qwen failures fall back to defaults inside enricher)
-            enrichment = await self._enricher.enrich(headline, category, subcategory)
+            enrichment = await self._enricher.enrich(headline, category, subcategory, context=context)
             enriched = CatalystEvent(
                 symbol=event.symbol,
                 category=event.category,

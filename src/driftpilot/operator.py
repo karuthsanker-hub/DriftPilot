@@ -49,6 +49,7 @@ def _build_catalyst_layer(settings: DriftPilotSettings):
 
     # Local imports keep the catalyst layer out of the import graph when disabled.
     from driftpilot.catalyst.classifier import CatalystClassifier
+    from driftpilot.catalyst.context_assembler import ContextAssembler
     from driftpilot.catalyst.db import init_catalyst_schema
     from driftpilot.catalyst.discovery_service import DiscoveryService
     from driftpilot.catalyst.event_bus import CatalystEventBus
@@ -84,6 +85,21 @@ def _build_catalyst_layer(settings: DriftPilotSettings):
             model=settings.catalyst_qwen_model,
             timeout_ms=settings.catalyst_qwen_timeout_ms,
         )
+        # Context assembler gives Qwen market data (volume, VIX, ATR, etc.)
+        # so it uses the V2 prompt with full analyst context.
+        # enable_external_fetch=True lets yfinance fill market_cap, avg_volume,
+        # and sector ETF returns when no dedicated provider is wired in.
+        ctx_assembler = ContextAssembler(
+            db_path=settings.catalyst_db_path,
+            universe_csv_path=settings.universe_file,
+            bar_root=settings.parquet_bar_root,
+            enable_external_fetch=True,
+        )
+        try:
+            ctx_assembler.cache_run_context()
+            logger.info("context assembler: run-context cached (VIX, SPY, sector ETFs)")
+        except Exception:
+            logger.warning("context assembler run-context cache failed (non-fatal)")
         alpaca_feed = AlpacaNewsFeed(
             api_key=settings.alpaca_key_id,
             api_secret=settings.alpaca_secret_key,
@@ -93,6 +109,7 @@ def _build_catalyst_layer(settings: DriftPilotSettings):
             bus=bus,
             db_path=settings.catalyst_db_path,
             poll_interval_s=settings.catalyst_alpaca_poll_seconds,
+            context_assembler=ctx_assembler,
         )
         feeds.append(("alpaca", alpaca_feed.run))
 
@@ -112,6 +129,7 @@ def _build_catalyst_layer(settings: DriftPilotSettings):
                     enricher=enricher,
                     bus=bus,
                     db_path=settings.catalyst_db_path,
+                    context_assembler=ctx_assembler,
                 )
                 feeds.append(("rss", rss_feed.run))
             except Exception as exc:  # pragma: no cover — defensive
@@ -186,6 +204,10 @@ async def _run(once: bool, mock_stream: bool, env_file: str, paper_live: bool = 
             AnalystTargetRaiseConfig,
             AnalystTargetRaiseV1Signal,
         )
+        from driftpilot.signals.volume_spike_v1 import (
+            VolumeSpikeConfig,
+            VolumeSpikeV1Signal,
+        )
         from driftpilot.signals.filing_8a_v1 import (
             Filing8AConfig,
             Filing8ASignal,
@@ -252,6 +274,23 @@ async def _run(once: bool, mock_stream: bool, env_file: str, paper_live: bool = 
                         require_sentiment=_analyst_sent,
                     ),
                     catalyst_bus,
+                )
+            if name == "volume_spike_v1":
+                # Read universe for snapshot scanning
+                _vol_symbols: list[str] = []
+                with open(settings.universe_file) as _uf:
+                    next(_uf, None)
+                    for _line in _uf:
+                        _s = _line.split(",", 1)[0].strip()
+                        if _s:
+                            _vol_symbols.append(_s)
+                return VolumeSpikeV1Signal(
+                    VolumeSpikeConfig(
+                        max_hold_minutes=rcfg.earnings_max_hold_minutes,
+                    ),
+                    api_key=settings.alpaca_key_id,
+                    api_secret=settings.alpaca_secret_key,
+                    symbols=_vol_symbols,
                 )
             if name == "filing_8a_v1":
                 return Filing8ASignal(
