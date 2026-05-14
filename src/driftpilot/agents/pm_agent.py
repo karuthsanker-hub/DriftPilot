@@ -15,13 +15,20 @@ Deny target raises. No session adaptation.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from typing import Any
 
+from .brain_client import (
+    BrainClient,
+    BrainQueryResult,
+    format_experiences_for_prompt,
+    format_skills_for_prompt,
+)
 from .guardrail_validator import GuardrailValidator, PortfolioState
 from .llm_client import LLMClient
 from .message_bus import MessageBus
 from .models import AgentMessage, MessageType
-from .prompt_loader import PromptLoader
+from .prompt_loader import PromptConfig, PromptLoader
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +77,7 @@ class PMAgent:
         prompt_loader: PromptLoader,
         guardrails: GuardrailValidator,
         max_override_rate: float = 0.20,
+        brain_client: BrainClient | None = None,
     ) -> None:
         self.agent_name = "pm"
         self._bus = bus
@@ -77,6 +85,8 @@ class PMAgent:
         self._prompts = prompt_loader
         self._guardrails = guardrails
         self._max_override_rate = max_override_rate
+        self._brain = brain_client if brain_client is not None else BrainClient()
+        self._brain_experience_by_symbol: dict[str, str] = {}
 
     def tick(self, portfolio: PortfolioSnapshot) -> PMTickResult:
         """Process all pending messages for one PM cycle.
@@ -153,12 +163,13 @@ class PMAgent:
                 result.cuts_approved += 1
             result.messages_processed += 1
 
-        # Process exit reports (just acknowledge)
+        # Process exit reports and best-effort brain outcome persistence.
         exit_reports = self._bus.poll(
             "pm", msg_types=[MessageType.EXIT_REPORT]
         )
         for msg in exit_reports:
             self._bus.ack(msg.msg_id)
+            self._process_exit_report(msg)
             self._bus.mark_processed(msg.msg_id)
             result.messages_processed += 1
 
@@ -223,6 +234,11 @@ class PMAgent:
 
         # --- LLM evaluation (deterministic checks passed) ---
         prompt = self._prompts.get("pm_entry_approval")
+        brain_context = self._build_entry_brain_context(payload, portfolio)
+        brain_result = self._query_brain(symbol, "entry_decision", brain_context)
+        brain_prompt_context = self._format_brain_prompt_context(brain_result)
+        prompt = self._with_brain_prompt_context(prompt, brain_prompt_context)
+
         template_vars = {
             "symbol": symbol,
             "signal_name": payload.get("signal_name", ""),
@@ -241,6 +257,8 @@ class PMAgent:
             "minutes_left": portfolio.minutes_left_in_session,
             "last_trade_result": portfolio.last_trade_result,
         }
+        if brain_prompt_context:
+            template_vars["brain_context"] = brain_prompt_context
 
         llm_response = self._llm.complete(prompt, template_vars)
         decision = llm_response.parsed.get("decision", "approve")
@@ -276,12 +294,37 @@ class PMAgent:
         )
 
         approved = decision == "approve"
+        brain_experience_id = (
+            self._store_entry_experience(
+                context=brain_context,
+                decision={
+                    "action": decision,
+                    "reasoning": reasoning,
+                    "target_pct": re_validated.target_pct if approved else target_pct,
+                    "size_multiplier": (
+                        re_validated.size_multiplier if approved else 1.0
+                    ),
+                },
+                metadata={
+                    "message_id": msg.msg_id,
+                    "correlation_id": msg.correlation_id,
+                    "llm_model": llm_response.model,
+                    "prompt_version": prompt.version,
+                },
+            )
+            if not brain_result.is_fallback
+            else None
+        )
+        if brain_experience_id and symbol:
+            self._brain_experience_by_symbol[symbol] = brain_experience_id
+
         self._send_decision(
             msg,
             decision,
             reasoning,
             re_validated.target_pct if approved else target_pct,
             re_validated.size_multiplier if approved else 1.0,
+            brain_experience_id=brain_experience_id,
         )
         self._bus.mark_processed(msg.msg_id)
         return approved
@@ -294,6 +337,11 @@ class PMAgent:
         symbol = payload.get("symbol", "")
         proposed = float(payload.get("proposed_target_pct", 0.02))
         confidence = float(payload.get("confidence", 0))
+        self._query_brain(
+            symbol,
+            "target_raise_decision",
+            self._build_exit_like_brain_context(payload, portfolio, "target_raise"),
+        )
 
         # Validate through guardrails
         validated = self._guardrails.validate_target_raise(
@@ -338,10 +386,15 @@ class PMAgent:
     ) -> bool:
         """Process PARTIAL_PROFIT_REQUEST. Returns True if approved."""
         payload = msg.payload
-        payload.get("symbol", "")
+        symbol = payload.get("symbol", "")
         unrealized = float(payload.get("unrealized_pct", 0))
         hold_min = int(payload.get("hold_minutes", 0))
         confidence = float(payload.get("confidence", 0))
+        self._query_brain(
+            symbol,
+            "partial_profit_decision",
+            self._build_exit_like_brain_context(payload, portfolio, "partial_profit"),
+        )
 
         # Approve if: held > 20 min, unrealized > 0.5%, confidence > 0.6
         approved = hold_min >= 20 and unrealized > 0.5 and confidence >= 0.6
@@ -364,8 +417,13 @@ class PMAgent:
     ) -> bool:
         """Process EARLY_CUT_REQUEST. Returns True if approved."""
         payload = msg.payload
-        payload.get("symbol", "")
+        symbol = payload.get("symbol", "")
         confidence = float(payload.get("confidence", 0))
+        self._query_brain(
+            symbol,
+            "early_cut_decision",
+            self._build_exit_like_brain_context(payload, portfolio, "early_cut"),
+        )
 
         # Only approve high-conviction cuts
         approved = confidence >= 0.75
@@ -409,18 +467,218 @@ class PMAgent:
         reasoning: str,
         target_pct: float,
         size_multiplier: float,
+        brain_experience_id: str | None = None,
     ) -> None:
         """Send ENTRY_DECISION back to scanner."""
+        payload: dict[str, Any] = {
+            "decision": decision,
+            "reasoning": reasoning,
+            "target_pct": target_pct,
+            "size_multiplier": size_multiplier,
+        }
+        if brain_experience_id:
+            payload["brain_experience_id"] = brain_experience_id
+
         response = AgentMessage(
             msg_type=MessageType.ENTRY_DECISION,
             from_agent=self.agent_name,
             to_agent=original_msg.from_agent,
             correlation_id=original_msg.correlation_id or original_msg.msg_id,
-            payload={
-                "decision": decision,
-                "reasoning": reasoning,
-                "target_pct": target_pct,
-                "size_multiplier": size_multiplier,
-            },
+            payload=payload,
         )
         self._bus.send(response)
+
+    def _query_brain(
+        self,
+        symbol: str,
+        decision_type: str,
+        context: dict[str, Any],
+    ) -> BrainQueryResult:
+        """Fetch similar experiences for a decision without making brain required."""
+        query_context = {
+            **context,
+            "symbol": symbol,
+            "decision_type": decision_type,
+        }
+        try:
+            return self._brain.query(query_context)
+        except Exception as exc:
+            logger.warning(
+                "brain_query_failed",
+                extra={"symbol": symbol, "decision_type": decision_type, "error": str(exc)},
+            )
+            return BrainQueryResult(is_fallback=True)
+
+    def _format_brain_prompt_context(self, result: BrainQueryResult) -> str:
+        """Format brain results for prompt injection when the brain is online."""
+        if result.is_fallback:
+            return ""
+
+        blocks = [
+            block
+            for block in (
+                format_experiences_for_prompt(result.experiences),
+                format_skills_for_prompt(result.skills),
+            )
+            if block
+        ]
+        return "\n\n".join(blocks)
+
+    def _with_brain_prompt_context(
+        self, prompt: PromptConfig, brain_context: str
+    ) -> PromptConfig:
+        """Append brain context to a prompt only when non-fallback context exists."""
+        if not brain_context:
+            return prompt
+        return replace(
+            prompt,
+            user_template=(
+                f"{prompt.user_template.rstrip()}\n\n"
+                "Past similar trades and learned skills:\n{brain_context}\n"
+            ),
+        )
+
+    def _build_entry_brain_context(
+        self, payload: dict[str, Any], portfolio: PortfolioSnapshot
+    ) -> dict[str, Any]:
+        """Build structured context for entry RAG and experience storage."""
+        symbol = str(payload.get("symbol", ""))
+        signal = str(payload.get("signal_name", ""))
+        headline = str(payload.get("headline", ""))
+        context_text = (
+            f"{symbol} {signal}: {headline}; "
+            f"sentiment={payload.get('sentiment', '')}; "
+            f"confidence={payload.get('confidence', 0)}; "
+            f"algo_score={payload.get('algo_score', 0)}; "
+            f"daily_pnl={portfolio.daily_pnl_pct:.4f}; "
+            f"open_slots={portfolio.open_slots}/{portfolio.total_slots}"
+        )
+        return {
+            "symbol": symbol,
+            "signal": signal,
+            "headline": headline,
+            "sentiment": payload.get("sentiment", ""),
+            "confidence": float(payload.get("confidence", 0)),
+            "algo_score": float(payload.get("algo_score", 0)),
+            "priority_modifier": float(payload.get("priority_modifier", 0)),
+            "target_pct": float(payload.get("proposed_target_pct", 0.01)),
+            "stop_pct": float(payload.get("proposed_stop_pct", 0.015)),
+            "sector": payload.get("sector", "unknown"),
+            "daily_pnl_pct": portfolio.daily_pnl_pct * 100,
+            "open_slots": portfolio.open_slots,
+            "total_slots": portfolio.total_slots,
+            "sector_exposure": portfolio.sector_exposure,
+            "consecutive_wins": portfolio.consecutive_wins,
+            "consecutive_losses": portfolio.consecutive_losses,
+            "minutes_left_in_session": portfolio.minutes_left_in_session,
+            "minutes_in_session": max(0, 390 - portfolio.minutes_left_in_session),
+            "last_trade_result": portfolio.last_trade_result,
+            "context_text": context_text,
+        }
+
+    def _build_exit_like_brain_context(
+        self,
+        payload: dict[str, Any],
+        portfolio: PortfolioSnapshot,
+        action: str,
+    ) -> dict[str, Any]:
+        """Build structured context for PM decisions on slot-agent exit requests."""
+        symbol = str(payload.get("symbol", ""))
+        context_text = (
+            f"{symbol} {action}: unrealized={payload.get('unrealized_pct', 0)}; "
+            f"confidence={payload.get('confidence', 0)}; "
+            f"reasoning={payload.get('reasoning', '')}; "
+            f"daily_pnl={portfolio.daily_pnl_pct:.4f}"
+        )
+        return {
+            "symbol": symbol,
+            "signal": action,
+            "confidence": float(payload.get("confidence", 0)),
+            "unrealized_pct": float(payload.get("unrealized_pct", 0)),
+            "hold_minutes": int(payload.get("hold_minutes", 0)),
+            "daily_pnl_pct": portfolio.daily_pnl_pct * 100,
+            "open_slots": portfolio.open_slots,
+            "consecutive_wins": portfolio.consecutive_wins,
+            "consecutive_losses": portfolio.consecutive_losses,
+            "minutes_left_in_session": portfolio.minutes_left_in_session,
+            "minutes_in_session": max(0, 390 - portfolio.minutes_left_in_session),
+            "context_text": context_text,
+        }
+
+    def _store_entry_experience(
+        self,
+        context: dict[str, Any],
+        decision: dict[str, Any],
+        metadata: dict[str, Any],
+    ) -> str | None:
+        """Store the pending entry decision for later outcome backfill."""
+        try:
+            return self._brain.store(
+                context=context,
+                decision=decision,
+                exp_type="entry_decision",
+                metadata=metadata,
+            )
+        except Exception as exc:
+            logger.warning(
+                "brain_store_failed",
+                extra={"symbol": context.get("symbol"), "error": str(exc)},
+            )
+            return None
+
+    def _process_exit_report(self, msg: AgentMessage) -> None:
+        """Record or backfill the final outcome for a closed trade."""
+        payload = msg.payload
+        symbol = str(payload.get("symbol", ""))
+        outcome = {
+            "symbol": symbol,
+            "exit_reason": payload.get("exit_reason", "unknown"),
+            "pnl_pct": float(payload.get("pnl_pct", 0)),
+            "hold_minutes": int(payload.get("hold_minutes", 0)),
+            "was_override": bool(payload.get("was_override", False)),
+            "slot_id": payload.get("slot_id"),
+            "message_id": msg.msg_id,
+            "correlation_id": msg.correlation_id,
+        }
+        experience_id = self._experience_id_from_exit_payload(payload)
+        if experience_id is None and symbol:
+            experience_id = self._brain_experience_by_symbol.pop(symbol, None)
+
+        try:
+            if experience_id:
+                self._brain.backfill(experience_id, outcome)
+            else:
+                self._brain.store(
+                    context={
+                        "symbol": symbol,
+                        "signal": "exit_report",
+                        "context_text": (
+                            f"{symbol} exit: pnl={outcome['pnl_pct']}; "
+                            f"reason={outcome['exit_reason']}; "
+                            f"hold_minutes={outcome['hold_minutes']}"
+                        ),
+                    },
+                    decision={
+                        "action": "exit",
+                        "reasoning": str(payload.get("exit_reason", "unknown")),
+                    },
+                    exp_type="exit_report",
+                    outcome=outcome,
+                    metadata={"message_id": msg.msg_id, "correlation_id": msg.correlation_id},
+                )
+        except Exception as exc:
+            logger.warning(
+                "brain_outcome_store_failed",
+                extra={"symbol": symbol, "experience_id": experience_id, "error": str(exc)},
+            )
+
+    def _experience_id_from_exit_payload(self, payload: dict[str, Any]) -> str | None:
+        for key in (
+            "brain_experience_id",
+            "entry_brain_experience_id",
+            "experience_id",
+        ):
+            value = payload.get(key)
+            if value:
+                return str(value)
+        return None

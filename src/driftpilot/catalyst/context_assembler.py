@@ -177,6 +177,8 @@ class ContextAssembler:
         beta: float | None = None
         last_4_surprises: list[float] = []
 
+        atr_pct = _compute_atr_pct(self._bar_root, symbol)
+
         if self._market_data_provider is not None:
             profile = _safe_call(lambda: self._market_data_provider.company_profile(symbol))
             market_cap_m = _as_float(_attr_or_key(profile, "market_cap_m"))
@@ -195,12 +197,15 @@ class ContextAssembler:
         elif self._enable_external_fetch:
             market_cap_m, avg_volume, beta = _fetch_yfinance_profile(symbol)
 
+        if atr_pct is None and self._enable_external_fetch:
+            atr_pct = _fetch_yfinance_atr_pct(symbol)
+
         self._symbol_cache[symbol] = _SymbolContext(
             market_cap_m=market_cap_m,
             avg_volume=avg_volume,
             beta=beta,
             sector=sector,
-            atr_pct=_compute_atr_pct(self._bar_root, symbol),
+            atr_pct=atr_pct,
             last_4_surprises=last_4_surprises,
         )
 
@@ -329,6 +334,56 @@ def _fetch_yfinance_profile(symbol: str) -> tuple[float | None, int | None, floa
     except Exception as exc:
         logger.debug("yfinance profile unavailable for %s: %s", symbol, exc)
         return None, None, None
+
+
+def _fetch_yfinance_atr_pct(symbol: str, period: int = 14) -> float | None:
+    """Fetch daily bars and compute ATR as a percentage of the latest close."""
+    try:
+        import pandas as pd  # type: ignore[import-untyped]
+        import yfinance as yf  # type: ignore[import-untyped]
+
+        history = yf.Ticker(symbol).history(period="1mo")
+        if history.empty:
+            return None
+
+        columns = {
+            str(column).lower(): column
+            for column in history.columns
+            if not isinstance(column, tuple)
+        }
+        high_col = columns.get("high")
+        low_col = columns.get("low")
+        close_col = columns.get("close")
+        if high_col is None or low_col is None or close_col is None:
+            return None
+
+        df = history[[high_col, low_col, close_col]].dropna().tail(period + 1)
+        if len(df) < period + 1:
+            return None
+
+        high = df[high_col].astype(float)
+        low = df[low_col].astype(float)
+        close = df[close_col].astype(float)
+        prev_close = close.shift(1)
+        true_range = pd.concat(
+            [
+                (high - low).abs(),
+                (high - prev_close).abs(),
+                (low - prev_close).abs(),
+            ],
+            axis=1,
+        ).max(axis=1).dropna()
+        if len(true_range) < period:
+            return None
+
+        current_price = float(close.iloc[-1])
+        if current_price <= 0:
+            return None
+        atr = float(true_range.tail(period).mean())
+        return atr / current_price * 100.0
+    except Exception as exc:
+        logger.debug("yfinance ATR unavailable for %s: %s", symbol, exc)
+        return None
 
 
 def _fetch_yfinance_intraday_change(symbol: str) -> float | None:

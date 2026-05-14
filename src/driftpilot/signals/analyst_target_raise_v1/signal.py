@@ -63,6 +63,7 @@ class AnalystTargetRaiseV1Signal:
         self._bus: CatalystEventBus = bus
         self._clock = clock or _utcnow
         self._active_events: dict[str, CatalystEvent] = {}
+        self._event_context_json: dict[str, str] = {}
         self._sub_id: str | None = None
         self._db_path: str | None = None
         self._last_sentiment_refresh: float = 0.0
@@ -118,10 +119,15 @@ class AnalystTargetRaiseV1Signal:
         cutoff = (datetime.now(timezone.utc) - timedelta(minutes=max_age)).isoformat()
         try:
             conn = sqlite3.connect(db_path)
+            columns = {
+                str(row[1])
+                for row in conn.execute("PRAGMA table_info(catalyst_events)").fetchall()
+            }
+            context_expr = "context_json" if "context_json" in columns else "NULL AS context_json"
             cur = conn.execute(
                 "SELECT symbol, category, subcategory, pillar, event_ts, headline, "
                 "source, horizon_minutes, headline_hash, sentiment, priority_modifier "
-                "FROM catalyst_events WHERE ("
+                f", {context_expr} FROM catalyst_events WHERE ("
                 "  (category = 'analyst' AND subcategory IN ('target_raise', 'upgrade', 'initiates'))"
                 "  OR (category = 'product' AND subcategory IN ('launch', 'partnership'))"
                 ") AND event_ts >= ? "
@@ -146,6 +152,8 @@ class AnalystTargetRaiseV1Signal:
                     sentiment=r[9], priority_modifier=float(r[10] or 0.0),
                 )
                 self._active_events[ev.symbol.upper()] = ev
+                if r[11]:
+                    self._event_context_json[ev.symbol.upper()] = str(r[11])
                 loaded += 1
             except (ValueError, TypeError):
                 continue
@@ -180,9 +188,14 @@ class AnalystTargetRaiseV1Signal:
 
         conn = sqlite3.connect(self._db_path)
         try:
+            columns = {
+                str(row[1])
+                for row in conn.execute("PRAGMA table_info(catalyst_events)").fetchall()
+            }
+            context_expr = "context_json" if "context_json" in columns else "NULL AS context_json"
             placeholders = ",".join("?" for _ in symbols_needing_refresh)
             rows = conn.execute(
-                f"SELECT symbol, sentiment, priority_modifier "
+                f"SELECT symbol, sentiment, priority_modifier, {context_expr} "
                 f"FROM catalyst_events "
                 f"WHERE symbol IN ({placeholders}) "
                 f"AND ("
@@ -213,6 +226,8 @@ class AnalystTargetRaiseV1Signal:
                         sentiment=row[1],
                         priority_modifier=float(row[2] or 0.0),
                     )
+                    if row[3]:
+                        self._event_context_json[sym] = str(row[3])
                     updated += 1
         if updated:
             logger.info(
@@ -247,6 +262,11 @@ class AnalystTargetRaiseV1Signal:
             if is_event_fresh(now, event.ts, self.config.max_event_age_minutes):
                 fresh[symbol] = event
         self._active_events = fresh
+        self._event_context_json = {
+            symbol: context_json
+            for symbol, context_json in self._event_context_json.items()
+            if symbol in fresh
+        }
 
         require_sentiment = self.config.require_sentiment
         candidates: list[Candidate] = []
@@ -276,6 +296,7 @@ class AnalystTargetRaiseV1Signal:
                         "source": event.source,
                         "sentiment": event.sentiment,
                         "priority_modifier": event.priority_modifier,
+                        "context_json": self._event_context_json.get(symbol),
                     },
                 )
             )

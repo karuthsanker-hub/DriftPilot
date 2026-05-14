@@ -10,7 +10,12 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from driftpilot.catalyst.context_assembler import ContextAssembler, EnrichmentContext, _fetch_yfinance_profile
+from driftpilot.catalyst.context_assembler import (
+    ContextAssembler,
+    EnrichmentContext,
+    _fetch_yfinance_atr_pct,
+    _fetch_yfinance_profile,
+)
 from driftpilot.clock import DriftPilotClock
 
 
@@ -162,6 +167,30 @@ def test_yfinance_profile_helper_reads_beta(monkeypatch: pytest.MonkeyPatch) -> 
     assert market_cap_m == pytest.approx(100_000.0)
     assert avg_volume == 1_234_567
     assert beta == pytest.approx(0.82)
+
+
+def test_yfinance_atr_helper_computes_daily_atr_pct(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _Ticker:
+        def __init__(self, symbol: str) -> None:
+            assert symbol == "REGN"
+
+        def history(self, period: str) -> pd.DataFrame:
+            assert period == "1mo"
+            closes = [100.0 + i for i in range(16)]
+            return pd.DataFrame(
+                {
+                    "High": [close + 1.0 for close in closes],
+                    "Low": [close - 1.0 for close in closes],
+                    "Close": closes,
+                }
+            )
+
+    fake_yfinance = types.SimpleNamespace(Ticker=_Ticker)
+    monkeypatch.setitem(sys.modules, "yfinance", fake_yfinance)
+
+    atr_pct = _fetch_yfinance_atr_pct("REGN")
+
+    assert atr_pct == pytest.approx((2.0 / 115.0) * 100.0)
 
 
 def test_headline_cluster_count_uses_prior_30_minutes(tmp_path: Path) -> None:

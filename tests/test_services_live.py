@@ -590,6 +590,236 @@ async def test_catalyst_scanner_carries_beta_from_context(settings, repo):
 
 
 @pytest.mark.asyncio
+async def test_analyst_signal_bootstrap_carries_beta_context_to_scanner(settings, repo, tmp_path):
+    """Bootstrapped analyst candidates carry beta from catalyst DB context_json."""
+    from driftpilot.catalyst.event_bus import CatalystEventBus
+    from driftpilot.services_live import CatalystScannerService
+    from driftpilot.signals.analyst_target_raise_v1 import (
+        AnalystTargetRaiseConfig,
+        AnalystTargetRaiseV1Signal,
+    )
+
+    catalyst_db_path = tmp_path / "catalyst.sqlite3"
+    now = datetime.now(timezone.utc)
+    conn = sqlite3.connect(catalyst_db_path)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE catalyst_events (
+                symbol TEXT,
+                category TEXT,
+                subcategory TEXT,
+                pillar TEXT,
+                event_ts TEXT,
+                headline TEXT,
+                source TEXT,
+                horizon_minutes INTEGER,
+                headline_hash TEXT,
+                sentiment TEXT,
+                priority_modifier REAL,
+                context_json TEXT
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO catalyst_events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "AVGO",
+                "analyst",
+                "target_raise",
+                "micro",
+                now.isoformat(),
+                "AVGO price target raised at Example Bank",
+                "alpaca",
+                60,
+                "avgo-analyst-context",
+                "positive",
+                0.25,
+                '{"atr_pct": 2.2, "beta": 1.65}',
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    signal = AnalystTargetRaiseV1Signal(
+        AnalystTargetRaiseConfig(require_sentiment="positive"),
+        CatalystEventBus(),
+        clock=lambda: now,
+    )
+    assert signal.bootstrap_from_db(str(catalyst_db_path), lookback_minutes=120) == 1
+
+    fake_qp = MagicMock(spec=AlpacaRestQuoteProvider)
+    fake_qp.latest_quote = MagicMock(return_value=MarketQuote(
+        symbol="AVGO", timestamp=now,
+        bid_price=184.95, ask_price=185.05,
+    ))
+    scanner = CatalystScannerService(
+        signal=signal,
+        quote_provider=fake_qp,
+        clock=DriftPilotClock(settings.timezone),
+        repository=repo,
+    )
+
+    result = await scanner.scan()
+
+    assert len(result.candidates) == 1
+    metadata = result.candidates[0].metadata
+    assert metadata["atr_pct"] == pytest.approx(2.2)
+    assert metadata["beta"] == pytest.approx(1.65)
+
+
+@pytest.mark.asyncio
+async def test_catalyst_scanner_triggers_eod_reflection_once(settings, repo):
+    from driftpilot.clock import FixedClock
+    from driftpilot.services_live import CatalystScannerService
+
+    after_close = datetime(2026, 5, 14, 20, 5, tzinfo=timezone.utc)
+    clock = FixedClock(settings.timezone, after_close)
+    scanner = CatalystScannerService(
+        signal=MagicMock(),
+        quote_provider=MagicMock(),
+        clock=clock,
+        repository=repo,
+    )
+    fake_brain = MagicMock()
+    fake_brain.reflect = MagicMock(return_value={
+        "status": "ok",
+        "experiences_analyzed": 1,
+        "skills_created": 2,
+        "skills_retired": 0,
+    })
+    scanner._brain_client = fake_brain
+
+    position = repo.positions.create_open(
+        symbol="AAPL",
+        quantity=5,
+        entry_price=200.0,
+        target_price=204.0,
+        stop_price=198.0,
+        opened_at=datetime(2026, 5, 14, 14, 30, tzinfo=timezone.utc),
+        metadata={
+            "signal_name": "earnings_report_v1",
+            "catalyst_headline_hash": "aapl-earnings",
+            "catalyst_sentiment": "positive",
+        },
+    )
+    repo.positions.close(
+        position.id,
+        exit_reason="TARGET",
+        realized_pnl=10.0,
+        closed_at=after_close,
+        metadata={"exit_price": 202.0},
+    )
+
+    task = await scanner._trigger_eod_reflection(after_close, reason="test_market_close")
+    assert task is not None
+    await task
+    second = await scanner._trigger_eod_reflection(after_close, reason="test_market_close")
+
+    fake_brain.reflect.assert_called_once_with("2026-05-14")
+    assert second is None
+    context = scanner._last_eod_reflection_context
+    assert context is not None
+    assert context["closed_trade_count"] == 1
+    assert context["symbols"] == ["AAPL"]
+    assert context["closed_trades"][0]["pnl_pct"] == pytest.approx(1.0)
+    assert context["closed_trades"][0]["signal_name"] == "earnings_report_v1"
+
+
+@pytest.mark.asyncio
+async def test_catalyst_scanner_eod_reflection_waits_until_market_close(settings, repo):
+    from driftpilot.clock import FixedClock
+    from driftpilot.services_live import CatalystScannerService
+
+    before_close = datetime(2026, 5, 14, 19, 59, tzinfo=timezone.utc)
+    scanner = CatalystScannerService(
+        signal=MagicMock(),
+        quote_provider=MagicMock(),
+        clock=FixedClock(settings.timezone, before_close),
+        repository=repo,
+    )
+    fake_brain = MagicMock()
+    scanner._brain_client = fake_brain
+
+    task = await scanner._trigger_eod_reflection(before_close, reason="too_early")
+
+    assert task is None
+    fake_brain.reflect.assert_not_called()
+    assert scanner._last_eod_reflection_context is None
+
+
+@pytest.mark.asyncio
+async def test_catalyst_scanner_eod_reflection_runs_without_closed_trades(settings, repo):
+    from driftpilot.clock import FixedClock
+    from driftpilot.services_live import CatalystScannerService
+
+    after_close = datetime(2026, 5, 14, 20, 5, tzinfo=timezone.utc)
+    scanner = CatalystScannerService(
+        signal=MagicMock(),
+        quote_provider=MagicMock(),
+        clock=FixedClock(settings.timezone, after_close),
+        repository=repo,
+    )
+    fake_brain = MagicMock()
+    fake_brain.reflect = MagicMock(return_value={
+        "status": "ok",
+        "experiences_analyzed": 0,
+        "skills_created": 0,
+        "skills_retired": 0,
+    })
+    scanner._brain_client = fake_brain
+
+    task = await scanner._trigger_eod_reflection(after_close, reason="no_trades")
+
+    assert task is not None
+    await task
+    fake_brain.reflect.assert_called_once_with("2026-05-14")
+    assert scanner._last_eod_reflection_context is not None
+    assert scanner._last_eod_reflection_context["closed_trade_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_catalyst_scanner_eod_reflection_failure_is_nonfatal(settings, repo, caplog):
+    from driftpilot.clock import FixedClock
+    from driftpilot.services_live import CatalystScannerService
+
+    after_close = datetime(2026, 5, 14, 20, 10, tzinfo=timezone.utc)
+    scanner = CatalystScannerService(
+        signal=MagicMock(),
+        quote_provider=MagicMock(),
+        clock=FixedClock(settings.timezone, after_close),
+        repository=repo,
+    )
+    fake_brain = MagicMock()
+    fake_brain.reflect = MagicMock(side_effect=RuntimeError("brain offline"))
+    scanner._brain_client = fake_brain
+
+    position = repo.positions.create_open(
+        symbol="MSFT",
+        quantity=2,
+        entry_price=300.0,
+        target_price=306.0,
+        stop_price=297.0,
+        opened_at=datetime(2026, 5, 14, 15, 0, tzinfo=timezone.utc),
+    )
+    repo.positions.close(
+        position.id,
+        exit_reason="STOP",
+        realized_pnl=-6.0,
+        closed_at=after_close,
+    )
+
+    with caplog.at_level("WARNING"):
+        task = await scanner._trigger_eod_reflection(after_close, reason="test_failure")
+        assert task is not None
+        await task
+
+    fake_brain.reflect.assert_called_once_with("2026-05-14")
+    assert "eod reflection failed for 2026-05-14" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_live_allocator_records_catalyst_metadata_on_position(settings, repo):
     """Audit contract: the position record must include catalyst event chain
     metadata so the EOD audit script can reconstruct the trade."""

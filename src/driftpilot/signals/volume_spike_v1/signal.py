@@ -22,6 +22,7 @@ import time
 from datetime import datetime, time as dt_time, timezone
 from typing import Any
 
+from driftpilot.clock import DriftPilotClock, require_aware
 from driftpilot.signals.base import Candidate, ExitDecision
 from driftpilot.signals.volume_spike_v1.config import (
     SIGNAL_NAME,
@@ -35,14 +36,14 @@ _MARKET_CLOSE = dt_time(16, 0)
 _SESSION_MINUTES = 390.0
 
 
-def _elapsed_fraction() -> float:
+def _elapsed_fraction(now: datetime | None = None) -> float:
     """Fraction of the trading day elapsed (0.0 to 1.0).
 
     Pre-market returns a small positive number (~0.02) so we don't
     divide by zero. After-hours returns 1.0.
     """
-    from zoneinfo import ZoneInfo
-    now_et = datetime.now(ZoneInfo("America/New_York"))
+    clock = DriftPilotClock("America/New_York")
+    now_et = clock.to_et(require_aware(now)) if now is not None else clock.now_et()
     t = now_et.time()
     if t < _MARKET_OPEN:
         # Pre-market: use a minimum so RVOL still works
@@ -116,8 +117,8 @@ class VolumeSpikeV1Signal:
                     avg_vol = info.get("averageVolume") or info.get("averageDailyVolume10Day")
                     if avg_vol:
                         self._avg_volume_cache[sym] = int(avg_vol)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("volume_spike avg_volume load failed for %s: %s", sym, exc)
         logger.info(
             "[SIGNAL:volume_spike] loaded avg_volume for %d/%d symbols",
             len(self._avg_volume_cache), len(self._symbols),
@@ -152,7 +153,7 @@ class VolumeSpikeV1Signal:
             logger.warning("[SIGNAL:volume_spike] snapshot fetch failed: %s", exc)
             return self._snapshot_cache  # return stale cache
 
-    def scan(self, *args: Any, **kwargs: Any) -> list[Candidate]:
+    def scan(self, *args: Any, now: datetime | None = None, **kwargs: Any) -> list[Candidate]:
         """Return candidates for stocks with abnormal relative volume (RVOL).
 
         RVOL = today_volume / (avg_daily_volume × elapsed_fraction).
@@ -173,7 +174,11 @@ class VolumeSpikeV1Signal:
             return []
 
         cfg = self.config
-        elapsed = _elapsed_fraction()
+        if now is None:
+            now = kwargs.get("now")
+        if now is None:
+            now = self._clock() if callable(self._clock) else self._clock
+        elapsed = _elapsed_fraction(now)
         candidates: list[Candidate] = []
 
         for sym, snap in snapshots.items():
@@ -236,7 +241,9 @@ class VolumeSpikeV1Signal:
                             "price_change_pct": round(price_change_pct, 2),
                             "price": round(price, 2),
                             "vwap": round(float(daily.vwap or 0), 2),
+                            "signal_name": SIGNAL_NAME,
                             "signal_type": "volume_spike",
+                            "source": SIGNAL_NAME,
                         },
                     )
                 )

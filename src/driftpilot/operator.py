@@ -27,10 +27,27 @@ from driftpilot.storage.repositories import DriftPilotRepository
 
 logger = logging.getLogger(__name__)
 
+_LIVE_DEFAULT_SIGNAL_NAMES = (
+    "earnings_report_v1",
+    "filing_8a_v1",
+    "volume_spike_v1",
+)
+_LIVE_LEGACY_DEFAULT_SIGNALS = {"intraday_momentum_v1"}
+
 
 class MockOpenMarketClock:
     def session(self, now: datetime | None = None) -> MarketSession:
         return MarketSession(True, "mock_regular_session")
+
+
+def _live_signal_names(active_signal_name: str | None) -> list[str]:
+    """Return live paper signal names, always adding the volume spike scanner."""
+    names = [s.strip().lower() for s in str(active_signal_name or "").split(",") if s.strip()]
+    if not names or set(names) <= _LIVE_LEGACY_DEFAULT_SIGNALS:
+        names = list(_LIVE_DEFAULT_SIGNAL_NAMES)
+    elif "volume_spike_v1" not in set(names):
+        names.append("volume_spike_v1")
+    return names
 
 
 def _build_catalyst_layer(settings: DriftPilotSettings):
@@ -255,7 +272,7 @@ async def _run(once: bool, mock_stream: bool, env_file: str, paper_live: bool = 
         active_signal_name = _rc_raw.get("active_signal") or settings.active_signal
         # Comma-separated list = run multiple signals in parallel via MultiSignal.
         # e.g. ACTIVE_SIGNAL="earnings_report_v1,filing_8a_v1"
-        signal_names = [s.strip() for s in str(active_signal_name).split(",") if s.strip()]
+        signal_names = _live_signal_names(active_signal_name)
 
         def _build_signal(name: str):
             if name == "analyst_target_raise_v1":
@@ -291,6 +308,7 @@ async def _run(once: bool, mock_stream: bool, env_file: str, paper_live: bool = 
                     api_key=settings.alpaca_key_id,
                     api_secret=settings.alpaca_secret_key,
                     symbols=_vol_symbols,
+                    clock=clock.now_utc,
                 )
             if name == "filing_8a_v1":
                 return Filing8ASignal(

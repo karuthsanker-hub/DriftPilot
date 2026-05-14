@@ -21,7 +21,7 @@ import json
 import logging
 import math
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 from typing import Any
 
 from driftpilot.broker.alpaca_client import AlpacaBrokerClient, OrderSubmissionResult
@@ -155,9 +155,9 @@ class MultiSignal:
 
     - subscribe()  → subscribes every sub-signal to its own bus topic
     - bootstrap_from_db() → fans out per sub-signal
-    - scan()  → concatenates candidates from each (each tags its own signal_name
-                in `features` so the scanner can stamp position metadata for
-                exit routing)
+    - scan()  → merges candidates from each, deduplicating by symbol and keeping
+                the highest score (each tags its own signal_name in `features`
+                so the scanner can stamp position metadata for exit routing)
     - evaluate_exit(position, now) → looks up `metadata["signal_name"]` and
                 delegates to the matching sub-signal. Falls back to the first
                 sub-signal if name missing (back-compat with positions opened
@@ -222,10 +222,12 @@ class MultiSignal:
 
     async def scan(self, now=None):
         import inspect as _inspect
-        out: list[Any] = []
+        merged: dict[str, Any] = {}
+        symbol_order: list[str] = []
         for s in self._signals:
             try:
-                res = s.scan(now=now) if "now" in _inspect.signature(s.scan).parameters else s.scan()
+                scan_params = _inspect.signature(s.scan).parameters
+                res = s.scan(now=now) if "now" in scan_params else s.scan()
                 cands = await res if _inspect.isawaitable(res) else res
             except Exception as exc:
                 logger.exception("MultiSignal: %s.scan raised: %s", s.name, exc)
@@ -245,8 +247,18 @@ class MultiSignal:
                     # If a candidate cannot be reconstructed, keep the
                     # original candidate rather than dropping the event.
                     pass
-                out.append(c)
-        return out
+                symbol = str(getattr(c, "symbol", "")).upper()
+                if not symbol:
+                    continue
+                if symbol not in merged:
+                    symbol_order.append(symbol)
+                    merged[symbol] = c
+                    continue
+                candidate_score = float(getattr(c, "score", 0.0))
+                existing_score = float(getattr(merged[symbol], "score", 0.0))
+                if candidate_score > existing_score:
+                    merged[symbol] = c
+        return [merged[symbol] for symbol in symbol_order]
 
     def evaluate_exit(self, position, now, *args, **kwargs):
         metadata = getattr(position, "metadata", {}) or {}
@@ -334,11 +346,12 @@ class CatalystScannerService:
         #   ts, signal_total, blocked_count, candidates[], rejections[]
         self._pipeline_log: list[dict[str, Any]] = []
         self._pipeline_log_max: int = 20  # keep last 20 cycles
+        self._brain_client: Any | None = None
+        self._eod_reflection_done_dates: set[str] = set()
+        self._eod_reflection_scheduled_dates: set[str] = set()
+        self._eod_reflection_tasks: dict[str, asyncio.Task[None]] = {}
+        self._last_eod_reflection_context: dict[str, Any] | None = None
 
-    @property
-    def pipeline_log(self) -> list[dict[str, Any]]:
-        """Last N scan cycle pipeline decisions for the dashboard."""
-        return list(self._pipeline_log)
         if universe_path:
             try:
                 with open(universe_path) as f:
@@ -352,6 +365,251 @@ class CatalystScannerService:
                                 self._sector_map[sym] = sector
             except FileNotFoundError:
                 logger.warning("universe path not found: %s — sector cap will fire on Unknown", universe_path)
+
+    @property
+    def pipeline_log(self) -> list[dict[str, Any]]:
+        """Last N scan cycle pipeline decisions for the dashboard."""
+        return list(self._pipeline_log)
+
+    async def _trigger_eod_reflection(
+        self,
+        now: datetime | None = None,
+        *,
+        reason: str = "market_closed",
+    ) -> asyncio.Task[None] | None:
+        """Schedule end-of-day brain reflection once per ET trading date.
+
+        The brain client is synchronous today, so the actual /brain/reflect
+        POST runs in a worker thread. This method only identifies the local
+        closed-trade context, marks the day as triggered, and schedules the
+        non-fatal background task.
+        """
+        timestamp = now or self.clock.now_utc()
+        if not self._is_after_market_close(timestamp):
+            return None
+
+        trade_date = self.clock.date_et(timestamp)
+        date_key = trade_date.isoformat()
+        if date_key in self._eod_reflection_done_dates:
+            logger.debug("eod reflection already triggered for %s", date_key)
+            return None
+
+        self._eod_reflection_done_dates.add(date_key)
+        closed_trades = self._collect_closed_trades_for_date(date_key)
+        self._last_eod_reflection_context = {
+            "date": date_key,
+            "reason": reason,
+            "closed_trade_count": len(closed_trades),
+            "symbols": sorted({trade["symbol"] for trade in closed_trades}),
+            "closed_trades": closed_trades,
+        }
+
+        logger.info(
+            "eod reflection scheduled for %s: closed_trades=%d symbols=%s reason=%s",
+            date_key,
+            len(closed_trades),
+            ",".join(self._last_eod_reflection_context["symbols"][:10]),
+            reason,
+        )
+        task = asyncio.create_task(
+            self._run_eod_reflection(date_key, closed_trades, reason),
+            name=f"eod-reflection-{date_key}",
+        )
+        self._eod_reflection_tasks[date_key] = task
+        task.add_done_callback(
+            lambda done: self._log_eod_reflection_task_error(date_key, done)
+        )
+        return task
+
+    async def on_market_closed(
+        self,
+        now: datetime | None = None,
+        *,
+        reason: str = "market_closed_transition",
+    ) -> asyncio.Task[None] | None:
+        """Optional state-machine hook for MARKET_CLOSED transitions."""
+        return await self._trigger_eod_reflection(now, reason=reason)
+
+    def _schedule_eod_reflection_if_near_close(self, now: datetime) -> None:
+        """Arm a one-shot near-close timer from the final open-session scans."""
+        et_now = self.clock.to_et(now)
+        if et_now.weekday() >= 5:
+            return
+        date_key = et_now.date().isoformat()
+        if (
+            date_key in self._eod_reflection_done_dates
+            or date_key in self._eod_reflection_scheduled_dates
+        ):
+            return
+
+        close_et = datetime.combine(et_now.date(), time(16, 0), tzinfo=self.clock.timezone)
+        seconds_to_close = (close_et - et_now).total_seconds()
+        if seconds_to_close < 0:
+            task = asyncio.create_task(
+                self._trigger_eod_reflection(now, reason="scanner_after_close"),
+                name=f"eod-reflection-trigger-{date_key}",
+            )
+            task.add_done_callback(
+                lambda done: self._log_eod_reflection_task_error(date_key, done)
+            )
+            return
+        if seconds_to_close > 120:
+            return
+
+        self._eod_reflection_scheduled_dates.add(date_key)
+
+        async def _delayed_trigger() -> None:
+            await asyncio.sleep(seconds_to_close)
+            await self._trigger_eod_reflection(
+                close_et.astimezone(timezone.utc),
+                reason="scanner_market_close_timer",
+            )
+
+        task = asyncio.create_task(
+            _delayed_trigger(),
+            name=f"eod-reflection-close-watch-{date_key}",
+        )
+        task.add_done_callback(
+            lambda done: self._log_eod_reflection_task_error(date_key, done)
+        )
+
+    async def _run_eod_reflection(
+        self,
+        date_key: str,
+        closed_trades: list[dict[str, Any]],
+        reason: str,
+    ) -> None:
+        try:
+            brain_client = self._get_brain_client()
+            result = await asyncio.to_thread(brain_client.reflect, date_key)
+            if result is None:
+                logger.warning(
+                    "eod reflection failed for %s: brain returned no result "
+                    "(closed_trades=%d reason=%s)",
+                    date_key,
+                    len(closed_trades),
+                    reason,
+                )
+                return
+            logger.info(
+                "eod reflection complete for %s: status=%s experiences=%s "
+                "skills_created=%s skills_retired=%s closed_trades=%d",
+                date_key,
+                result.get("status"),
+                result.get("experiences_analyzed"),
+                result.get("skills_created", 0),
+                result.get("skills_retired", 0),
+                len(closed_trades),
+            )
+        except Exception as exc:
+            logger.warning(
+                "eod reflection failed for %s: %s",
+                date_key,
+                exc,
+                exc_info=True,
+            )
+
+    def _get_brain_client(self) -> Any:
+        if self._brain_client is None:
+            from driftpilot.agents.brain_client import BrainClient
+
+            self._brain_client = BrainClient()
+        return self._brain_client
+
+    def _log_eod_reflection_task_error(
+        self,
+        date_key: str,
+        task: asyncio.Task[Any],
+    ) -> None:
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            logger.debug("eod reflection task cancelled for %s", date_key)
+        except Exception as exc:
+            logger.warning(
+                "eod reflection task failed for %s: %s",
+                date_key,
+                exc,
+                exc_info=True,
+            )
+
+    def _is_after_market_close(self, value: datetime) -> bool:
+        et_value = self.clock.to_et(value)
+        if et_value.weekday() >= 5:
+            return False
+        close_et = datetime.combine(et_value.date(), time(16, 0), tzinfo=self.clock.timezone)
+        return et_value >= close_et
+
+    def _collect_closed_trades_for_date(self, date_key: str) -> list[dict[str, Any]]:
+        if self._repository is None or not hasattr(self._repository, "connection"):
+            return []
+        try:
+            rows = self._repository.connection.execute(
+                """
+                SELECT
+                    id, symbol, quantity, entry_price, opened_at, closed_at,
+                    exit_reason, realized_pnl, metadata_json
+                FROM positions
+                WHERE status = 'closed' AND closed_at IS NOT NULL
+                ORDER BY closed_at
+                """
+            ).fetchall()
+        except Exception as exc:
+            logger.warning("eod reflection closed-trade query failed: %s", exc)
+            return []
+
+        trades: list[dict[str, Any]] = []
+        for row in rows:
+            closed_at_raw = row["closed_at"]
+            if not closed_at_raw:
+                continue
+            try:
+                closed_at = datetime.fromisoformat(str(closed_at_raw))
+            except ValueError as exc:
+                logger.warning("eod reflection ignoring bad closed_at=%r: %s", closed_at_raw, exc)
+                continue
+            try:
+                closed_date_key = self.clock.date_et(closed_at).isoformat()
+            except ValueError as exc:
+                logger.warning("eod reflection ignoring naive closed_at=%r: %s", closed_at_raw, exc)
+                continue
+            if closed_date_key != date_key:
+                continue
+
+            metadata = self._decode_position_metadata(row["metadata_json"])
+            entry_price = float(row["entry_price"] or 0.0)
+            quantity = float(row["quantity"] or 0.0)
+            realized_pnl = float(row["realized_pnl"] or 0.0)
+            basis = entry_price * quantity
+            pnl_pct = (realized_pnl / basis * 100.0) if basis else None
+            trades.append(
+                {
+                    "position_id": int(row["id"]),
+                    "symbol": str(row["symbol"]).upper(),
+                    "quantity": quantity,
+                    "entry_price": entry_price,
+                    "opened_at": row["opened_at"],
+                    "closed_at": closed_at.isoformat(),
+                    "exit_reason": row["exit_reason"],
+                    "realized_pnl": realized_pnl,
+                    "pnl_pct": round(pnl_pct, 4) if pnl_pct is not None else None,
+                    "signal_name": metadata.get("signal_name"),
+                    "catalyst_headline_hash": metadata.get("catalyst_headline_hash"),
+                    "catalyst_sentiment": metadata.get("catalyst_sentiment"),
+                    "catalyst_event_ts": metadata.get("catalyst_event_ts"),
+                }
+            )
+        return trades
+
+    def _decode_position_metadata(self, raw: Any) -> dict[str, Any]:
+        if not raw:
+            return {}
+        try:
+            decoded = json.loads(raw)
+        except (TypeError, json.JSONDecodeError) as exc:
+            logger.debug("eod reflection metadata decode failed: %s", exc)
+            return {}
+        return decoded if isinstance(decoded, dict) else {}
 
     def _maybe_hot_reload(self) -> None:
         """If the runtime_config.json file changed since last check, swap
@@ -699,6 +957,9 @@ class CatalystScannerService:
     async def scan(self):
         self._maybe_hot_reload()
         now = self.clock.now_utc()
+        self._schedule_eod_reflection_if_near_close(now)
+        if self._is_after_market_close(now):
+            await self._trigger_eod_reflection(now, reason="scanner_after_close")
         candidates: list[AllocationCandidate] = []
         # Hot-reloadable kill switch — UI sets scanning_paused=true to halt
         # new entries without stopping the operator. Existing positions are

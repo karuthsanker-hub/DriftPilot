@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import pytest
 
+from driftpilot.agents.brain_client import BrainQueryResult
 from driftpilot.agents.guardrail_validator import DAILY_LOSS_LIMIT_PCT, GuardrailValidator
-from driftpilot.agents.llm_client import LLMClient
+from driftpilot.agents.llm_client import LLMClient, LLMResponse
 from driftpilot.agents.message_bus import MessageBus
 from driftpilot.agents.models import AgentMessage, MessageType
 from driftpilot.agents.pm_agent import PMAgent, PortfolioSnapshot
-from driftpilot.agents.prompt_loader import PromptLoader
+from driftpilot.agents.prompt_loader import PromptConfig, PromptLoader
 
 
 @pytest.fixture
@@ -27,7 +28,7 @@ def pm(bus):
     llm = LLMClient(qwen_url="http://localhost:9999/v1", qwen_timeout_ms=50)
     prompts = PromptLoader("config/prompts")
     guardrails = GuardrailValidator()
-    return PMAgent(bus, llm, prompts, guardrails)
+    return PMAgent(bus, llm, prompts, guardrails, brain_client=FakeBrainClient())
 
 
 @pytest.fixture
@@ -67,6 +68,73 @@ def _send_entry_request(bus: MessageBus, symbol: str = "AAPL", sector: str = "te
     msg.correlation_id = msg.msg_id
     bus.send(msg)
     return msg
+
+
+class FakeBrainClient:
+    def __init__(
+        self,
+        query_result: BrainQueryResult | None = None,
+        store_result: str | None = None,
+    ) -> None:
+        self.query_result = query_result or BrainQueryResult(is_fallback=True)
+        self.store_result = store_result
+        self.queries: list[dict] = []
+        self.stores: list[dict] = []
+        self.backfills: list[tuple[str, dict]] = []
+
+    def query(self, context: dict, **kwargs) -> BrainQueryResult:
+        self.queries.append({"context": context, "kwargs": kwargs})
+        return self.query_result
+
+    def store(
+        self,
+        context: dict,
+        decision: dict,
+        exp_type: str = "entry_decision",
+        outcome: dict | None = None,
+        metadata: dict | None = None,
+    ) -> str | None:
+        self.stores.append(
+            {
+                "context": context,
+                "decision": decision,
+                "exp_type": exp_type,
+                "outcome": outcome,
+                "metadata": metadata or {},
+            }
+        )
+        return self.store_result
+
+    def backfill(self, experience_id: str, outcome: dict) -> bool:
+        self.backfills.append((experience_id, outcome))
+        return True
+
+
+class RecordingLLM:
+    def __init__(self) -> None:
+        self.prompt: PromptConfig | None = None
+        self.template_vars: dict | None = None
+        self.rendered_user = ""
+
+    def complete(
+        self, prompt: PromptConfig, template_vars: dict
+    ) -> LLMResponse:
+        self.prompt = prompt
+        self.template_vars = template_vars
+        self.rendered_user = prompt.render_user(**template_vars)
+        return LLMResponse(
+            success=True,
+            parsed={
+                "decision": "approve",
+                "reasoning": "brain-aware approval",
+                "target_pct": 0.01,
+                "size_multiplier": 1.0,
+                "confidence": 0.8,
+            },
+            raw='{"decision":"approve"}',
+            model="test-llm",
+            latency_ms=1,
+        )
 
 
 class TestEntryApproval:
@@ -218,6 +286,167 @@ class TestFallbackBehavior:
         result = pm.tick(healthy_portfolio)
         # Should approve because fallback_action for pm_entry_approval is "approve"
         assert result.entries_approved == 1
+
+
+class TestBrainIntegration:
+    def test_injects_brain_context_into_entry_prompt(
+        self, bus, healthy_portfolio
+    ):
+        llm = RecordingLLM()
+        brain = FakeBrainClient(
+            query_result=BrainQueryResult(
+                experiences=[
+                    {
+                        "similarity": 0.91,
+                        "context": {
+                            "symbol": "MSFT",
+                            "signal": "earnings_report_v1",
+                            "headline": "MSFT raised guidance",
+                        },
+                        "decision": {
+                            "action": "approve",
+                            "reasoning": "clean catalyst",
+                        },
+                        "outcome": {
+                            "pnl_pct": 1.2,
+                            "hold_minutes": 18,
+                            "exit_reason": "target",
+                        },
+                    }
+                ],
+                skills=[
+                    {
+                        "title": "Prefer clean beats",
+                        "rule": "Approve strong guidance raises with high confidence.",
+                        "confidence": 0.82,
+                    }
+                ],
+            ),
+            store_result="exp-new",
+        )
+        pm = PMAgent(
+            bus,
+            llm,
+            PromptLoader("config/prompts"),
+            GuardrailValidator(),
+            brain_client=brain,
+        )
+
+        _send_entry_request(bus, symbol="MSFT")
+        result = pm.tick(healthy_portfolio)
+
+        assert result.entries_approved == 1
+        assert brain.queries[0]["context"]["symbol"] == "MSFT"
+        assert brain.queries[0]["context"]["decision_type"] == "entry_decision"
+        assert llm.template_vars is not None
+        assert "brain_context" in llm.template_vars
+        assert "RELEVANT PAST EXPERIENCES" in llm.template_vars["brain_context"]
+        assert "ACTIVE TRADING RULES" in llm.template_vars["brain_context"]
+        assert "Past similar trades and learned skills" in llm.rendered_user
+
+        responses = bus.poll("scanner", msg_types=[MessageType.ENTRY_DECISION])
+        assert responses[0].payload["brain_experience_id"] == "exp-new"
+        assert brain.stores[0]["exp_type"] == "entry_decision"
+
+    def test_skips_prompt_injection_when_brain_fallback(
+        self, bus, healthy_portfolio
+    ):
+        llm = RecordingLLM()
+        brain = FakeBrainClient(query_result=BrainQueryResult(is_fallback=True))
+        pm = PMAgent(
+            bus,
+            llm,
+            PromptLoader("config/prompts"),
+            GuardrailValidator(),
+            brain_client=brain,
+        )
+
+        _send_entry_request(bus)
+        result = pm.tick(healthy_portfolio)
+
+        assert result.entries_approved == 1
+        assert llm.template_vars is not None
+        assert "brain_context" not in llm.template_vars
+        assert "Past similar trades and learned skills" not in llm.rendered_user
+
+    def test_backfills_exit_report_when_experience_id_present(
+        self, bus, healthy_portfolio
+    ):
+        brain = FakeBrainClient()
+        pm = PMAgent(
+            bus,
+            RecordingLLM(),
+            PromptLoader("config/prompts"),
+            GuardrailValidator(),
+            brain_client=brain,
+        )
+        msg = AgentMessage(
+            msg_type=MessageType.EXIT_REPORT,
+            from_agent="slot_0",
+            to_agent="pm",
+            payload={
+                "symbol": "AAPL",
+                "slot_id": 0,
+                "exit_reason": "target",
+                "pnl_pct": 1.1,
+                "hold_minutes": 17,
+                "was_override": False,
+                "brain_experience_id": "exp-123",
+            },
+        )
+        bus.send(msg)
+
+        result = pm.tick(healthy_portfolio)
+
+        assert result.messages_processed == 1
+        assert brain.backfills == [
+            (
+                "exp-123",
+                {
+                    "symbol": "AAPL",
+                    "exit_reason": "target",
+                    "pnl_pct": 1.1,
+                    "hold_minutes": 17,
+                    "was_override": False,
+                    "slot_id": 0,
+                    "message_id": msg.msg_id,
+                    "correlation_id": None,
+                },
+            )
+        ]
+        assert brain.stores == []
+
+    def test_stores_exit_report_when_no_experience_id(
+        self, bus, healthy_portfolio
+    ):
+        brain = FakeBrainClient()
+        pm = PMAgent(
+            bus,
+            RecordingLLM(),
+            PromptLoader("config/prompts"),
+            GuardrailValidator(),
+            brain_client=brain,
+        )
+        msg = AgentMessage(
+            msg_type=MessageType.EXIT_REPORT,
+            from_agent="slot_0",
+            to_agent="pm",
+            payload={
+                "symbol": "AAPL",
+                "slot_id": 0,
+                "exit_reason": "stop",
+                "pnl_pct": -0.8,
+                "hold_minutes": 11,
+            },
+        )
+        bus.send(msg)
+
+        result = pm.tick(healthy_portfolio)
+
+        assert result.messages_processed == 1
+        assert brain.backfills == []
+        assert brain.stores[0]["exp_type"] == "exit_report"
+        assert brain.stores[0]["outcome"]["pnl_pct"] == -0.8
 
 
 class TestOverrideRateLimit:
