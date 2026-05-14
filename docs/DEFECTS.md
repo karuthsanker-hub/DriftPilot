@@ -95,6 +95,12 @@ Updated: 2026-05-13
 **Root cause:** `_first_seen_prices` is an in-memory dict. Operator restarted 6+ times today (boot transitions at 02:51, 02:52, 02:55, 02:57, 13:53, 14:16, 14:27, 14:36, 15:15, 17:04).
 **Fix:** Persist `_first_seen_prices` to SQLite or load initial prices from the catalyst_events table at startup.
 
+## Feature: PM Analyst (automated issue detection)
+**Status: SHIPPED**
+**Files:** `agents/pm_analyst.py`, `agents/orchestrator.py`, `agents/factory.py`, `dashboard/app.py`, `dashboard/templates/dashboard.html`
+**What it does:** Every 15 minutes, builds a trading snapshot (P&L, per-symbol stats, stuck positions, rapid re-entries, signal breakdown) and sends to Qwen for structured analysis. Results displayed in dashboard as PM briefing with severity-coded issues, signal verdicts, risk level badge. Falls back to deterministic analysis if Qwen is down. Has "ANALYZE NOW" manual trigger button.
+**Endpoints:** `GET /api/operator/pm-analysis`, `POST /api/operator/pm-analysis/run`, `GET /api/operator/pm-analysis/history`
+
 ---
 
 ## Priority for Next Session

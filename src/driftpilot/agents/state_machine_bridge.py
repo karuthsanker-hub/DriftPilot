@@ -272,6 +272,30 @@ def tick_slots_from_positions(
     return results
 
 
+def tick_analyst(
+    orchestrator: AgentOrchestrator | None,
+) -> bool:
+    """Run the PM Analyst periodic analysis tick.
+
+    The analyst self-throttles to its configured interval (default 15 min).
+    Safe to call every operator cycle — it's a no-op if the interval hasn't elapsed.
+    Works even when the agent orchestrator is disabled (analyst only needs Qwen).
+
+    Returns True if an analysis was produced.
+    """
+    if orchestrator is None:
+        return False
+
+    try:
+        ran = orchestrator.tick_analyst()
+        if ran:
+            logger.info("[AGENT-ANALYST] PM analysis completed")
+        return ran
+    except Exception:
+        logger.exception("Agent bridge: tick_analyst failed")
+        return False
+
+
 def tick_scanner_from_candidates(
     orchestrator: AgentOrchestrator | None,
     candidates: list[AllocationCandidate],
@@ -300,12 +324,12 @@ def tick_scanner_from_candidates(
                     category=str(md.get("category", "unknown")),
                     subcategory=str(md.get("subcategory", "")),
                     sentiment=str(md.get("sentiment", "neutral")),
-                    confidence=float(md.get("confidence", 0.5)),
-                    priority_modifier=float(md.get("priority_modifier", 0.0)),
+                    confidence=float(md.get("confidence") or 0.5),
+                    priority_modifier=float(md.get("priority_modifier") or 0.0),
                     sector=c.sector,
-                    minutes_since_headline=int(md.get("minutes_since_headline", 0)),
+                    minutes_since_headline=int(md.get("minutes_since_headline") or 0),
                     same_symbol_traded_today=bool(md.get("same_symbol_traded_today", False)),
-                    similar_headlines_last_2h=int(md.get("similar_headlines_last_2h", 0)),
+                    similar_headlines_last_2h=int(md.get("similar_headlines_last_2h") or 0),
                 )
             )
 

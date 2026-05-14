@@ -251,6 +251,7 @@ class DriftPilotStateMachine:
 
             # ── Agent tick: portfolio-level oversight ──
             self._tick_agents_pm()
+            self._tick_analyst()
 
             if self.position_monitor is not None:
                 # Use decide/execute split when orchestrator is active
@@ -405,6 +406,21 @@ class DriftPilotStateMachine:
                 logger.debug("agent PM tick processed %d messages", n)
         except Exception:
             logger.exception("agent PM tick failed (non-fatal)")
+
+    def _tick_analyst(self) -> None:
+        """PM Analyst periodic analysis tick. Self-throttles to 15-min intervals.
+
+        Works even when orchestrator is None or agents are disabled —
+        the analyst operates independently via Qwen.
+        """
+        if self.orchestrator is None:
+            return
+        try:
+            from driftpilot.agents.state_machine_bridge import tick_analyst
+
+            tick_analyst(self.orchestrator)
+        except Exception:
+            logger.exception("PM Analyst tick failed (non-fatal)")
 
     def _agent_intercept_exits(self, decisions: list) -> list:
         """Let slot agents observe and potentially override exit decisions.
