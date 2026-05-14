@@ -13,6 +13,7 @@ only reads from the injected bus.
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import datetime, timezone
 from typing import Any
 
@@ -29,6 +30,9 @@ from driftpilot.signals.analyst_target_raise_v1.config import (
 )
 from driftpilot.signals.analyst_target_raise_v1.exits import evaluate_all
 from driftpilot.signals.analyst_target_raise_v1.features import is_event_fresh
+
+
+logger = logging.getLogger(__name__)
 
 
 def _utcnow() -> datetime:
@@ -60,6 +64,9 @@ class AnalystTargetRaiseV1Signal:
         self._clock = clock or _utcnow
         self._active_events: dict[str, CatalystEvent] = {}
         self._sub_id: str | None = None
+        self._db_path: str | None = None
+        self._last_sentiment_refresh: float = 0.0
+        self._sentiment_refresh_interval: int = 120  # seconds
 
         # Subscribe synchronously at construction. The bus subscribe
         # method is async; resolve it on the running loop or via
@@ -93,6 +100,7 @@ class AnalystTargetRaiseV1Signal:
         sub-signals uniformly."""
         import sqlite3
         from datetime import datetime, timedelta, timezone
+        self._db_path = db_path
         max_age = lookback_minutes or self.config.max_event_age_minutes
         cutoff = (datetime.now(timezone.utc) - timedelta(minutes=max_age)).isoformat()
         try:
@@ -128,6 +136,76 @@ class AnalystTargetRaiseV1Signal:
                 continue
         return loaded
 
+    def refresh_sentiment_from_db(self) -> int:
+        """Re-read sentiment/priority_modifier from DB for active events.
+
+        Called periodically during scan() so that events enriched after
+        bootstrap (e.g. by the Qwen batch enricher) become visible
+        without an operator restart.
+
+        Returns the number of events updated.
+        """
+        if self._db_path is None:
+            return 0
+
+        import sqlite3
+        import time
+
+        now_mono = time.monotonic()
+        if now_mono - self._last_sentiment_refresh < self._sentiment_refresh_interval:
+            return 0
+        self._last_sentiment_refresh = now_mono
+
+        symbols_needing_refresh = [
+            sym for sym, ev in self._active_events.items()
+            if ev.sentiment is None
+        ]
+        if not symbols_needing_refresh:
+            return 0
+
+        conn = sqlite3.connect(self._db_path)
+        try:
+            placeholders = ",".join("?" for _ in symbols_needing_refresh)
+            rows = conn.execute(
+                f"SELECT symbol, sentiment, priority_modifier "
+                f"FROM catalyst_events "
+                f"WHERE symbol IN ({placeholders}) "
+                f"AND category = 'analyst' AND subcategory = 'target_raise' "
+                f"AND sentiment IS NOT NULL",
+                symbols_needing_refresh,
+            ).fetchall()
+        finally:
+            conn.close()
+
+        updated = 0
+        for row in rows:
+            sym = row[0].upper()
+            if sym in self._active_events:
+                ev = self._active_events[sym]
+                if ev.sentiment is None:
+                    self._active_events[sym] = CatalystEvent(
+                        symbol=ev.symbol,
+                        category=ev.category,
+                        subcategory=ev.subcategory,
+                        pillar=ev.pillar,
+                        ts=ev.ts,
+                        headline=ev.headline,
+                        source=ev.source,
+                        horizon_minutes=ev.horizon_minutes,
+                        headline_hash=ev.headline_hash,
+                        sentiment=row[1],
+                        priority_modifier=float(row[2] or 0.0),
+                    )
+                    updated += 1
+        if updated:
+            logger.info(
+                "[SIGNAL:analyst_target_raise] refreshed sentiment for %d events "
+                "from DB (%d still unenriched)",
+                updated,
+                len(symbols_needing_refresh) - updated,
+            )
+        return updated
+
     async def _on_event(self, event: CatalystEvent) -> None:
         """Bus callback — remember the most recent event per symbol."""
         symbol = event.symbol.upper()
@@ -144,14 +222,26 @@ class AnalystTargetRaiseV1Signal:
         1.0 if zero, so equal-priority events still rank stably).
         """
         now = self._clock() if callable(self._clock) else self._clock
+        # Periodically refresh sentiment from DB for unenriched events
+        self.refresh_sentiment_from_db()
+
         fresh: dict[str, CatalystEvent] = {}
         for symbol, event in self._active_events.items():
             if is_event_fresh(now, event.ts, self.config.max_event_age_minutes):
                 fresh[symbol] = event
         self._active_events = fresh
 
+        require_sentiment = self.config.require_sentiment
         candidates: list[Candidate] = []
+        skipped_no_sentiment = 0
         for symbol, event in fresh.items():
+            # Directional gate: only admit events whose Qwen-enriched
+            # sentiment matches the configured filter.  Events not yet
+            # enriched (sentiment=None) are excluded when the filter is
+            # active — Qwen IS the gate.
+            if require_sentiment is not None and event.sentiment != require_sentiment:
+                skipped_no_sentiment += 1
+                continue
             score = event.priority_modifier if event.priority_modifier else 1.0
             candidates.append(
                 Candidate(
@@ -167,8 +257,16 @@ class AnalystTargetRaiseV1Signal:
                         "headline_hash": event.headline_hash,
                         "horizon_minutes": event.horizon_minutes,
                         "source": event.source,
+                        "sentiment": event.sentiment,
+                        "priority_modifier": event.priority_modifier,
                     },
                 )
+            )
+        if skipped_no_sentiment:
+            logger.info(
+                "[SIGNAL:analyst_target_raise] %d candidates emitted, "
+                "%d skipped (sentiment != %r)",
+                len(candidates), skipped_no_sentiment, require_sentiment,
             )
         candidates.sort(key=lambda c: (-c.score, c.symbol))
         return candidates

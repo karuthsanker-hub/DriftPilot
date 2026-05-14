@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Protocol, cast
 
@@ -10,6 +11,8 @@ from driftpilot.clock import DriftPilotClock, require_aware
 from driftpilot.market_data.alpaca_stream import MarketBar, MarketQuote
 from driftpilot.settings import DriftPilotSettings
 from driftpilot.storage import DriftPilotRepository, PositionRecord
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,6 +55,7 @@ class OrderSubmissionResult:
     order_type: str
     limit_price: float | None
     reason: str
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -152,6 +156,7 @@ class AlpacaBrokerClient:
         symbol: str,
         quantity: float,
         slot_id: int | None = None,
+        protective_stop_pct: float | None = None,
     ) -> OrderSubmissionResult:
         await self._ensure_order_submission_allowed()
         quote = self._latest_quote(symbol)
@@ -229,6 +234,77 @@ class AlpacaBrokerClient:
                 limit_price=limit_price,
                 reason="entry_limit_timeout_cancel_recycle",
             )
+        if filled is None:
+            await self.cancel_order(str(_attr(order, "id")))
+            self._update_order_status(
+                local_order_id,
+                "canceled_entry_unknown_fill_state",
+                {"fallback": "cancel_and_recycle"},
+            )
+            self._log_transition(
+                "ENTRY_TIMEOUT",
+                "entry_unknown_fill_state_cancel_recycle",
+                {"symbol": symbol.upper(), "broker_order_id": str(_attr(order, "id"))},
+            )
+            return OrderSubmissionResult(
+                submitted=False,
+                broker_order_id=str(_attr(order, "id")),
+                symbol=symbol.upper(),
+                side="buy",
+                quantity=quantity,
+                order_type="limit",
+                limit_price=limit_price,
+                reason="entry_unknown_fill_state_cancel_recycle",
+            )
+        # Retrieve the actual fill price from Alpaca instead of returning
+        # the order's limit_price. Paper orders fill instantly, often at a
+        # better price than the limit.
+        actual_fill = await self.get_fill_price(str(_attr(order, "id")))
+        entry_price = actual_fill or limit_price
+        metadata: dict[str, Any] = {}
+        if protective_stop_pct is not None and protective_stop_pct > 0:
+            stop_price = _round_price(entry_price * (1 - protective_stop_pct))
+            try:
+                protective = await self.submit_protective_stop_order(
+                    symbol=symbol,
+                    quantity=quantity,
+                    stop_price=stop_price,
+                    slot_id=slot_id,
+                    parent_order_id=str(_attr(order, "id")),
+                )
+                metadata.update(
+                    {
+                        "protective_stop_order_id": protective.broker_order_id,
+                        "protective_stop_price": stop_price,
+                        "protective_stop_pct": protective_stop_pct,
+                    }
+                )
+            except Exception as exc:
+                logger.exception(
+                    "protective stop placement failed for %s after entry fill; flattening: %s",
+                    symbol.upper(),
+                    exc,
+                )
+                flatten = await self.submit_emergency_market_exit(
+                    symbol=symbol,
+                    quantity=quantity,
+                    position_id=None,
+                    reason="protective_stop_failed_flatten",
+                )
+                return OrderSubmissionResult(
+                    submitted=False,
+                    broker_order_id=str(_attr(order, "id")),
+                    symbol=symbol.upper(),
+                    side="buy",
+                    quantity=quantity,
+                    order_type="limit",
+                    limit_price=entry_price,
+                    reason="protective_stop_failed_flattened",
+                    metadata={
+                        "protective_stop_error": str(exc),
+                        "flatten_order_id": flatten.broker_order_id,
+                    },
+                )
         return OrderSubmissionResult(
             submitted=True,
             broker_order_id=str(_attr(order, "id")),
@@ -236,8 +312,9 @@ class AlpacaBrokerClient:
             side="buy",
             quantity=quantity,
             order_type="limit",
-            limit_price=limit_price,
+            limit_price=entry_price,
             reason="marketable_limit_submitted",
+            metadata=metadata,
         )
 
     async def submit_exit_order(
@@ -436,6 +513,8 @@ class AlpacaBrokerClient:
                 limit_price=None,
                 reason="emergency_market_exit_after_timeout",
             )
+        # Retrieve actual fill price from Alpaca
+        actual_fill = await self.get_fill_price(str(_attr(order, "id")))
         return OrderSubmissionResult(
             submitted=True,
             broker_order_id=str(_attr(order, "id")),
@@ -443,8 +522,115 @@ class AlpacaBrokerClient:
             side="sell",
             quantity=quantity,
             order_type="limit",
-            limit_price=limit_price,
+            limit_price=actual_fill or limit_price,
             reason="marketable_limit_submitted",
+            )
+
+    async def submit_protective_stop_order(
+        self,
+        *,
+        symbol: str,
+        quantity: float,
+        stop_price: float,
+        position_id: int | None = None,
+        slot_id: int | None = None,
+        parent_order_id: str | None = None,
+    ) -> OrderSubmissionResult:
+        await self._ensure_order_submission_allowed()
+        request = _order_request(
+            symbol=symbol,
+            quantity=quantity,
+            side="sell",
+            order_type="stop",
+            stop_price=stop_price,
+            client_order_id=_client_order_id(
+                "protective-stop", symbol, position_id or slot_id, self.clock.now_utc()
+            ),
+        )
+        order = await asyncio.to_thread(self.trading_client.submit_order, request)
+        broker_order_id = str(_attr(order, "id"))
+        self._record_order(
+            broker_order_id=broker_order_id,
+            symbol=symbol,
+            side="sell",
+            order_type="stop",
+            status="submitted",
+            quantity=quantity,
+            position_id=position_id,
+            slot_id=slot_id,
+            limit_price=stop_price,
+            metadata={
+                "reason": "protective_stop_after_entry",
+                "stop_price": stop_price,
+                "parent_order_id": parent_order_id,
+            },
+        )
+        self._log_transition(
+            "ALLOCATING",
+            "protective_stop_submitted",
+            {
+                "symbol": symbol.upper(),
+                "broker_order_id": broker_order_id,
+                "parent_order_id": parent_order_id,
+                "stop_price": stop_price,
+            },
+        )
+        return OrderSubmissionResult(
+            submitted=True,
+            broker_order_id=broker_order_id,
+            symbol=symbol.upper(),
+            side="sell",
+            quantity=quantity,
+            order_type="stop",
+            limit_price=stop_price,
+            reason="protective_stop_submitted",
+            metadata={"stop_price": stop_price, "parent_order_id": parent_order_id},
+        )
+
+    async def submit_emergency_market_exit(
+        self,
+        *,
+        symbol: str,
+        quantity: float,
+        position_id: int | None = None,
+        reason: str = "emergency_market_exit",
+    ) -> OrderSubmissionResult:
+        await self._ensure_order_submission_allowed()
+        request = _order_request(
+            symbol=symbol,
+            quantity=quantity,
+            side="sell",
+            order_type="market",
+            client_order_id=_client_order_id(
+                "emergency-exit", symbol, position_id, self.clock.now_utc()
+            ),
+        )
+        order = await asyncio.to_thread(self.trading_client.submit_order, request)
+        broker_order_id = str(_attr(order, "id"))
+        self._record_order(
+            broker_order_id=broker_order_id,
+            symbol=symbol,
+            side="sell",
+            order_type="market",
+            status="submitted",
+            quantity=quantity,
+            position_id=position_id,
+            metadata={"reason": reason},
+        )
+        self._log_transition(
+            "EXITING",
+            reason,
+            {"symbol": symbol.upper(), "broker_order_id": broker_order_id},
+        )
+        return OrderSubmissionResult(
+            submitted=True,
+            broker_order_id=broker_order_id,
+            symbol=symbol.upper(),
+            side="sell",
+            quantity=quantity,
+            order_type="market",
+            limit_price=None,
+            reason=reason,
         )
 
     async def cancel_order(self, broker_order_id: str) -> None:
@@ -572,6 +758,30 @@ class AlpacaBrokerClient:
             return False
         return False
 
+    async def get_fill_price(self, broker_order_id: str) -> float | None:
+        """Retrieve the actual average fill price for a completed order.
+
+        Returns None if the order can't be found or hasn't filled.
+        """
+        get_order = getattr(self.trading_client, "get_order_by_id", None)
+        if get_order is None:
+            return None
+        try:
+            order = await asyncio.to_thread(get_order, broker_order_id)
+            status = str(_attr(order, "status")).lower()
+            if status not in {"filled", "partially_filled"}:
+                return None
+            # Alpaca order objects expose filled_avg_price
+            fill_price = _optional_float_attr(order, "filled_avg_price")
+            return fill_price
+        except Exception as exc:
+            logger.warning(
+                "failed to retrieve fill price for broker_order_id=%s: %s",
+                broker_order_id,
+                exc,
+            )
+            return None
+
     def _record_order(
         self,
         *,
@@ -660,9 +870,10 @@ def _order_request(
     order_type: str,
     client_order_id: str,
     limit_price: float | None = None,
+    stop_price: float | None = None,
 ) -> Any:
     from alpaca.trading.enums import OrderSide, OrderType, TimeInForce  # type: ignore[import-not-found]
-    from alpaca.trading.requests import LimitOrderRequest, MarketOrderRequest  # type: ignore[import-not-found]
+    from alpaca.trading.requests import LimitOrderRequest, MarketOrderRequest, StopOrderRequest  # type: ignore[import-not-found]
 
     order_side = OrderSide.BUY if side == "buy" else OrderSide.SELL
     if order_type == "market":
@@ -672,6 +883,18 @@ def _order_request(
             side=order_side,
             type=OrderType.MARKET,
             time_in_force=TimeInForce.DAY,
+            client_order_id=client_order_id,
+        )
+    if order_type == "stop":
+        if stop_price is None:
+            raise ValueError("stop_price is required for stop orders")
+        return StopOrderRequest(
+            symbol=symbol.upper(),
+            qty=quantity,
+            side=order_side,
+            type=OrderType.STOP,
+            time_in_force=TimeInForce.DAY,
+            stop_price=stop_price,
             client_order_id=client_order_id,
         )
     if limit_price is None:

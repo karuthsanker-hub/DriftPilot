@@ -39,7 +39,8 @@ EDITABLE_FIELDS: dict[str, dict[str, Any]] = {
             "Which catalyst signal(s) drive entries. Single name OR comma-separated list "
             "for MultiSignal mode. earnings_report_v1 (validated, ratio=5.09 n=33), "
             "filing_8a_v1 (validated, ratio=2.05 n=256, biggest sample), "
-            "analyst_target_raise_v1 (FAIL, ratio=0.85). Combo recommended for broader coverage. "
+            "analyst_target_raise_v1 (FAIL, ratio=0.85). Use only after the defect-list "
+            "sentiment/age gates are revalidated. "
             "Read at operator boot — pause, change, restart."
         ),
     },
@@ -96,14 +97,14 @@ EDITABLE_FIELDS: dict[str, dict[str, Any]] = {
         "min": 0.1,
         "max": 5.0,
         "label": "Stop loss %",
-        "help": "Exit at this drawdown. Validated config was 1.5%.",
+        "help": "Exit at this drawdown. Defect-list guardrail uses 1.0% symmetric risk.",
     },
     "earnings_max_hold_minutes": {
         "type": int,
         "min": 5,
         "max": 480,
         "label": "Max hold (min)",
-        "help": "Hard time stop after entry. Validated config was 60m.",
+        "help": "Hard time stop after entry. REFACTOR_PLAN default is 45m.",
     },
     "earnings_require_sentiment": {
         "type": str,
@@ -144,6 +145,26 @@ EDITABLE_FIELDS: dict[str, dict[str, Any]] = {
             "JXN was 8% above reference — this would have blocked all 5 entries."
         ),
     },
+    "max_entry_atr_pct": {
+        "type": float,
+        "min": 0.5,
+        "max": 20.0,
+        "label": "Max entry ATR % (HOT)",
+        "help": (
+            "Reject candidates whose known ATR percentage is above this value. "
+            "Missing ATR data does not block entry. 6.0 = block names with ATR >6%."
+        ),
+    },
+    "high_volatility_slot_multiplier": {
+        "type": float,
+        "min": 0.1,
+        "max": 1.0,
+        "label": "High volatility slot multiplier (HOT)",
+        "help": (
+            "Reduce slot sizing for elevated-ATR candidates that are not blocked. "
+            "0.5 = use half-size slots for names near the ATR cap."
+        ),
+    },
     "min_reentry_minutes": {
         "type": float,
         "min": 0.0,
@@ -161,21 +182,23 @@ EDITABLE_FIELDS: dict[str, dict[str, Any]] = {
 
 @dataclass
 class RuntimeConfig:
-    active_signal: str = "earnings_report_v1,filing_8a_v1,analyst_target_raise_v1"
+    active_signal: str = "earnings_report_v1,filing_8a_v1"
     scanning_paused: str = "false"
     slot_value: float = 1000.0
-    max_trades_per_symbol_per_day: int = 5
+    max_trades_per_symbol_per_day: int = 3
     max_slots_per_sector: int = 4
     catalyst_universe_lookback_minutes: int = 240
     earnings_max_event_age_minutes: int = 240
     earnings_profit_take_pct: float = 1.0
-    earnings_stop_loss_pct: float = 1.5
-    earnings_max_hold_minutes: int = 60
+    earnings_stop_loss_pct: float = 1.0
+    earnings_max_hold_minutes: int = 45
     earnings_require_sentiment: str = "positive"
     earnings_trailing_enabled: str = "true"
     earnings_trailing_activation_pct: float = 1.0
-    earnings_trailing_distance_pct: float = 2.0
+    earnings_trailing_distance_pct: float = 0.4
     max_price_drift_pct: float = 3.0
+    max_entry_atr_pct: float = 6.0
+    high_volatility_slot_multiplier: float = 0.5
     min_reentry_minutes: float = 15.0
 
     def to_dict(self) -> dict[str, Any]:
@@ -195,6 +218,8 @@ class RuntimeConfig:
             "earnings_trailing_activation_pct": self.earnings_trailing_activation_pct,
             "earnings_trailing_distance_pct": self.earnings_trailing_distance_pct,
             "max_price_drift_pct": self.max_price_drift_pct,
+            "max_entry_atr_pct": self.max_entry_atr_pct,
+            "high_volatility_slot_multiplier": self.high_volatility_slot_multiplier,
             "min_reentry_minutes": self.min_reentry_minutes,
         }
 
@@ -216,8 +241,13 @@ def load_runtime_config(path: str | Path = DEFAULT_PATH) -> RuntimeConfig:
         if k in EDITABLE_FIELDS and hasattr(cfg, k):
             try:
                 setattr(cfg, k, EDITABLE_FIELDS[k]["type"](v))
-            except (TypeError, ValueError):
-                pass
+            except (TypeError, ValueError) as exc:
+                logger.warning(
+                    "runtime config field %s=%r could not be coerced, using default: %s",
+                    k,
+                    v,
+                    exc,
+                )
     return cfg
 
 

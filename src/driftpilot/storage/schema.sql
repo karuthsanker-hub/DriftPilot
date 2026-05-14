@@ -104,6 +104,21 @@ CREATE TABLE IF NOT EXISTS candidate_queue (
 
 CREATE INDEX IF NOT EXISTS idx_candidate_queue_status_rank ON candidate_queue(status, rank);
 
+CREATE TABLE IF NOT EXISTS price_drift_baselines (
+    symbol TEXT NOT NULL,
+    event_key TEXT NOT NULL,
+    first_seen_price REAL NOT NULL,
+    first_seen_at TEXT NOT NULL,
+    last_seen_price REAL NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    drift_pct REAL NOT NULL DEFAULT 0,
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    PRIMARY KEY (symbol, event_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_price_drift_baselines_last_seen_at
+ON price_drift_baselines(last_seen_at);
+
 CREATE TABLE IF NOT EXISTS recycle_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     slot_id INTEGER NOT NULL,

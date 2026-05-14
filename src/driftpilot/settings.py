@@ -76,6 +76,7 @@ class DriftPilotSettings:
     always_on_candidate_count: int = 50
     max_trades_per_day: int = 50
     max_trades_per_symbol_per_day: int = 3
+    consecutive_loss_limit: int = 2
     daily_loss_limit_pct: float = 0.03
     equity_floor: float = 26_000.0
     live_equity_buffer: float = 1_000.0
@@ -142,6 +143,7 @@ def load_settings(
         always_on_candidate_count=_get_int(values, "ALWAYS_ON_CANDIDATE_COUNT", 50),
         max_trades_per_day=_get_int(values, "MAX_TRADES_PER_DAY", 50),
         max_trades_per_symbol_per_day=_get_int(values, "MAX_TRADES_PER_SYMBOL_PER_DAY", 3),
+        consecutive_loss_limit=_get_int(values, "CONSECUTIVE_LOSS_LIMIT", 2),
         daily_loss_limit_pct=_get_positive_float(values, "DAILY_LOSS_LIMIT_PCT", 0.03),
         equity_floor=_get_float(values, "EQUITY_FLOOR", 26_000.0),
         live_equity_buffer=_get_float(values, "LIVE_EQUITY_BUFFER", 1_000.0),

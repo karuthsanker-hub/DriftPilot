@@ -248,7 +248,7 @@ def main() -> None:
     p.add_argument("--date", default=None,
                    help="Audit window date (YYYY-MM-DD). Defaults to today.")
     p.add_argument("--ops-db", default="data/driftpilot/operator_state.sqlite3")
-    p.add_argument("--catalyst-db", default="data/driftpilot/catalyst_events_2024.sqlite3")
+    p.add_argument("--catalyst-db", default="data/driftpilot/catalyst_events.sqlite3")
     p.add_argument("--include-alpaca-snapshot", action="store_true",
                    help="Also pull live ground-truth from Alpaca paper account.")
     args = p.parse_args()

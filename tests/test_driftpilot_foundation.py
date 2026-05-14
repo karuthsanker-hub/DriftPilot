@@ -55,7 +55,7 @@ def test_settings_falls_back_for_invalid_daily_loss_limit(tmp_path, monkeypatch)
 
     settings = load_settings(env_path)
 
-    assert settings.daily_loss_limit_pct == 0.05
+    assert settings.daily_loss_limit_pct == 0.03
 
 
 def test_schema_creates_all_phase_one_tables_cleanly() -> None:

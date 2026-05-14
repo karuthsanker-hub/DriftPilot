@@ -27,6 +27,8 @@ def _event(category: str, subcategory: str, symbol: str = "AAPL") -> CatalystEve
         source="unit-test",
         horizon_minutes=60,
         headline_hash=f"hash-{symbol}-{category}-{subcategory}",
+        sentiment="positive",
+        priority_modifier=0.08,
     )
 
 

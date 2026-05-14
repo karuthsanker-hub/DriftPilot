@@ -26,6 +26,37 @@ logger = logging.getLogger(__name__)
 SIGNAL_NAME = "earnings_report_v1"
 SIGNAL_VERSION = "1.0.0"
 
+_NEGATIVE_EARNINGS_HEADLINE_PHRASES = (
+    "downbeat",
+    "below estimates",
+    "weak guidance",
+    "posts loss",
+    "widens loss",
+)
+_NEGATIVE_EARNINGS_HEADLINE_TOKENS = (
+    "misses",
+    "lowers",
+)
+_NEGATIVE_EARNINGS_CUTS_CONTEXTS = (
+    "cuts guidance",
+    "cuts forecast",
+    "cuts outlook",
+    "cuts view",
+    "cuts estimate",
+    "cuts estimates",
+    "cuts dividend",
+)
+
+
+def _has_negative_earnings_headline_veto(headline: str) -> bool:
+    normalized = " ".join(headline.casefold().split())
+    if any(phrase in normalized for phrase in _NEGATIVE_EARNINGS_HEADLINE_PHRASES):
+        return True
+    words = set(normalized.replace(",", " ").replace(";", " ").split())
+    if any(token in words for token in _NEGATIVE_EARNINGS_HEADLINE_TOKENS):
+        return True
+    return any(phrase in normalized for phrase in _NEGATIVE_EARNINGS_CUTS_CONTEXTS)
+
 
 class EarningsReportSignal:
     """SignalProtocol implementation for Earnings Report v1."""
@@ -43,12 +74,20 @@ class EarningsReportSignal:
         self._active_events: dict[str, CatalystEvent] = {}
         self._sub_id: SubscriptionId | None = None
         self._db_path: str | None = None
+        self._event_confidence: dict[str, float | None] = {}
+        self._last_skip_counts: dict[str, int] = {}
         self._last_sentiment_refresh: float = 0.0
         self._sentiment_refresh_interval: int = 120  # seconds
 
+    @property
+    def last_skip_counts(self) -> dict[str, int]:
+        return dict(self._last_skip_counts)
+
     async def _on_event(self, event: CatalystEvent) -> None:
         # Latest event wins, keyed by symbol.
-        self._active_events[event.symbol.upper()] = event
+        symbol = event.symbol.upper()
+        self._active_events[symbol] = event
+        self._event_confidence[symbol] = getattr(event, "confidence", None)
 
     async def subscribe(self) -> None:
         """Subscribe to the bus for earnings/report events."""
@@ -87,9 +126,12 @@ class EarningsReportSignal:
 
         conn = sqlite3.connect(db_path)
         try:
+            columns = {r[1] for r in conn.execute("PRAGMA table_info(catalyst_events)")}
+            confidence_expr = "confidence" if "confidence" in columns else "NULL AS confidence"
             cur = conn.execute(
                 "SELECT symbol, category, subcategory, pillar, event_ts, headline, "
-                "source, horizon_minutes, headline_hash, sentiment, priority_modifier "
+                "source, horizon_minutes, headline_hash, sentiment, priority_modifier, "
+                f"{confidence_expr} "
                 "FROM catalyst_events "
                 "WHERE category = 'earnings' AND subcategory = 'report' "
                 "AND event_ts >= ? "
@@ -119,9 +161,17 @@ class EarningsReportSignal:
                     sentiment=row[9],
                     priority_modifier=float(row[10] or 0.0),
                 )
-                self._active_events[event.symbol.upper()] = event
+                symbol = event.symbol.upper()
+                self._active_events[symbol] = event
+                self._event_confidence[symbol] = (
+                    float(row[11]) if row[11] is not None else None
+                )
                 loaded += 1
-            except (ValueError, TypeError):
+            except (ValueError, TypeError) as exc:
+                logger.warning(
+                    "[SIGNAL] skipping malformed earnings event from DB: %s",
+                    exc,
+                )
                 continue
         return loaded
 
@@ -147,16 +197,18 @@ class EarningsReportSignal:
 
         symbols_needing_refresh = [
             sym for sym, ev in self._active_events.items()
-            if ev.sentiment is None
+            if ev.sentiment is None or self._event_confidence.get(sym) is None
         ]
         if not symbols_needing_refresh:
             return 0
 
         conn = sqlite3.connect(self._db_path)
         try:
+            columns = {r[1] for r in conn.execute("PRAGMA table_info(catalyst_events)")}
+            confidence_expr = "confidence" if "confidence" in columns else "NULL AS confidence"
             placeholders = ",".join("?" for _ in symbols_needing_refresh)
             rows = conn.execute(
-                f"SELECT symbol, sentiment, priority_modifier "
+                f"SELECT symbol, sentiment, priority_modifier, {confidence_expr} "
                 f"FROM catalyst_events "
                 f"WHERE symbol IN ({placeholders}) "
                 f"AND category = 'earnings' AND subcategory = 'report' "
@@ -171,26 +223,28 @@ class EarningsReportSignal:
             sym = row[0].upper()
             if sym in self._active_events:
                 ev = self._active_events[sym]
-                if ev.sentiment is None:
-                    # Update in-place by creating a new event with enriched fields
-                    self._active_events[sym] = CatalystEvent(
-                        symbol=ev.symbol,
-                        category=ev.category,
-                        subcategory=ev.subcategory,
-                        pillar=ev.pillar,
-                        ts=ev.ts,
-                        headline=ev.headline,
-                        source=ev.source,
-                        horizon_minutes=ev.horizon_minutes,
-                        headline_hash=ev.headline_hash,
-                        sentiment=row[1],
-                        priority_modifier=float(row[2] or 0.0),
-                    )
-                    updated += 1
+                # Update in-place by creating a new event with enriched fields.
+                self._active_events[sym] = CatalystEvent(
+                    symbol=ev.symbol,
+                    category=ev.category,
+                    subcategory=ev.subcategory,
+                    pillar=ev.pillar,
+                    ts=ev.ts,
+                    headline=ev.headline,
+                    source=ev.source,
+                    horizon_minutes=ev.horizon_minutes,
+                    headline_hash=ev.headline_hash,
+                    sentiment=row[1],
+                    priority_modifier=float(row[2] or 0.0),
+                )
+                self._event_confidence[sym] = (
+                    float(row[3]) if row[3] is not None else None
+                )
+                updated += 1
         if updated:
             logger.info(
-                "[SIGNAL] refreshed sentiment for %d events from DB "
-                "(%d still unenriched)",
+                "[SIGNAL] refreshed sentiment metadata for %d events from DB "
+                "(%d still missing metadata)",
                 updated,
                 len(symbols_needing_refresh) - updated,
             )
@@ -202,17 +256,43 @@ class EarningsReportSignal:
         # Periodically refresh sentiment from DB for unenriched events
         self.refresh_sentiment_from_db()
         candidates: list[Candidate] = []
+        skip_counts: dict[str, int] = {}
+
+        def count_skip(reason: str) -> None:
+            skip_counts[reason] = skip_counts.get(reason, 0) + 1
+
         max_age = self._config.max_event_age_minutes
         require_sentiment = self._config.require_sentiment
         for symbol, event in self._active_events.items():
             age = event_age_minutes(event.ts, now)
             if age > max_age:
+                count_skip("stale_event")
+                continue
+            if _has_negative_earnings_headline_veto(event.headline):
+                count_skip("negative_headline_veto")
                 continue
             # Directional gate (v3 GATED config): only admit events whose
             # Qwen-enriched sentiment matches the configured filter.
             # Events not yet enriched (sentiment=None) are excluded when
             # the filter is active — Qwen IS the gate.
             if require_sentiment is not None and event.sentiment != require_sentiment:
+                count_skip("sentiment_mismatch")
+                continue
+            if (
+                require_sentiment == "positive"
+                and self._config.require_positive_priority_modifier
+                and event.priority_modifier <= 0.0
+            ):
+                count_skip("non_positive_priority_modifier")
+                continue
+            min_confidence = self._config.min_sentiment_confidence
+            confidence = self._event_confidence.get(symbol)
+            if (
+                min_confidence > 0.0
+                and confidence is not None
+                and confidence < min_confidence
+            ):
+                count_skip("low_sentiment_confidence")
                 continue
             candidates.append(
                 Candidate(
@@ -229,12 +309,16 @@ class EarningsReportSignal:
                         "source": event.source,
                         "sentiment": event.sentiment,
                         "priority_modifier": event.priority_modifier,
+                        "sentiment_confidence": confidence,
                         "category": event.category,
                         "subcategory": event.subcategory,
                         "catalyst_event_ts": event.ts,
                     },
                 )
             )
+        self._last_skip_counts = skip_counts
+        if skip_counts:
+            logger.debug("[SIGNAL] earnings_report_v1 skip counts: %s", skip_counts)
         return candidates
 
     def evaluate_exit(

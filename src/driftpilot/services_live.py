@@ -17,7 +17,9 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import logging
+import math
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -187,12 +189,14 @@ class MultiSignal:
     @_config.setter
     def _config(self, value):
         # Hot-reload of earnings config affects only sub-signals that accept
-        # the same config type. Skip silently for incompatible signals.
+        # the same config type.
         for s in self._signals:
             try:
                 if isinstance(getattr(s, "_config", None), type(value)):
                     s._config = value
             except Exception:
+                # Some signals expose read-only or incompatible config
+                # attributes; leaving them unchanged is intentional.
                 pass
 
     async def subscribe(self) -> None:
@@ -238,6 +242,8 @@ class MultiSignal:
                         features=feats,
                     )
                 except Exception:
+                    # If a candidate cannot be reconstructed, keep the
+                    # original candidate rather than dropping the event.
                     pass
                 out.append(c)
         return out
@@ -314,6 +320,8 @@ class CatalystScannerService:
         # event on the same symbol resets the baseline.
         self._first_seen_prices: dict[tuple[str, str], float] = {}
         self._max_price_drift_pct: float = 3.0  # default; hot-reloaded
+        self._max_entry_atr_pct: float = 6.0
+        self._high_volatility_slot_multiplier: float = 0.5
         # Blocked symbol cache: symbols that the allocator permanently rejects
         # (day-cap, consecutive-loss cooldown) are cached here so the scanner
         # skips them without fetching a quote or sending to the allocator.
@@ -383,16 +391,160 @@ class CatalystScannerService:
             # Hot kill switch
             self._scanning_paused = str(cfg.scanning_paused).lower() == "true"
             self._max_price_drift_pct = cfg.max_price_drift_pct
+            self._max_entry_atr_pct = cfg.max_entry_atr_pct
+            self._high_volatility_slot_multiplier = cfg.high_volatility_slot_multiplier
             self._runtime_config_mtime = mtime
             logger.info(
                 "🔄 hot-reloaded: max_hold=%dm profit=%.2f%% stop=%.2f%% "
-                "max_age=%dm sentiment=%s max_drift=%.1f%% scanning_paused=%s",
+                "max_age=%dm sentiment=%s max_drift=%.1f%% max_atr=%.1f%% "
+                "vol_slot_mult=%.2f scanning_paused=%s",
                 cfg.earnings_max_hold_minutes, cfg.earnings_profit_take_pct,
                 cfg.earnings_stop_loss_pct, cfg.earnings_max_event_age_minutes,
-                require_sent, cfg.max_price_drift_pct, cfg.scanning_paused,
+                require_sent, cfg.max_price_drift_pct, cfg.max_entry_atr_pct,
+                cfg.high_volatility_slot_multiplier, cfg.scanning_paused,
             )
         except Exception as exc:
             logger.warning("hot-reload failed: %s", exc)
+
+    def _candidate_atr_pct(self, symbol: str, features: dict[str, Any]) -> float | None:
+        """Read ATR percentage from feature or context metadata if available."""
+        for key in ("atr_pct", "entry_atr_pct", "atr_percent", "atr_20d_pct"):
+            val = features.get(key)
+            if val is not None:
+                return self._coerce_positive_float(val)
+
+        context = self._candidate_context_metadata(features)
+        if context is None:
+            context = self._candidate_context_from_db(symbol, features)
+        if isinstance(context, dict):
+            for key in ("atr_pct", "entry_atr_pct", "atr_percent", "atr_20d_pct"):
+                val = context.get(key)
+                if val is not None:
+                    return self._coerce_positive_float(val)
+        return None
+
+    def _candidate_context_metadata(self, features: dict[str, Any]) -> dict[str, Any] | None:
+        context = (
+            features.get("context")
+            or features.get("context_metadata")
+            or features.get("enrichment_context")
+            or features.get("context_json")
+        )
+        if isinstance(context, str):
+            try:
+                decoded = json.loads(context)
+            except json.JSONDecodeError as exc:
+                logger.debug("candidate context_json did not decode: %s", exc)
+                return None
+            context = decoded
+        if isinstance(context, dict):
+            return context
+        return None
+
+    def _candidate_context_from_db(
+        self,
+        symbol: str,
+        features: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        headline_hash = features.get("headline_hash")
+        if not headline_hash:
+            return None
+        for db_path in self._candidate_context_db_paths():
+            try:
+                import sqlite3
+
+                conn = sqlite3.connect(db_path)
+                try:
+                    columns = {
+                        str(row[1])
+                        for row in conn.execute("PRAGMA table_info(catalyst_events)").fetchall()
+                    }
+                    if "context_json" not in columns:
+                        continue
+                    row = conn.execute(
+                        "SELECT context_json FROM catalyst_events "
+                        "WHERE symbol = ? AND headline_hash = ? "
+                        "ORDER BY event_ts DESC LIMIT 1",
+                        (symbol.upper(), str(headline_hash)),
+                    ).fetchone()
+                finally:
+                    conn.close()
+            except sqlite3.Error as exc:
+                logger.debug("candidate context lookup failed for %s: %s", symbol, exc)
+                continue
+            if row is None or not row[0]:
+                continue
+            try:
+                decoded = json.loads(row[0])
+            except json.JSONDecodeError as exc:
+                logger.debug("candidate context_json from DB did not decode for %s: %s", symbol, exc)
+                continue
+            if isinstance(decoded, dict):
+                features["context_json"] = row[0]
+                return decoded
+        return None
+
+    def _candidate_context_db_paths(self) -> tuple[str, ...]:
+        paths: list[str] = []
+        db_path = getattr(self.signal, "_db_path", None)
+        if isinstance(db_path, str) and db_path:
+            paths.append(db_path)
+        for sub_signal in getattr(self.signal, "_signals", ()) or ():
+            sub_path = getattr(sub_signal, "_db_path", None)
+            if isinstance(sub_path, str) and sub_path and sub_path not in paths:
+                paths.append(sub_path)
+        return tuple(paths)
+
+    def _coerce_positive_float(self, value: Any) -> float | None:
+        try:
+            coerced = float(value)
+        except (TypeError, ValueError):
+            # Bad ATR metadata is treated as unavailable; missing ATR must not block entries.
+            return None
+        if not math.isfinite(coerced) or coerced < 0:
+            return None
+        return coerced
+
+    def _mark_candidate_blocked(
+        self,
+        symbol: str,
+        reason: str,
+        features: dict[str, Any],
+        updated_at: datetime,
+    ) -> None:
+        if self._repository is None:
+            return
+        candidate_queue = getattr(self._repository, "candidate_queue", None)
+        if candidate_queue is None:
+            return
+        mark_blocked = getattr(candidate_queue, "mark_blocked", None)
+        if mark_blocked is None:
+            return
+        try:
+            mark_blocked(
+                symbol,
+                reason=reason,
+                features=self._json_safe_metadata(features),
+                updated_at=updated_at,
+            )
+        except Exception as exc:
+            logger.warning("candidate_queue mark_blocked failed for %s: %s", symbol, exc)
+
+    def _json_safe_metadata(self, metadata: dict[str, Any]) -> dict[str, Any]:
+        safe: dict[str, Any] = {}
+        for key, value in metadata.items():
+            if hasattr(value, "isoformat"):
+                safe[key] = value.isoformat()
+            elif isinstance(value, dict):
+                safe[key] = self._json_safe_metadata(value)
+            elif isinstance(value, (list, tuple)):
+                safe[key] = [
+                    item.isoformat() if hasattr(item, "isoformat") else item
+                    for item in value
+                ]
+            else:
+                safe[key] = value
+        return safe
 
     def _refresh_blocked_symbols(self, now: datetime) -> None:
         """Rebuild the set of symbols that can't be allocated RIGHT NOW.
@@ -472,6 +624,53 @@ class CatalystScannerService:
 
         self._blocked_symbols = blocked
 
+    def _record_price_drift_baseline(
+        self,
+        *,
+        symbol: str,
+        event_key: str,
+        ref_price: float,
+        seen_at: datetime,
+        features: Any,
+    ) -> tuple[float, float]:
+        """Persist or memoize the first-seen price for a symbol/event pair."""
+        normalized_symbol = symbol.upper()
+        metadata = {
+            "headline": features.get("headline"),
+            "headline_hash": event_key,
+            "category": features.get("category"),
+            "subcategory": features.get("subcategory"),
+            "source": features.get("source", "catalyst_bus"),
+            "signal_name": features.get("signal_name")
+            or getattr(self.signal, "name", None),
+        }
+        drift_repo = (
+            getattr(self._repository, "price_drift_baselines", None)
+            if self._repository is not None
+            else None
+        )
+        if drift_repo is not None:
+            baseline = drift_repo.update_seen(
+                symbol=normalized_symbol,
+                event_key=event_key,
+                price=ref_price,
+                seen_at=seen_at,
+                metadata=metadata,
+            )
+            return baseline.first_seen_price, baseline.drift_pct
+
+        drift_key = (normalized_symbol, event_key)
+        first_price = self._first_seen_prices.get(drift_key)
+        if first_price is None:
+            self._first_seen_prices[drift_key] = ref_price
+            first_price = ref_price
+        drift_pct = (
+            abs(ref_price - first_price) / first_price * 100.0
+            if first_price > 0
+            else 0.0
+        )
+        return first_price, drift_pct
+
     async def scan(self):
         self._maybe_hot_reload()
         now = self.clock.now_utc()
@@ -482,9 +681,9 @@ class CatalystScannerService:
         if getattr(self, "_scanning_paused", False):
             logger.info("catalyst scanner: scanning_paused=true (UI lever) — 0 candidates")
             return _build_scan_result([], now)
-        # Periodic cleanup of price drift cache — cap at 500 entries to
-        # prevent unbounded growth over a full trading day.
-        if len(self._first_seen_prices) > 500:
+        # Periodic cleanup of the in-memory fallback only. Repo-backed
+        # baselines are intentionally persistent across operator restarts.
+        if self._repository is None and len(self._first_seen_prices) > 500:
             self._first_seen_prices.clear()
 
         # Pre-filter: refresh the set of blocked symbols (day-cap, open,
@@ -515,19 +714,20 @@ class CatalystScannerService:
                 )
                 continue
             ref_price = (quote.bid_price + quote.ask_price) / 2.0
-            features = sc.features or {}
+            features = dict(sc.features or {})
 
             # --- Price drift protection ---
             # Track the first-seen price for each (symbol, headline_hash).
             # If the stock has already moved beyond max_price_drift_pct from
             # first-seen, skip — we'd be buying the top of an already-played move.
-            _hh = features.get("headline_hash") or ""
-            _drift_key = (sc.symbol.upper(), _hh)
-            first_price = self._first_seen_prices.get(_drift_key)
-            if first_price is None:
-                self._first_seen_prices[_drift_key] = ref_price
-                first_price = ref_price
-            drift_pct = abs(ref_price - first_price) / first_price * 100.0 if first_price > 0 else 0.0
+            _hh = str(features.get("headline_hash") or "")
+            first_price, drift_pct = self._record_price_drift_baseline(
+                symbol=sc.symbol,
+                event_key=_hh,
+                ref_price=ref_price,
+                seen_at=now,
+                features=features,
+            )
             max_drift = getattr(self, "_max_price_drift_pct", 3.0)
             if drift_pct > max_drift:
                 logger.warning(
@@ -537,6 +737,31 @@ class CatalystScannerService:
                     (features.get("headline") or "")[:80],
                 )
                 continue
+
+            atr_pct = self._candidate_atr_pct(sc.symbol, features)
+            max_atr = getattr(self, "_max_entry_atr_pct", 6.0)
+            slot_value_multiplier = 1.0
+            if atr_pct is not None and atr_pct > max_atr:
+                detail = {
+                    **features,
+                    "atr_pct": atr_pct,
+                    "max_entry_atr_pct": max_atr,
+                    "reference_price": ref_price,
+                    "blocked_reason": "high_volatility_atr",
+                }
+                logger.warning(
+                    "ATR REJECT %s: atr_pct=%.2f%% exceeds max_entry_atr_pct=%.2f%% | %s",
+                    sc.symbol, atr_pct, max_atr,
+                    (features.get("headline") or "")[:80],
+                )
+                self._mark_candidate_blocked(sc.symbol, "high_volatility_atr", detail, now)
+                continue
+            if atr_pct is not None and atr_pct >= max_atr * 0.75:
+                slot_value_multiplier = max(
+                    0.1,
+                    min(1.0, float(getattr(self, "_high_volatility_slot_multiplier", 0.5))),
+                )
+                features["slot_value_multiplier"] = slot_value_multiplier
 
             cat_ts_val = features.get("catalyst_event_ts")
             cat_ts_str = (
@@ -561,6 +786,8 @@ class CatalystScannerService:
                     "event_age_minutes": features.get("event_age_minutes"),
                     "horizon_minutes": features.get("horizon_minutes"),
                     "source": features.get("source", "catalyst_bus"),
+                    "atr_pct": atr_pct,
+                    "slot_value_multiplier": slot_value_multiplier,
                     "price_drift_pct": round(drift_pct, 2),
                     "first_seen_price": first_price,
                     # signal_name lets the position monitor route evaluate_exit
@@ -704,7 +931,9 @@ class LiveAlpacaAllocator:
         for allocation in result.allocations:
             candidate = candidate_by_symbol[allocation.symbol.upper()]
             reference_price = float(candidate.metadata.get("reference_price", 100.0))
-            quantity = max(1, int(allocation.slot_value // reference_price))
+            slot_value_multiplier = self._slot_value_multiplier(candidate.metadata)
+            effective_slot_value = allocation.slot_value * slot_value_multiplier
+            quantity = max(1, int(effective_slot_value // reference_price))
 
             # Catalyst-event audit fields — passed through from the candidate
             # so we can post-hoc join trade rows back to the triggering event.
@@ -721,9 +950,10 @@ class LiveAlpacaAllocator:
             cat_event_age = candidate.metadata.get("event_age_minutes")
 
             logger.info(
-                "LIVE: submitting paper buy %s qty=%d slot=%s ref_price=%.2f "
+                "LIVE: submitting paper buy %s qty=%d slot=%s ref_price=%.2f slot_mult=%.2f "
                 "catalyst_sentiment=%s catalyst_event_age=%.1fmin catalyst_hash=%s | %s",
                 allocation.symbol, quantity, allocation.slot_id, reference_price,
+                slot_value_multiplier,
                 cat_sentiment or "NONE",
                 float(cat_event_age) if cat_event_age is not None else -1.0,
                 cat_headline_hash or "NONE",
@@ -736,6 +966,7 @@ class LiveAlpacaAllocator:
                     symbol=allocation.symbol,
                     quantity=quantity,
                     slot_id=allocation.slot_id,
+                    protective_stop_pct=self.settings.stop_pct,
                 )
             except Exception as exc:
                 # Broker race: paper orders can fill faster than _wait_for_fill
@@ -761,7 +992,12 @@ class LiveAlpacaAllocator:
             if submission is None or not submission.submitted:
                 try:
                     open_positions = await self.broker.get_open_positions()
-                except Exception:
+                except Exception as exc:
+                    logger.warning(
+                        "LIVE: open-position reconciliation failed after entry rejection for %s: %s",
+                        allocation.symbol,
+                        exc,
+                    )
                     open_positions = []
                 actual = next(
                     (p for p in open_positions if p.symbol.upper() == allocation.symbol.upper()),
@@ -796,18 +1032,22 @@ class LiveAlpacaAllocator:
             # Order submitted AND filled (broker waited). Record the position
             # locally so the monitor can track it for exit.
             entry_price = submission.limit_price or reference_price
+            stop_price = entry_price * (1 - self.settings.stop_pct)
+            protective_stop_metadata = dict(getattr(submission, "metadata", {}) or {})
             position = self.repository.positions.create_open(
                 symbol=allocation.symbol,
                 quantity=quantity,
                 entry_price=entry_price,
                 target_price=entry_price * (1 + self.settings.target_pct),
-                stop_price=entry_price * (1 - self.settings.stop_pct),
+                stop_price=stop_price,
                 slot_id=allocation.slot_id,
                 opened_at=allocation.reserved_at,
                 metadata={
                     "sector": allocation.sector,
                     "broker_order_id": submission.broker_order_id,
                     "reference_price": reference_price,
+                    "slot_value_multiplier": slot_value_multiplier,
+                    "effective_slot_value": effective_slot_value,
                     "current_price": entry_price,
                     "entry_ts": allocation.reserved_at.isoformat(),
                     "entry_price": entry_price,
@@ -822,8 +1062,37 @@ class LiveAlpacaAllocator:
                     # Stamp the originating signal so the monitor's MultiSignal
                     # router knows which exit logic to apply.
                     "signal_name": candidate.metadata.get("signal_name"),
+                    **protective_stop_metadata,
                 },
             )
+            if (
+                submission.reason == "reconciled_from_alpaca_position"
+                and not protective_stop_metadata.get("protective_stop_order_id")
+            ):
+                try:
+                    protective = await self.broker.submit_protective_stop_order(
+                        symbol=allocation.symbol,
+                        quantity=quantity,
+                        stop_price=stop_price,
+                        position_id=getattr(position, "id", None),
+                        slot_id=allocation.slot_id,
+                        parent_order_id=submission.broker_order_id,
+                    )
+                    protective_stop_metadata = {
+                        "protective_stop_order_id": protective.broker_order_id,
+                        "protective_stop_price": stop_price,
+                        "protective_stop_pct": self.settings.stop_pct,
+                    }
+                    position = self.repository.positions.update_metadata(
+                        getattr(position, "id"),
+                        protective_stop_metadata,
+                    )
+                except Exception as exc:
+                    logger.exception(
+                        "LIVE: protective stop placement failed after reconcile for %s: %s",
+                        allocation.symbol,
+                        exc,
+                    )
             logger.info(
                 "LIVE: position opened symbol=%s qty=%d entry=%.2f position_id=%s broker_order_id=%s",
                 allocation.symbol, quantity, entry_price,
@@ -848,7 +1117,10 @@ class LiveAlpacaAllocator:
                         **((slot_record.metadata if slot_record else None) or {}),
                         "opened_at": allocation.reserved_at.isoformat(),
                         "entry_price": entry_price,
+                        "slot_value_multiplier": slot_value_multiplier,
+                        "effective_slot_value": effective_slot_value,
                         "broker_order_id": submission.broker_order_id,
+                        **protective_stop_metadata,
                     },
                     updated_at=self.clock.now_utc(),
                 )
@@ -859,6 +1131,18 @@ class LiveAlpacaAllocator:
                 )
 
         return result
+
+    def _slot_value_multiplier(self, metadata: dict[str, Any]) -> float:
+        raw_value = metadata.get("slot_value_multiplier", 1.0)
+        try:
+            multiplier = float(raw_value)
+        except (TypeError, ValueError):
+            logger.warning("LIVE: ignoring invalid slot_value_multiplier=%r", raw_value)
+            return 1.0
+        if not math.isfinite(multiplier) or multiplier <= 0:
+            logger.warning("LIVE: ignoring invalid slot_value_multiplier=%r", raw_value)
+            return 1.0
+        return min(multiplier, 1.0)
 
 
 class LiveAlpacaPositionMonitor:
@@ -912,7 +1196,8 @@ class LiveAlpacaPositionMonitor:
                                     sec = parts[sec_idx].strip()
                                     if sym and sec:
                                         self.__sector_map[sym] = sec
-            except Exception:
+            except Exception as exc:
+                logger.warning("sector map load failed: %s", exc)
                 pass
         return self.__sector_map
 
@@ -951,8 +1236,82 @@ class LiveAlpacaPositionMonitor:
             return 0
         local_open = self.repository.positions.list_open()
         local_symbols = {(p.symbol or "").upper() for p in local_open}
+        broker_symbols = {(p.symbol or "").upper() for p in alpaca_positions}
 
-        added = 0
+        changes = 0
+        for local_position in local_open:
+            local_symbol = (local_position.symbol or "").upper()
+            if local_symbol in broker_symbols:
+                continue
+            local_metadata = getattr(local_position, "metadata", {}) or {}
+            stop_order_id = local_metadata.get("protective_stop_order_id")
+            actual_fill = None
+            if stop_order_id:
+                try:
+                    actual_fill = await self.broker.get_fill_price(str(stop_order_id))
+                except Exception as exc:
+                    logger.warning(
+                        "monitor reconcile: protective stop fill lookup failed for %s order=%s: %s",
+                        local_symbol,
+                        stop_order_id,
+                        exc,
+                    )
+            exit_price = (
+                actual_fill
+                or local_metadata.get("protective_stop_price")
+                or getattr(local_position, "stop_price", None)
+                or local_metadata.get("current_price")
+                or getattr(local_position, "entry_price", 0.0)
+            )
+            entry_price = float(getattr(local_position, "entry_price", 0.0) or 0.0)
+            quantity = float(getattr(local_position, "quantity", 0.0) or 0.0)
+            realized = (float(exit_price) - entry_price) * quantity
+            close_reason = (
+                "broker_protective_stop_filled"
+                if stop_order_id
+                else "broker_position_missing_at_reconcile"
+            )
+            try:
+                self.repository.positions.close(
+                    position_id=getattr(local_position, "id"),
+                    exit_reason=close_reason,
+                    realized_pnl=realized,
+                    closed_at=self.clock.now_utc(),
+                    metadata={
+                        "exit_price": float(exit_price),
+                        "broker_exit_order_id": stop_order_id,
+                        "exit_close_path": "reconciled_from_broker_absence",
+                        "protective_stop_fill_reconciled": bool(stop_order_id),
+                    },
+                )
+                slot_id = getattr(local_position, "slot_id", None)
+                if slot_id is not None:
+                    self.repository.slots.upsert(
+                        slot_id,
+                        status="EMPTY",
+                        symbol=None,
+                        slot_value=self.settings.slot_value,
+                        metadata={
+                            "last_symbol": local_symbol,
+                            "last_exit_reason": close_reason,
+                            "emptied_at": self.clock.now_utc().isoformat(),
+                            "empty_reason": f"Closed: {close_reason}",
+                        },
+                        updated_at=self.clock.now_utc(),
+                    )
+                changes += 1
+                logger.warning(
+                    "monitor reconcile: closed local %s because broker no longer reports the position (reason=%s)",
+                    local_symbol,
+                    close_reason,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "monitor reconcile: failed to close broker-missing local %s: %s",
+                    local_symbol,
+                    exc,
+                )
+
         for ap in alpaca_positions:
             sym = (ap.symbol or "").upper()
             if sym in local_symbols:
@@ -979,6 +1338,8 @@ class LiveAlpacaPositionMonitor:
             try:
                 slot_md = json.loads(slot_md_raw)
             except (TypeError, json.JSONDecodeError):
+                # Older slot rows may not have JSON metadata; fall back to
+                # empty metadata and still reconcile the broker position.
                 pass
             cand = slot_md.get("candidate", {})
             entry_price = float(ap.average_entry_price)
@@ -1019,14 +1380,14 @@ class LiveAlpacaPositionMonitor:
                     slot_value=getattr(slot, "slot_value", self.settings.slot_value),
                     updated_at=datetime.now(timezone.utc),
                 )
-                added += 1
+                changes += 1
                 logger.info(
                     "monitor reconcile: created local position %s qty=%s entry=$%.2f from alpaca state",
                     sym, ap.quantity, entry_price,
                 )
             except Exception as exc:
                 logger.warning("monitor reconcile: failed to create local %s position: %s", sym, exc)
-        return added
+        return changes
 
     def _get_signal(self):
         if self._signal is not None:
@@ -1061,6 +1422,7 @@ class LiveAlpacaPositionMonitor:
             try:
                 position_metadata = dict(getattr(position, "metadata", {}) or {})
             except Exception:
+                # Malformed legacy metadata should not block exit evaluation.
                 position_metadata = {}
             position_id = getattr(position, "id", None)
             prev_peak = (
@@ -1078,6 +1440,8 @@ class LiveAlpacaPositionMonitor:
                 if hasattr(position, "current_price"):
                     object.__setattr__(position, "current_price", mid)
             except Exception:
+                # PositionRecord is frozen; this is a best-effort in-memory hint
+                # for signal exit evaluation only.
                 pass
 
             try:
@@ -1140,6 +1504,69 @@ class LiveAlpacaPositionMonitor:
                 "LIVE: signal requests exit symbol=%s reason=%s unrealized=%.3f%% peak=%.3f%%",
                 symbol, exit_reason, unrealized_pct, new_peak,
             )
+            protective_stop_close_metadata = await self._cancel_protective_stop(
+                position,
+                reason=exit_reason,
+            )
+            if (
+                protective_stop_close_metadata.get("protective_stop_cancel_status")
+                == "cancel_failed"
+            ):
+                try:
+                    live_positions = await asyncio.wait_for(
+                        self.broker.get_open_positions(), timeout=5.0,
+                    )
+                    position_gone_after_cancel_failure = not any(
+                        p.symbol.upper() == symbol for p in live_positions
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "LIVE: post-stop-cancel position check failed for %s: %s",
+                        symbol,
+                        exc,
+                    )
+                    position_gone_after_cancel_failure = False
+                if position_gone_after_cancel_failure:
+                    exit_price = (
+                        protective_stop_close_metadata.get("protective_stop_price")
+                        or getattr(position, "stop_price", None)
+                        or mid
+                    )
+                    realized = (float(exit_price) - entry_price) * quantity
+                    self.repository.positions.close(
+                        position_id=getattr(position, "id"),
+                        exit_reason="broker_protective_stop_filled",
+                        realized_pnl=realized,
+                        closed_at=self.clock.now_utc(),
+                        metadata={
+                            "exit_price": float(exit_price),
+                            "exit_close_path": "reconciled_after_stop_cancel_failure",
+                            "peak_unrealized_pct": new_peak,
+                            **protective_stop_close_metadata,
+                        },
+                    )
+                    slot_id = getattr(position, "slot_id", None)
+                    if slot_id is not None:
+                        self.repository.slots.upsert(
+                            slot_id,
+                            status="EMPTY",
+                            symbol=None,
+                            slot_value=self.settings.slot_value,
+                            metadata={
+                                "last_symbol": symbol,
+                                "last_exit_reason": "broker_protective_stop_filled",
+                                "emptied_at": self.clock.now_utc().isoformat(),
+                                "empty_reason": "Closed: broker_protective_stop_filled",
+                            },
+                            updated_at=self.clock.now_utc(),
+                        )
+                    return 1
+                logger.warning(
+                    "LIVE: skipping software exit for %s because protective stop cancel failed",
+                    symbol,
+                )
+                return 0
+
             exit_result = None
             broker_race_filled = False
             try:
@@ -1166,7 +1593,12 @@ class LiveAlpacaPositionMonitor:
                 position_gone = not any(
                     p.symbol.upper() == symbol for p in live_positions
                 )
-            except Exception:
+            except Exception as exc:
+                logger.warning(
+                    "LIVE: post-exit position verification failed for %s: %s",
+                    symbol,
+                    exc,
+                )
                 position_gone = False
 
             if exit_result and exit_result.submitted:
@@ -1179,8 +1611,13 @@ class LiveAlpacaPositionMonitor:
                 if broker_oid:
                     try:
                         actual_fill = await self.broker.get_fill_price(broker_oid)
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logger.warning(
+                            "LIVE: exit fill-price lookup failed for %s order=%s: %s",
+                            symbol,
+                            broker_oid,
+                            exc,
+                        )
                 exit_price = actual_fill or exit_result.limit_price or mid
                 if actual_fill:
                     logger.info(
@@ -1197,8 +1634,13 @@ class LiveAlpacaPositionMonitor:
                 if broker_oid:
                     try:
                         actual_fill = await self.broker.get_fill_price(broker_oid)
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logger.warning(
+                            "LIVE: race exit fill-price lookup failed for %s order=%s: %s",
+                            symbol,
+                            broker_oid,
+                            exc,
+                        )
                 exit_price = actual_fill or mid
                 if actual_fill:
                     logger.info(
@@ -1220,6 +1662,7 @@ class LiveAlpacaPositionMonitor:
                         "broker_exit_order_id": broker_oid,
                         "exit_close_path": close_reason_label,
                         "peak_unrealized_pct": new_peak,
+                        **protective_stop_close_metadata,
                     },
                 )
                 slot_id = getattr(position, "slot_id", None)
@@ -1256,6 +1699,44 @@ class LiveAlpacaPositionMonitor:
         except Exception as exc:
             logger.exception("monitor: unexpected error processing %s: %s", symbol, exc)
             return 0
+
+    async def _cancel_protective_stop(self, position: Any, *, reason: str) -> dict[str, Any]:
+        metadata = getattr(position, "metadata", {}) or {}
+        broker_order_id = metadata.get("protective_stop_order_id")
+        if not broker_order_id:
+            return {}
+        stop_price = metadata.get("protective_stop_price") or getattr(
+            position,
+            "stop_price",
+            None,
+        )
+        try:
+            await self.broker.cancel_order(str(broker_order_id))
+            logger.info(
+                "LIVE: canceled protective stop for %s order=%s reason=%s",
+                getattr(position, "symbol", "UNKNOWN"),
+                broker_order_id,
+                reason,
+            )
+            return {
+                "protective_stop_cancel_status": "canceled",
+                "protective_stop_canceled_order_id": str(broker_order_id),
+                "protective_stop_price": stop_price,
+            }
+        except Exception as exc:
+            logger.warning(
+                "LIVE: protective stop cancel failed for %s order=%s reason=%s: %s",
+                getattr(position, "symbol", "UNKNOWN"),
+                broker_order_id,
+                reason,
+                exc,
+            )
+            return {
+                "protective_stop_cancel_status": "cancel_failed",
+                "protective_stop_canceled_order_id": str(broker_order_id),
+                "protective_stop_cancel_error": str(exc),
+                "protective_stop_price": stop_price,
+            }
 
     async def monitor_open_positions(self) -> int:
         """Process every open position in PARALLEL within one cycle.

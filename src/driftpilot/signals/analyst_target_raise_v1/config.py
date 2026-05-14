@@ -31,7 +31,13 @@ class AnalystTargetRaiseConfig:
     max_hold_minutes: int = 60
     profit_take_pct: float = 0.8
     stop_loss_pct: float = 1.0
-    max_event_age_minutes: int = 60
+    max_event_age_minutes: int = 240
+    # v3 directional gate: only admit events whose Qwen-enriched sentiment
+    # matches this value.  None = admit all (blind).  "positive" = Qwen
+    # must have tagged the headline positive before the signal emits a
+    # candidate.  Without this, 97% of analyst_target_raise trades were
+    # entering blind on every upgrade regardless of quality.
+    require_sentiment: str | None = "positive"
 
 
 __all__ = [

@@ -28,19 +28,22 @@ def _event(symbol: str, ts: datetime) -> CatalystEvent:
         source="unit-test",
         horizon_minutes=60,
         headline_hash=f"hash-{symbol}-{ts.isoformat()}",
+        sentiment="positive",
+        priority_modifier=0.08,
     )
 
 
 def test_stale_event_does_not_produce_candidate() -> None:
     bus = CatalystEventBus()
-    now_holder = {"now": T0 + timedelta(minutes=120)}
+    cfg = AnalystTargetRaiseConfig()
+    now_holder = {"now": T0 + timedelta(minutes=cfg.max_event_age_minutes + 1)}
     sig = AnalystTargetRaiseV1Signal(
-        AnalystTargetRaiseConfig(),
+        cfg,
         bus,
         clock=lambda: now_holder["now"],
     )
 
-    # Event published at T0 — 120 minutes stale relative to clock.
+    # Event published at T0 — just past the configured age window.
     asyncio.run(bus.publish(_event("AAPL", T0)))
     candidates = sig.scan()
     assert candidates == []

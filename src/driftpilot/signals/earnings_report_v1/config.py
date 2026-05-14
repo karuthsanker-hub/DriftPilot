@@ -28,3 +28,10 @@ class EarningsReportConfig:
     # all events (matches the spike behavior). Set to "positive" for the
     # validated GATED config (Jul-Dec 2024: edge_ratio=1.105, N=185).
     require_sentiment: str | None = "positive"
+    # Defect #11 hardening: a positive sentiment label is not enough by
+    # itself. Positive-gated candidates must also carry positive expected
+    # magnitude unless explicitly disabled for forensic replay.
+    require_positive_priority_modifier: bool = True
+    # Optional confidence floor. A value <= 0 disables this gate. When enabled,
+    # it is only applied when confidence is available from catalyst enrichment.
+    min_sentiment_confidence: float = 0.0

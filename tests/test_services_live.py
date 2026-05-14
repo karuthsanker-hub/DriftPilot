@@ -6,6 +6,7 @@ allocator/monitor wiring without touching the network.
 
 from __future__ import annotations
 
+import sqlite3
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -221,6 +222,215 @@ async def test_catalyst_scanner_skips_when_no_quote(settings, repo):
 
 
 @pytest.mark.asyncio
+async def test_catalyst_scanner_reuses_repo_price_drift_baseline_after_restart(tmp_path):
+    from driftpilot.services_live import CatalystScannerService
+    from driftpilot.signals.base import Candidate
+
+    class StaticSignal:
+        name = "earnings_report_v1"
+
+        def scan(self, *, now):
+            return [
+                Candidate(
+                    symbol="DRFT",
+                    score=1.0,
+                    sector="Tech",
+                    allowed=True,
+                    features={
+                        "headline_hash": "drft_beat",
+                        "headline": "DriftCo beats estimates",
+                        "sentiment": "positive",
+                    },
+                )
+            ]
+
+    db_path = tmp_path / "ops.db"
+    clock = DriftPilotClock("America/New_York")
+    first_repo = DriftPilotRepository.open(db_path, clock)
+    first_qp = MagicMock()
+    first_qp.latest_quote = MagicMock(
+        return_value=MarketQuote(
+            symbol="DRFT",
+            timestamp=datetime.now(timezone.utc),
+            bid_price=99.95,
+            ask_price=100.05,
+        )
+    )
+    first_scanner = CatalystScannerService(
+        signal=StaticSignal(),
+        quote_provider=first_qp,
+        clock=clock,
+        repository=first_repo,
+    )
+
+    first_result = await first_scanner.scan()
+    assert len(first_result.candidates) == 1
+    assert first_result.candidates[0].metadata["first_seen_price"] == pytest.approx(
+        100.0
+    )
+
+    second_repo = DriftPilotRepository.open(db_path, clock)
+    second_qp = MagicMock()
+    second_qp.latest_quote = MagicMock(
+        return_value=MarketQuote(
+            symbol="DRFT",
+            timestamp=datetime.now(timezone.utc),
+            bid_price=103.95,
+            ask_price=104.05,
+        )
+    )
+    second_scanner = CatalystScannerService(
+        signal=StaticSignal(),
+        quote_provider=second_qp,
+        clock=clock,
+        repository=second_repo,
+    )
+    second_scanner._max_price_drift_pct = 3.0
+
+    second_result = await second_scanner.scan()
+
+    assert second_result.candidates == []
+    baseline = second_repo.price_drift_baselines.get("DRFT", "drft_beat")
+    assert baseline is not None
+    assert baseline.first_seen_price == pytest.approx(100.0)
+    assert baseline.last_seen_price == pytest.approx(104.0)
+    assert baseline.drift_pct == pytest.approx(4.0)
+
+
+@pytest.mark.asyncio
+async def test_catalyst_scanner_rejects_high_atr_from_context(settings, repo, tmp_path):
+    """High ATR candidates are blocked before allocation, but missing ATR stays non-fatal."""
+    from driftpilot.services_live import CatalystScannerService
+    from driftpilot.signals.base import Candidate
+    from driftpilot.runtime_config import save_runtime_config
+
+    runtime_config_path = tmp_path / "runtime_config.json"
+    save_runtime_config(
+        {
+            "max_entry_atr_pct": 6.0,
+            "high_volatility_slot_multiplier": 0.5,
+        },
+        runtime_config_path,
+    )
+
+    class _Signal:
+        name = "test_signal"
+
+        async def scan(self, now=None):
+            return [
+                Candidate(
+                    symbol="TALO",
+                    score=1.0,
+                    sector="Energy",
+                    allowed=True,
+                    features={
+                        "headline": "TALO moves on catalyst",
+                        "headline_hash": "talo-high-atr",
+                        "context_json": '{"atr_pct": 8.12}',
+                    },
+                )
+            ]
+
+    fake_qp = MagicMock(spec=AlpacaRestQuoteProvider)
+    fake_qp.latest_quote = MagicMock(return_value=MarketQuote(
+        symbol="TALO", timestamp=datetime.now(timezone.utc),
+        bid_price=49.95, ask_price=50.05,
+    ))
+
+    scanner = CatalystScannerService(
+        signal=_Signal(),
+        quote_provider=fake_qp,
+        clock=DriftPilotClock(settings.timezone),
+        runtime_config_path=str(runtime_config_path),
+        repository=repo,
+    )
+
+    result = await scanner.scan()
+
+    assert result.candidates == []
+    assert repo.candidate_queue.blocked_reason("TALO") == "high_volatility_atr"
+
+
+@pytest.mark.asyncio
+async def test_catalyst_scanner_reads_atr_context_from_signal_db(settings, repo, tmp_path):
+    """Production catalyst candidates can be ATR-filtered via catalyst DB context_json."""
+    from driftpilot.runtime_config import save_runtime_config
+    from driftpilot.services_live import CatalystScannerService
+    from driftpilot.signals.base import Candidate
+
+    runtime_config_path = tmp_path / "runtime_config.json"
+    save_runtime_config(
+        {
+            "max_entry_atr_pct": 6.0,
+            "high_volatility_slot_multiplier": 0.5,
+        },
+        runtime_config_path,
+    )
+    catalyst_db_path = tmp_path / "catalyst.sqlite3"
+    conn = sqlite3.connect(catalyst_db_path)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE catalyst_events (
+                symbol TEXT,
+                headline_hash TEXT,
+                event_ts TEXT,
+                context_json TEXT
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO catalyst_events VALUES (?, ?, ?, ?)",
+            (
+                "TALO",
+                "talo-db-context",
+                datetime.now(timezone.utc).isoformat(),
+                '{"atr_pct": 8.12}',
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    class _Signal:
+        name = "earnings_report_v1"
+        _db_path = str(catalyst_db_path)
+
+        async def scan(self, now=None):
+            return [
+                Candidate(
+                    symbol="TALO",
+                    score=1.0,
+                    sector="Energy",
+                    allowed=True,
+                    features={
+                        "headline": "TALO moves on catalyst",
+                        "headline_hash": "talo-db-context",
+                    },
+                )
+            ]
+
+    fake_qp = MagicMock(spec=AlpacaRestQuoteProvider)
+    fake_qp.latest_quote = MagicMock(return_value=MarketQuote(
+        symbol="TALO", timestamp=datetime.now(timezone.utc),
+        bid_price=49.95, ask_price=50.05,
+    ))
+
+    scanner = CatalystScannerService(
+        signal=_Signal(),
+        quote_provider=fake_qp,
+        clock=DriftPilotClock(settings.timezone),
+        runtime_config_path=str(runtime_config_path),
+        repository=repo,
+    )
+
+    result = await scanner.scan()
+
+    assert result.candidates == []
+    assert repo.candidate_queue.blocked_reason("TALO") == "high_volatility_atr"
+
+
+@pytest.mark.asyncio
 async def test_live_allocator_records_catalyst_metadata_on_position(settings, repo):
     """Audit contract: the position record must include catalyst event chain
     metadata so the EOD audit script can reconstruct the trade."""
@@ -232,6 +442,11 @@ async def test_live_allocator_records_catalyst_metadata_on_position(settings, re
     fake_broker.submit_entry_order = AsyncMock(return_value=OrderSubmissionResult(
         submitted=True, broker_order_id="ord-789", symbol="AAPL", side="buy",
         quantity=5, order_type="limit", limit_price=200.10, reason="filled",
+        metadata={
+            "protective_stop_order_id": "stop-789",
+            "protective_stop_price": 198.10,
+            "protective_stop_pct": settings.stop_pct,
+        },
     ))
 
     allocator = LiveAlpacaAllocator(repo, settings, fake_broker)
@@ -271,6 +486,53 @@ async def test_live_allocator_records_catalyst_metadata_on_position(settings, re
     assert "Apple beats" in (md.get("catalyst_headline") or "")
     assert md.get("catalyst_event_age_min_at_entry") == 12.5
     assert md.get("broker_order_id") == "ord-789"
+    assert md.get("protective_stop_order_id") == "stop-789"
+    assert md.get("protective_stop_price") == 198.10
+
+
+@pytest.mark.asyncio
+async def test_live_allocator_applies_slot_value_multiplier(settings, repo):
+    """Allocator uses candidate slot_value_multiplier for quantity and position metadata."""
+    from driftpilot.execution.slot_allocator import (
+        AllocationCandidate, AllocationResult, SlotAllocation,
+    )
+
+    fake_broker = MagicMock(spec=AlpacaBrokerClient)
+    fake_broker.submit_entry_order = AsyncMock(return_value=OrderSubmissionResult(
+        submitted=True, broker_order_id="ord-half", symbol="JXN", side="buy",
+        quantity=2, order_type="limit", limit_price=200.0, reason="filled",
+    ))
+
+    allocator = LiveAlpacaAllocator(repo, settings, fake_broker)
+    fake_alloc_result = AllocationResult(
+        allocations=(SlotAllocation(
+            symbol="JXN", slot_id=1, slot_value=1000.0, sector="Financials",
+            rank=1, score=1.0, reserved_at=datetime.now(timezone.utc),
+        ),),
+        rejections=(),
+    )
+    allocator.allocator = MagicMock()
+    allocator.allocator.allocate = AsyncMock(return_value=fake_alloc_result)
+
+    repo.slots.upsert(1, status="OPEN", symbol="JXN", slot_value=1000, updated_at=datetime.now(timezone.utc))
+    candidates = [AllocationCandidate(
+        symbol="JXN", score=1.0, sector="Financials",
+        latest_bar_at=datetime.now(timezone.utc),
+        metadata={"reference_price": 200.0, "slot_value_multiplier": 0.5},
+    )]
+
+    await allocator.allocate(candidates)
+
+    fake_broker.submit_entry_order.assert_awaited_once_with(
+        symbol="JXN",
+        quantity=2,
+        slot_id=1,
+        protective_stop_pct=settings.stop_pct,
+    )
+    pos = repo.positions.list_open()[0]
+    assert pos.quantity == 2
+    assert pos.metadata["slot_value_multiplier"] == 0.5
+    assert pos.metadata["effective_slot_value"] == 500.0
 
 
 @pytest.mark.asyncio
@@ -284,10 +546,20 @@ async def test_live_monitor_calls_signal_evaluate_exit(settings, repo, monkeypat
         reason: str
 
     fake_broker = MagicMock(spec=AlpacaBrokerClient)
-    fake_broker.submit_exit_order = AsyncMock(return_value=OrderSubmissionResult(
-        submitted=True, broker_order_id="ord-123", symbol="AAPL", side="sell",
-        quantity=5, order_type="limit", limit_price=205.0, reason="exit_submitted",
-    ))
+    call_order: list[str] = []
+
+    async def _submit_exit_order(**_kwargs):
+        call_order.append("submit_exit")
+        return OrderSubmissionResult(
+            submitted=True, broker_order_id="ord-123", symbol="AAPL", side="sell",
+            quantity=5, order_type="limit", limit_price=205.0, reason="exit_submitted",
+        )
+
+    async def _cancel_order(_order_id):
+        call_order.append("cancel_stop")
+
+    fake_broker.submit_exit_order = AsyncMock(side_effect=_submit_exit_order)
+    fake_broker.cancel_order = AsyncMock(side_effect=_cancel_order)
     fake_broker.get_fill_price = AsyncMock(return_value=205.0)
     fake_broker.get_open_positions = AsyncMock(return_value=[])
 
@@ -311,7 +583,8 @@ async def test_live_monitor_calls_signal_evaluate_exit(settings, repo, monkeypat
         target_price=202.0, stop_price=197.0, slot_id=1,
         opened_at=datetime.now(timezone.utc),
         metadata={"reference_price": 200.0, "current_price": 200.0,
-                  "entry_ts": datetime.now(timezone.utc).isoformat(), "entry_price": 200.0},
+                  "entry_ts": datetime.now(timezone.utc).isoformat(), "entry_price": 200.0,
+                  "protective_stop_order_id": "stop-123"},
     )
 
     await monitor.monitor_open_positions()
@@ -319,5 +592,54 @@ async def test_live_monitor_calls_signal_evaluate_exit(settings, repo, monkeypat
     fake_qp.latest_quote.assert_called_once_with("AAPL")
     fake_signal.evaluate_exit.assert_called_once()
     fake_broker.submit_exit_order.assert_awaited_once()
+    fake_broker.cancel_order.assert_awaited_once_with("stop-123")
+    assert call_order == ["cancel_stop", "submit_exit"]
     # Position should be closed
     assert len(repo.positions.list_open()) == 0
+
+
+@pytest.mark.asyncio
+async def test_live_monitor_reconciles_filled_protective_stop(settings, repo):
+    fake_broker = MagicMock(spec=AlpacaBrokerClient)
+    fake_broker.get_open_positions = AsyncMock(return_value=[])
+    fake_broker.get_fill_price = AsyncMock(return_value=198.0)
+
+    fake_qp = MagicMock(spec=AlpacaRestQuoteProvider)
+    fake_qp.latest_quote = MagicMock(return_value=MarketQuote(
+        symbol="AAPL", timestamp=datetime.now(timezone.utc),
+        bid_price=197.95, ask_price=198.05,
+    ))
+
+    monitor = LiveAlpacaPositionMonitor(repo, settings, fake_broker, fake_qp)
+    repo.slots.upsert(
+        1,
+        status="OPEN",
+        symbol="AAPL",
+        slot_value=1000,
+        updated_at=datetime.now(timezone.utc),
+    )
+    position = repo.positions.create_open(
+        symbol="AAPL",
+        quantity=5,
+        entry_price=200.0,
+        target_price=202.0,
+        stop_price=198.0,
+        slot_id=1,
+        opened_at=datetime.now(timezone.utc),
+        metadata={
+            "protective_stop_order_id": "stop-123",
+            "protective_stop_price": 198.0,
+        },
+    )
+
+    changes = await monitor._reconcile_alpaca_to_local()
+
+    assert changes == 1
+    closed = repo.positions.get(position.id)
+    assert closed is not None
+    assert closed.status == "closed"
+    assert closed.exit_reason == "broker_protective_stop_filled"
+    assert closed.realized_pnl == pytest.approx(-10.0)
+    slot = repo.slots.get(1)
+    assert slot is not None
+    assert slot.status == "EMPTY"

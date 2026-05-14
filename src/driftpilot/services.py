@@ -139,6 +139,7 @@ class PaperExecutionAllocator:
             settings,
             clock=self.clock,
             catalyst_db_path=catalyst_db_path,
+            consecutive_loss_limit=settings.consecutive_loss_limit,
         )
         self.fills = PaperFillEngine(repository, settings, clock=self.clock)
 

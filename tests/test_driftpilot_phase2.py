@@ -94,6 +94,135 @@ def test_entry_order_uses_marketable_limit_from_fresh_quote() -> None:
     assert request.limit_price == 100.05
 
 
+def test_entry_order_submits_protective_stop_after_fill() -> None:
+    now = datetime(2026, 4, 30, 14, 0, tzinfo=UTC)
+    trading_client = FakeTradingClient()
+    quote_provider = FakeQuoteProvider(
+        MarketQuote(
+            symbol="AAPL",
+            timestamp=now,
+            bid_price=99.95,
+            ask_price=100.00,
+        )
+    )
+    broker = AlpacaBrokerClient(
+        DriftPilotSettings(),
+        clock=FixedClock(fixed_now=now),
+        trading_client=trading_client,
+        quote_provider=quote_provider,
+    )
+
+    result = asyncio.run(
+        broker.submit_entry_order(
+            symbol="aapl",
+            quantity=10,
+            slot_id=1,
+            protective_stop_pct=0.01,
+        )
+    )
+
+    entry_request, stop_request = trading_client.submitted_requests
+    assert result.submitted is True
+    assert result.metadata["protective_stop_order_id"] == "order-2"
+    assert result.metadata["protective_stop_price"] == 99.05
+    assert entry_request.side.value == "buy"
+    assert entry_request.type.value == "limit"
+    assert stop_request.symbol == "AAPL"
+    assert stop_request.side.value == "sell"
+    assert stop_request.type.value == "stop"
+    assert float(stop_request.stop_price) == 99.05
+
+
+def test_entry_order_flattens_when_protective_stop_submission_fails() -> None:
+    class StopFailsTradingClient(FakeTradingClient):
+        def submit_order(self, request: Any) -> Any:
+            if len(self.submitted_requests) == 1:
+                self.submitted_requests.append(request)
+                raise RuntimeError("stop rejected")
+            return super().submit_order(request)
+
+    now = datetime(2026, 4, 30, 14, 0, tzinfo=UTC)
+    trading_client = StopFailsTradingClient()
+    quote_provider = FakeQuoteProvider(
+        MarketQuote(
+            symbol="AAPL",
+            timestamp=now,
+            bid_price=99.95,
+            ask_price=100.00,
+        )
+    )
+    broker = AlpacaBrokerClient(
+        DriftPilotSettings(),
+        clock=FixedClock(fixed_now=now),
+        trading_client=trading_client,
+        quote_provider=quote_provider,
+    )
+
+    result = asyncio.run(
+        broker.submit_entry_order(
+            symbol="aapl",
+            quantity=10,
+            slot_id=1,
+            protective_stop_pct=0.01,
+        )
+    )
+
+    assert result.submitted is False
+    assert result.reason == "protective_stop_failed_flattened"
+    assert result.metadata["flatten_order_id"] == "order-3"
+    assert [request.type.value for request in trading_client.submitted_requests] == [
+        "limit",
+        "stop",
+        "market",
+    ]
+    assert trading_client.submitted_requests[2].side.value == "sell"
+
+
+def test_entry_order_cancels_when_fill_state_is_unknown() -> None:
+    class UnknownFillTradingClient:
+        def __init__(self) -> None:
+            self.submitted_requests: list[Any] = []
+            self.canceled: list[str] = []
+
+        def submit_order(self, request: Any) -> Any:
+            self.submitted_requests.append(request)
+            return SimpleNamespace(id="order-unknown")
+
+        def cancel_order_by_id(self, order_id: str) -> None:
+            self.canceled.append(order_id)
+
+    now = datetime(2026, 4, 30, 14, 0, tzinfo=UTC)
+    trading_client = UnknownFillTradingClient()
+    quote_provider = FakeQuoteProvider(
+        MarketQuote(
+            symbol="AAPL",
+            timestamp=now,
+            bid_price=99.95,
+            ask_price=100.00,
+        )
+    )
+    broker = AlpacaBrokerClient(
+        DriftPilotSettings(entry_limit_timeout_seconds=0),
+        clock=FixedClock(fixed_now=now),
+        trading_client=trading_client,
+        quote_provider=quote_provider,
+    )
+
+    result = asyncio.run(
+        broker.submit_entry_order(
+            symbol="aapl",
+            quantity=10,
+            slot_id=1,
+            protective_stop_pct=0.01,
+        )
+    )
+
+    assert result.submitted is False
+    assert result.reason == "entry_unknown_fill_state_cancel_recycle"
+    assert trading_client.canceled == ["order-unknown"]
+    assert len(trading_client.submitted_requests) == 1
+
+
 def test_exit_order_falls_back_to_market_when_quote_stale_and_stop_breached() -> None:
     now = datetime(2026, 4, 30, 14, 0, tzinfo=UTC)
     repo = DriftPilotRepository.open(":memory:", FixedClock(fixed_now=now))

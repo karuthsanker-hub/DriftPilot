@@ -41,7 +41,8 @@ def test_default_config_values() -> None:
     assert cfg.max_hold_minutes == 60
     assert cfg.profit_take_pct == 0.8
     assert cfg.stop_loss_pct == 1.0
-    assert cfg.max_event_age_minutes == 60
+    assert cfg.max_event_age_minutes == 240
+    assert cfg.require_sentiment == "positive"
 
 
 def test_constructor_requires_bus() -> None:

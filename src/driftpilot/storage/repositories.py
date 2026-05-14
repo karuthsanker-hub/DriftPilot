@@ -194,6 +194,18 @@ class CandidateRow:
 
 
 @dataclass(frozen=True, slots=True)
+class PriceDriftBaselineRecord:
+    symbol: str
+    event_key: str
+    first_seen_price: float
+    first_seen_at: datetime
+    last_seen_price: float
+    last_seen_at: datetime
+    drift_pct: float
+    metadata: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class RecycleEvent:
     id: int
     slot_id: int
@@ -570,6 +582,29 @@ class PositionRepository:
             (position_id,),
         ).fetchone()
         return self._from_row(row)
+
+    def update_metadata(
+        self,
+        position_id: int,
+        metadata: dict[str, Any],
+    ) -> PositionRecord:
+        existing = self.get(position_id)
+        if existing is None:
+            raise ValueError(f"position {position_id} does not exist")
+        merged_metadata = {**(existing.metadata or {}), **metadata}
+        self.connection.execute(
+            """
+            UPDATE positions
+            SET metadata_json = ?
+            WHERE id = ?
+            """,
+            (_json_dumps(merged_metadata), position_id),
+        )
+        self.connection.commit()
+        updated = self.get(position_id)
+        if updated is None:
+            raise RuntimeError("updated position disappeared")
+        return updated
 
     def reconcile_broker_open_positions(
         self,
@@ -1199,6 +1234,152 @@ class CandidateQueueRepository:
         return None if row is None else row["blocked_reason"]
 
 
+class PriceDriftBaselineRepository:
+    def __init__(
+        self, connection: sqlite3.Connection, clock: DriftPilotClock | None = None
+    ) -> None:
+        self.connection = connection
+        self.clock = clock or DriftPilotClock()
+
+    def get(self, symbol: str, event_key: str) -> PriceDriftBaselineRecord | None:
+        row = self.connection.execute(
+            """
+            SELECT symbol, event_key, first_seen_price, first_seen_at,
+                   last_seen_price, last_seen_at, drift_pct, metadata_json
+            FROM price_drift_baselines
+            WHERE symbol = ? AND event_key = ?
+            """,
+            (symbol.upper(), event_key),
+        ).fetchone()
+        if row is None:
+            return None
+        return self._from_row(row)
+
+    def get_or_create(
+        self,
+        *,
+        symbol: str,
+        event_key: str,
+        price: float,
+        seen_at: datetime | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> PriceDriftBaselineRecord:
+        existing = self.get(symbol, event_key)
+        if existing is not None:
+            return existing
+        timestamp = seen_at or self.clock.now_utc()
+        normalized_symbol = symbol.upper()
+        self.connection.execute(
+            """
+            INSERT INTO price_drift_baselines (
+                symbol, event_key, first_seen_price, first_seen_at,
+                last_seen_price, last_seen_at, drift_pct, metadata_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, 0, ?)
+            """,
+            (
+                normalized_symbol,
+                event_key,
+                price,
+                datetime_to_storage(timestamp),
+                price,
+                datetime_to_storage(timestamp),
+                _json_dumps(metadata),
+            ),
+        )
+        self.connection.commit()
+        return PriceDriftBaselineRecord(
+            symbol=normalized_symbol,
+            event_key=event_key,
+            first_seen_price=price,
+            first_seen_at=timestamp,
+            last_seen_price=price,
+            last_seen_at=timestamp,
+            drift_pct=0.0,
+            metadata=metadata or {},
+        )
+
+    def update_seen(
+        self,
+        *,
+        symbol: str,
+        event_key: str,
+        price: float,
+        seen_at: datetime | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> PriceDriftBaselineRecord:
+        baseline = self.get_or_create(
+            symbol=symbol,
+            event_key=event_key,
+            price=price,
+            seen_at=seen_at,
+            metadata=metadata,
+        )
+        timestamp = seen_at or self.clock.now_utc()
+        drift_pct = (
+            abs(price - baseline.first_seen_price) / baseline.first_seen_price * 100.0
+            if baseline.first_seen_price > 0
+            else 0.0
+        )
+        merged_metadata = {**(baseline.metadata or {}), **(metadata or {})}
+        self.connection.execute(
+            """
+            UPDATE price_drift_baselines
+            SET last_seen_price = ?,
+                last_seen_at = ?,
+                drift_pct = ?,
+                metadata_json = ?
+            WHERE symbol = ? AND event_key = ?
+            """,
+            (
+                price,
+                datetime_to_storage(timestamp),
+                drift_pct,
+                _json_dumps(merged_metadata),
+                baseline.symbol,
+                baseline.event_key,
+            ),
+        )
+        self.connection.commit()
+        updated = self.get(baseline.symbol, baseline.event_key)
+        if updated is None:
+            raise RuntimeError("price drift baseline disappeared after update")
+        return updated
+
+    def list_recent(self, *, limit: int = 500) -> list[PriceDriftBaselineRecord]:
+        rows = self.connection.execute(
+            """
+            SELECT symbol, event_key, first_seen_price, first_seen_at,
+                   last_seen_price, last_seen_at, drift_pct, metadata_json
+            FROM price_drift_baselines
+            ORDER BY last_seen_at DESC, symbol, event_key
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return [self._from_row(row) for row in rows]
+
+    def prune_before(self, cutoff: datetime) -> int:
+        cursor = self.connection.execute(
+            "DELETE FROM price_drift_baselines WHERE last_seen_at < ?",
+            (datetime_to_storage(cutoff),),
+        )
+        self.connection.commit()
+        return cursor.rowcount if cursor.rowcount is not None else 0
+
+    def _from_row(self, row: sqlite3.Row) -> PriceDriftBaselineRecord:
+        return PriceDriftBaselineRecord(
+            symbol=row["symbol"],
+            event_key=row["event_key"],
+            first_seen_price=row["first_seen_price"],
+            first_seen_at=datetime_from_storage(row["first_seen_at"]),
+            last_seen_price=row["last_seen_price"],
+            last_seen_at=datetime_from_storage(row["last_seen_at"]),
+            drift_pct=row["drift_pct"],
+            metadata=_json_loads_object(row["metadata_json"]),
+        )
+
+
 class ErrorRepository:
     def __init__(
         self, connection: sqlite3.Connection, clock: DriftPilotClock | None = None
@@ -1303,6 +1484,9 @@ class DriftPilotRepository:
         self.allocator_state = AllocatorStateRepository(connection, self.clock)
         self.fills = FillRepository(connection)
         self.candidate_queue = CandidateQueueRepository(connection, self.clock)
+        self.price_drift_baselines = PriceDriftBaselineRepository(
+            connection, self.clock
+        )
         self.errors = ErrorRepository(connection, self.clock)
 
     @classmethod
