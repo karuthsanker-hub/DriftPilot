@@ -8,11 +8,11 @@ without relying on chat history.
 
 ## Critical files to read first
 
-1. `CODEX_HANDOFF.md` — **start here**. Current state, open bugs, next work items, architecture summary.
-2. `docs/PROJECT_OVERVIEW.md` — component map, state machine, signal registry, ER schema (all mermaid diagrams).
+1. `docs/LLD.md` — **start here**. Full architecture, data flow diagrams, component details, how to run.
+2. `CODEX_HANDOFF.md` — Current project state and what's running.
 3. `AGENTS.md` — hard rules that apply to all code changes.
-4. `REFACTOR_PLAN.md` — the authoritative spec (~1500 lines). Reference when in doubt.
-5. `docs/REFACTOR_PLAN_V3_CATALYST_LAYER.md` — the catalyst layer design (v3, the active workstream).
+4. `CODEX_TASKS.md` — All 10 tasks complete (reference only).
+5. `REFACTOR_PLAN.md` — the original authoritative spec. Reference when in doubt.
 
 ## Resume protocol for a fresh agent
 
