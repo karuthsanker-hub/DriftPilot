@@ -179,7 +179,7 @@ python -m pytest tests/ -x -q
 
 ---
 
-## TASK 8: Add tests for compute_dynamic_bands()
+## TASK 8: Add tests for compute_dynamic_bands()  ✅ DONE
 
 **Priority: MEDIUM** | **Files:** `tests/test_dynamic_bands.py` (new)
 
@@ -215,7 +215,7 @@ pass on both backends. Brain server now defaults to pgvector.
 
 ---
 
-## TASK 10: Add sector data to candidate features
+## TASK 10: Add sector data to candidate features  ✅ DONE
 
 **Priority: LOW** | **Files:** `src/driftpilot/catalyst/context_assembler.py`, `src/driftpilot/services_live.py`
 
@@ -242,9 +242,9 @@ pass on both backends. Brain server now defaults to pgvector.
 | 5 | /brain dashboard page | 🔓 Unblocked — ready for Codex |
 | 6 | Volume spike signal | ✅ Done |
 | 7 | P&L tracking dashboard | 🔓 Unblocked — ready for Codex |
-| 8 | Dynamic bands tests | Open |
+| 8 | Dynamic bands tests | ✅ Done (39 tests) |
 | 9 | pgvector migration | ✅ Done & deployed |
-| 10 | Sector data | Open |
+| 10 | Sector data | ✅ Done |
 
 ---
 
