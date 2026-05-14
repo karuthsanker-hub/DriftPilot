@@ -133,6 +133,99 @@ def create_app(env_path: Path | str = ".env") -> FastAPI:
         except Exception as exc:
             _raise_api_error(exc, "operator_diagnostics")
 
+    @app.get("/api/operator/pipeline")
+    def operator_pipeline():
+        """Candidate pipeline: last N scan cycles with full decision audit.
+
+        Shows every candidate considered, why it was accepted/rejected,
+        dynamic band calculations, slot status, and open positions.
+        """
+        try:
+            import json as _json
+            import sqlite3
+            from pathlib import Path as _Path
+
+            # Pipeline scan cycles
+            pipeline_path = _Path("data/driftpilot/pipeline_log.json")
+            cycles = []
+            if pipeline_path.exists():
+                cycles = _json.loads(pipeline_path.read_text())
+
+            # Slot + position status from operator DB
+            slots = []
+            positions = []
+            db_path = _Path("data/driftpilot/operator_state.sqlite3")
+            if db_path.exists():
+                conn = sqlite3.connect(db_path)
+                conn.row_factory = sqlite3.Row
+                for row in conn.execute(
+                    "SELECT slot_id, status, symbol, metadata_json FROM slots ORDER BY slot_id"
+                ):
+                    meta = _json.loads(row["metadata_json"] or "{}")
+                    slots.append({
+                        "slot_id": row["slot_id"],
+                        "status": row["status"],
+                        "symbol": row["symbol"],
+                        "entry_price": meta.get("entry_price"),
+                        "opened_at": meta.get("opened_at"),
+                    })
+                for row in conn.execute(
+                    "SELECT symbol, entry_price, target_price, stop_price, status, "
+                    "opened_at, metadata_json FROM positions WHERE status='open' "
+                    "ORDER BY opened_at DESC"
+                ):
+                    meta = _json.loads(row["metadata_json"] or "{}")
+                    positions.append({
+                        "symbol": row["symbol"],
+                        "entry_price": row["entry_price"],
+                        "target_price": row["target_price"],
+                        "stop_price": row["stop_price"],
+                        "opened_at": row["opened_at"],
+                        "signal_name": meta.get("signal_name"),
+                        "sector": meta.get("sector"),
+                        "dynamic_target_pct": meta.get("dynamic_target_pct"),
+                        "dynamic_stop_pct": meta.get("dynamic_stop_pct"),
+                        "band_reasoning": meta.get("dynamic_band_reasoning"),
+                        "band_atr_pct": meta.get("band_atr_pct"),
+                        "band_beta": meta.get("band_beta"),
+                        "band_drift_pct": meta.get("band_drift_pct"),
+                        "band_rvol": meta.get("band_rvol"),
+                        "catalyst_headline": meta.get("catalyst_headline"),
+                        "catalyst_sentiment": meta.get("catalyst_sentiment"),
+                    })
+                conn.close()
+
+            total_slots = len(slots) or 10
+            free_slots = sum(1 for s in slots if s["status"] in ("available", "FREE"))
+            open_symbols = {s["symbol"] for s in slots if s["symbol"]}
+
+            # Mark which accepted candidates are queued vs would-enter
+            for cycle in cycles:
+                for cand in cycle.get("candidates", []):
+                    if cand["symbol"] in open_symbols:
+                        cand["queue_status"] = "already_open"
+                    elif free_slots > 0:
+                        cand["queue_status"] = "would_enter"
+                    else:
+                        cand["queue_status"] = "waiting"
+
+            return {
+                "cycles": cycles,
+                "slots": slots,
+                "positions": positions,
+                "total_slots": total_slots,
+                "free_slots": free_slots,
+                "open_count": total_slots - free_slots,
+                "status": "ok",
+                "count": len(cycles),
+            }
+        except Exception as exc:
+            _raise_api_error(exc, "operator_pipeline")
+
+    @app.get("/pipeline", response_class=HTMLResponse)
+    def pipeline_page(request: Request):
+        return templates.TemplateResponse(request, "pipeline.html")
+
     @app.get("/agents", response_class=HTMLResponse)
     def agents_page(request: Request):
         return templates.TemplateResponse(request, "agents.html")

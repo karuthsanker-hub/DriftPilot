@@ -329,6 +329,16 @@ class CatalystScannerService:
         self._blocked_symbols: set[str] = set()
         self._blocked_date: str = ""  # YYYY-MM-DD; reset when date changes
         self._sector_map: dict[str, str] = {}
+        # Pipeline log: ring buffer of last N scan cycles with full candidate
+        # decisions for the dashboard. Each entry is a dict with:
+        #   ts, signal_total, blocked_count, candidates[], rejections[]
+        self._pipeline_log: list[dict[str, Any]] = []
+        self._pipeline_log_max: int = 20  # keep last 20 cycles
+
+    @property
+    def pipeline_log(self) -> list[dict[str, Any]]:
+        """Last N scan cycle pipeline decisions for the dashboard."""
+        return list(self._pipeline_log)
         if universe_path:
             try:
                 with open(universe_path) as f:
@@ -716,10 +726,12 @@ class CatalystScannerService:
             return _build_scan_result([], now)
 
         skipped_blocked = 0
+        _rejections: list[dict[str, Any]] = []  # pipeline log
         for rank, sc in enumerate(sig_candidates, start=1):
             # Skip symbols that we already know the allocator will reject.
             if sc.symbol.upper() in self._blocked_symbols:
                 skipped_blocked += 1
+                _rejections.append({"symbol": sc.symbol, "reason": "blocked", "detail": "day-cap/open/cooldown"})
                 continue
             quote = await asyncio.to_thread(self.quote_provider.latest_quote, sc.symbol)
             if quote is None:
@@ -727,6 +739,7 @@ class CatalystScannerService:
                     "catalyst scanner: no live quote for %s — skipping (broker would reject)",
                     sc.symbol,
                 )
+                _rejections.append({"symbol": sc.symbol, "reason": "no_quote", "detail": "no live quote"})
                 continue
             ref_price = (quote.bid_price + quote.ask_price) / 2.0
             features = dict(sc.features or {})
@@ -751,6 +764,13 @@ class CatalystScannerService:
                     sc.symbol, drift_pct, first_price, ref_price, max_drift,
                     (features.get("headline") or "")[:80],
                 )
+                _rejections.append({
+                    "symbol": sc.symbol, "reason": "drift",
+                    "detail": f"moved {drift_pct:.1f}% (max {max_drift}%)",
+                    "ref_price": round(ref_price, 2),
+                    "first_seen": round(first_price, 2),
+                    "drift_pct": round(drift_pct, 1),
+                })
                 continue
 
             atr_pct = self._candidate_atr_pct(sc.symbol, features)
@@ -771,6 +791,12 @@ class CatalystScannerService:
                     (features.get("headline") or "")[:80],
                 )
                 self._mark_candidate_blocked(sc.symbol, "high_volatility_atr", detail, now)
+                _rejections.append({
+                    "symbol": sc.symbol, "reason": "atr_too_high",
+                    "detail": f"ATR {atr_pct:.1f}% > max {max_atr}%",
+                    "atr_pct": round(atr_pct, 1),
+                    "ref_price": round(ref_price, 2),
+                })
                 continue
             if atr_pct is not None and atr_pct >= max_atr * 0.75:
                 slot_value_multiplier = max(
@@ -846,6 +872,67 @@ class CatalystScannerService:
                 "catalyst scanner: %d candidates, %d pre-filtered as blocked",
                 len(candidates), skipped_blocked,
             )
+
+        # ---- Pipeline log: capture this cycle for dashboard ----
+        _accepted = []
+        for ac in candidates:
+            m = ac.metadata or {}
+            _bands = compute_dynamic_bands(
+                entry_price=float(m.get("reference_price") or 0),
+                reference_price=float(m.get("reference_price") or 0),
+                atr_pct=m.get("atr_pct"),
+                beta=m.get("beta"),
+                drift_pct=float(m.get("price_drift_pct") or 0),
+                rvol=m.get("rvol"),
+                priority_modifier=m.get("priority_modifier"),
+                signal_name=m.get("signal_name"),
+                category=m.get("category"),
+                subcategory=m.get("subcategory"),
+            )
+            _accepted.append({
+                "symbol": ac.symbol,
+                "rank": ac.rank,
+                "score": round(ac.score, 3),
+                "sector": ac.sector,
+                "ref_price": round(float(m.get("reference_price") or 0), 2),
+                "sentiment": m.get("sentiment"),
+                "category": m.get("category"),
+                "subcategory": m.get("subcategory"),
+                "signal_name": m.get("signal_name"),
+                "atr_pct": round(float(m.get("atr_pct") or 0), 1) if m.get("atr_pct") else None,
+                "beta": round(float(m.get("beta") or 0), 2) if m.get("beta") else None,
+                "drift_pct": round(float(m.get("price_drift_pct") or 0), 1),
+                "rvol": round(float(m.get("rvol") or 0), 1) if m.get("rvol") else None,
+                "headline": (m.get("headline") or "")[:120],
+                "event_age_min": round(float(m.get("event_age_minutes") or 0), 1),
+                "band_target_pct": round(_bands.target_pct * 100, 2),
+                "band_stop_pct": round(_bands.stop_pct * 100, 2),
+                "band_reasoning": _bands.reasoning,
+            })
+        self._pipeline_log.append({
+            "ts": now.isoformat(),
+            "signal_total": len(sig_candidates),
+            "blocked_count": skipped_blocked,
+            "accepted_count": len(candidates),
+            "rejected_count": len(_rejections),
+            "candidates": _accepted,
+            "rejections": _rejections,
+            "blocked_symbols": sorted(list(self._blocked_symbols))[:20],
+        })
+        # Trim to last N cycles
+        if len(self._pipeline_log) > self._pipeline_log_max:
+            self._pipeline_log = self._pipeline_log[-self._pipeline_log_max:]
+
+        # Write to file for dashboard API to read
+        try:
+            import json as _json
+            from pathlib import Path as _Path
+            _pipeline_path = _Path("data/driftpilot/pipeline_log.json")
+            _pipeline_path.parent.mkdir(parents=True, exist_ok=True)
+            _pipeline_path.write_text(_json.dumps(self._pipeline_log, default=str))
+        except Exception:
+            pass  # non-critical
+
         return _build_scan_result(candidates, now)
 
     def _annotate_with_routing(
