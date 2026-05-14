@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from driftpilot.agents.guardrail_validator import GuardrailValidator
+from driftpilot.agents.guardrail_validator import DAILY_LOSS_LIMIT_PCT, GuardrailValidator
 from driftpilot.agents.llm_client import LLMClient
 from driftpilot.agents.message_bus import MessageBus
 from driftpilot.agents.models import AgentMessage, MessageType
@@ -95,12 +95,12 @@ class TestEntryApproval:
         assert result.entries_approved == 0
 
     def test_deny_session_drawdown(self, pm, bus):
-        """At -3%+ daily loss, PM force-exits all instead of processing entries."""
+        """At the daily loss limit, PM force-exits all instead of processing entries."""
         portfolio = PortfolioSnapshot(
             open_slots=3,
             total_slots=10,
             sector_exposure={},
-            daily_pnl_pct=-0.031,  # Beyond 3% limit
+            daily_pnl_pct=-(DAILY_LOSS_LIMIT_PCT + 0.001),
             consecutive_wins=0,
             consecutive_losses=5,
             minutes_left_in_session=120,
@@ -110,7 +110,7 @@ class TestEntryApproval:
         )
         _send_entry_request(bus)
         result = pm.tick(portfolio)
-        # At -3% the PM force-exits all positions (higher priority than entry processing)
+        # At the daily loss limit the PM force-exits all positions.
         assert result.force_exits_issued == 10
         assert result.entries_approved == 0
 
@@ -155,7 +155,7 @@ class TestForceExit:
             open_slots=5,
             total_slots=10,
             sector_exposure={},
-            daily_pnl_pct=-0.03,  # At limit
+            daily_pnl_pct=-DAILY_LOSS_LIMIT_PCT,
             consecutive_wins=0,
             consecutive_losses=5,
             minutes_left_in_session=120,

@@ -1,4 +1,5 @@
 from __future__ import annotations
+import sqlite3
 from dataclasses import dataclass
 
 import pytest
@@ -15,8 +16,18 @@ class FakeEnricher(QwenEnricher):
     def __init__(self):
         pass
 
-    async def enrich(self, *_):
+    async def enrich(self, *_, context=None):
         return EnrichmentResult("neutral", 0.0, None)
+
+
+class FakeContext:
+    def to_json(self) -> str:
+        return '{"beta": 0.6, "atr_pct": 1.4}'
+
+
+class FakeContextAssembler:
+    def build_context(self, symbol, headline, ts, category, subcategory):
+        return FakeContext()
 
 
 @dataclass
@@ -113,3 +124,34 @@ async def test_no_universe_match_skipped(db_path):
     )
     n = await feed._poll_once()
     assert n == 0
+
+
+@pytest.mark.asyncio
+async def test_poll_persists_context_json(db_path):
+    bus = CatalystEventBus()
+    universe = {"AAPL"}
+
+    def parser(url):
+        return FakeFeed(entries=[FakeEntry(title="Apple beats earnings AAPL")])
+
+    feed = RssNewsFeed(
+        feed_urls=("https://example.com/feed",),
+        universe=universe,
+        classifier=CatalystClassifier(),
+        enricher=FakeEnricher(),
+        bus=bus,
+        db_path=db_path,
+        parser=parser,
+        context_assembler=FakeContextAssembler(),
+    )
+
+    assert await feed._poll_once() == 1
+
+    conn = sqlite3.connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT context_json FROM catalyst_events WHERE symbol = 'AAPL'"
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row == ('{"beta": 0.6, "atr_pct": 1.4}',)

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import sqlite3
+import sys
+import types
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -8,7 +10,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from driftpilot.catalyst.context_assembler import ContextAssembler, EnrichmentContext
+from driftpilot.catalyst.context_assembler import ContextAssembler, EnrichmentContext, _fetch_yfinance_profile
 from driftpilot.clock import DriftPilotClock
 
 
@@ -16,6 +18,7 @@ from driftpilot.clock import DriftPilotClock
 class _Profile:
     market_cap_m: float
     avg_volume: float
+    beta: float
 
 
 @dataclass
@@ -31,7 +34,7 @@ class _MarketData:
     def company_profile(self, ticker: str) -> _Profile:
         self.profile_calls += 1
         assert ticker == "REGN"
-        return _Profile(market_cap_m=100_000.0, avg_volume=1_234_567)
+        return _Profile(market_cap_m=100_000.0, avg_volume=1_234_567, beta=0.82)
 
     def momentum_fundamentals(self, ticker: str) -> _Fundamentals:
         self.fundamental_calls += 1
@@ -51,6 +54,7 @@ def test_context_prompt_block_formats_known_inputs() -> None:
     context = EnrichmentContext(
         market_cap_m=100_000,
         avg_volume=1_234_567,
+        beta=0.82,
         sector="Health Care",
         atr_pct=2.4,
         eps_beat_pct=6.52,
@@ -67,6 +71,7 @@ def test_context_prompt_block_formats_known_inputs() -> None:
     block = context.to_prompt_block()
 
     assert "Market cap: $100,000M" in block
+    assert "Beta: 0.8" in block
     assert "EPS beat/miss: +6.52%" in block
     assert "Last 4 earnings surprises: +2.1%, +1.8%, -0.3%, +3.5%" in block
     assert "Prior same-symbol headlines in last 30m: 2" in block
@@ -100,6 +105,7 @@ def test_context_assembler_caches_symbol_data(tmp_path: Path) -> None:
 
     assert first.market_cap_m == 100_000.0
     assert first.avg_volume == 1_234_567
+    assert first.beta == pytest.approx(0.82)
     assert first.sector == "Health Care"
     assert first.atr_pct is not None
     assert first.eps_beat_pct == pytest.approx(6.524, abs=0.01)
@@ -132,9 +138,30 @@ def test_missing_data_gracefully_returns_none_fields(tmp_path: Path) -> None:
 
     assert context.market_cap_m is None
     assert context.avg_volume is None
+    assert context.beta is None
     assert context.sector is None
     assert context.atr_pct is None
     assert context.eps_beat_pct is None
+
+
+def test_yfinance_profile_helper_reads_beta(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _Ticker:
+        def __init__(self, symbol: str) -> None:
+            assert symbol == "REGN"
+            self.info = {
+                "marketCap": 100_000_000_000,
+                "averageVolume": 1_234_567,
+                "beta": 0.82,
+            }
+
+    fake_yfinance = types.SimpleNamespace(Ticker=_Ticker)
+    monkeypatch.setitem(sys.modules, "yfinance", fake_yfinance)
+
+    market_cap_m, avg_volume, beta = _fetch_yfinance_profile("REGN")
+
+    assert market_cap_m == pytest.approx(100_000.0)
+    assert avg_volume == 1_234_567
+    assert beta == pytest.approx(0.82)
 
 
 def test_headline_cluster_count_uses_prior_30_minutes(tmp_path: Path) -> None:

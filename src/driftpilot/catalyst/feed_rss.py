@@ -126,8 +126,8 @@ class RssNewsFeed:
             try:
                 import time as _time
                 ts = datetime.fromtimestamp(_time.mktime(entry.published_parsed), tz=timezone.utc)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("RSS published time parse failed for %s: %s", title[:80], exc)
 
         horizon = DEFAULT_HORIZON_BY_CATEGORY.get(category, 60)
         headline_hash = hashlib.sha256(f"{symbol}|{title}".encode()).hexdigest()[:16]
@@ -153,8 +153,8 @@ class RssNewsFeed:
                 context = self._context_assembler.build_context(
                     event.symbol, title, event.ts, category, subcategory,
                 )
-            except Exception:
-                pass  # fall back to V1
+            except Exception as exc:
+                logger.debug("context assembly failed for %s, using V1 prompt: %s", event.symbol, exc)
         enrichment = await self._enricher.enrich(title, category, subcategory, context=context)
         enriched = CatalystEvent(
             symbol=event.symbol, category=event.category, subcategory=event.subcategory,
@@ -171,6 +171,7 @@ class RssNewsFeed:
             sentiment=enriched.sentiment,
             priority_modifier=enriched.priority_modifier,
             horizon_minutes=enriched.horizon_minutes,
+            context_json=context.to_json() if context is not None else None,
         )
         await self._bus.publish(enriched)
         return 1

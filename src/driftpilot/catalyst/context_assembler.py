@@ -51,6 +51,7 @@ class MacroProvider(Protocol):
 class EnrichmentContext:
     market_cap_m: float | None = None
     avg_volume: int | None = None
+    beta: float | None = None
     sector: str | None = None
     atr_pct: float | None = None
     eps_beat_pct: float | None = None
@@ -84,6 +85,7 @@ class EnrichmentContext:
         lines = [
             f"Market cap: {_fmt_millions(self.market_cap_m)}",
             f"Average volume: {_fmt_int(self.avg_volume)}",
+            f"Beta: {_fmt_float(self.beta)}",
             f"Sector: {self.sector or 'unknown'}",
             f"20-day ATR: {_fmt_pct(self.atr_pct)}",
             f"EPS beat/miss: {_fmt_pct(self.eps_beat_pct)}",
@@ -103,6 +105,7 @@ class EnrichmentContext:
 class _SymbolContext:
     market_cap_m: float | None = None
     avg_volume: int | None = None
+    beta: float | None = None
     sector: str | None = None
     atr_pct: float | None = None
     last_4_surprises: list[float] | None = None
@@ -171,6 +174,7 @@ class ContextAssembler:
         sector = self._sector_by_symbol.get(symbol)
         market_cap_m: float | None = None
         avg_volume: int | None = None
+        beta: float | None = None
         last_4_surprises: list[float] = []
 
         if self._market_data_provider is not None:
@@ -178,6 +182,7 @@ class ContextAssembler:
             market_cap_m = _as_float(_attr_or_key(profile, "market_cap_m"))
             avg_volume_float = _as_float(_attr_or_key(profile, "avg_volume"))
             avg_volume = int(avg_volume_float) if avg_volume_float is not None else None
+            beta = _as_float(_attr_or_key(profile, "beta"))
             fundamentals = _safe_call(lambda: self._market_data_provider.momentum_fundamentals(symbol))
             surprises = _attr_or_key(fundamentals, "earnings_surprises_pct")
             if isinstance(surprises, list):
@@ -188,11 +193,12 @@ class ContextAssembler:
                         parsed_surprises.append(parsed)
                 last_4_surprises = parsed_surprises
         elif self._enable_external_fetch:
-            market_cap_m, avg_volume = _fetch_yfinance_profile(symbol)
+            market_cap_m, avg_volume, beta = _fetch_yfinance_profile(symbol)
 
         self._symbol_cache[symbol] = _SymbolContext(
             market_cap_m=market_cap_m,
             avg_volume=avg_volume,
+            beta=beta,
             sector=sector,
             atr_pct=_compute_atr_pct(self._bar_root, symbol),
             last_4_surprises=last_4_surprises,
@@ -219,6 +225,7 @@ class ContextAssembler:
         return EnrichmentContext(
             market_cap_m=symbol_ctx.market_cap_m,
             avg_volume=symbol_ctx.avg_volume,
+            beta=symbol_ctx.beta,
             sector=symbol_ctx.sector,
             atr_pct=symbol_ctx.atr_pct,
             eps_beat_pct=parsed.eps_beat_pct,
@@ -306,20 +313,22 @@ def _compute_atr_pct(bar_root: Path, symbol: str, period: int = 20) -> float | N
         return None
 
 
-def _fetch_yfinance_profile(symbol: str) -> tuple[float | None, int | None]:
+def _fetch_yfinance_profile(symbol: str) -> tuple[float | None, int | None, float | None]:
     try:
         import yfinance as yf  # type: ignore[import-untyped]
 
         info = yf.Ticker(symbol).info or {}
         market_cap = _as_float(info.get("marketCap"))
         avg_volume = _as_float(info.get("averageVolume") or info.get("averageDailyVolume10Day"))
+        beta = _as_float(info.get("beta"))
         return (
             market_cap / 1_000_000 if market_cap is not None else None,
             int(avg_volume) if avg_volume is not None else None,
+            beta,
         )
     except Exception as exc:
         logger.debug("yfinance profile unavailable for %s: %s", symbol, exc)
-        return None, None
+        return None, None, None
 
 
 def _fetch_yfinance_intraday_change(symbol: str) -> float | None:

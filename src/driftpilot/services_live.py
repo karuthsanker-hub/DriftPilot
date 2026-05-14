@@ -25,7 +25,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from driftpilot.broker.alpaca_client import AlpacaBrokerClient, OrderSubmissionResult
-from driftpilot.clock import DriftPilotClock
+from driftpilot.clock import DriftPilotClock, market_time_profile
 from driftpilot.execution.slot_allocator import (
     AllocationCandidate,
     AllocationResult,
@@ -423,6 +423,21 @@ class CatalystScannerService:
                     return self._coerce_positive_float(val)
         return None
 
+    def _candidate_beta(self, symbol: str, features: dict[str, Any]) -> float | None:
+        """Read beta from feature or enrichment context metadata if available."""
+        val = features.get("beta")
+        if val is not None:
+            return self._coerce_positive_float(val)
+
+        context = self._candidate_context_metadata(features)
+        if context is None:
+            context = self._candidate_context_from_db(symbol, features)
+        if isinstance(context, dict):
+            val = context.get("beta")
+            if val is not None:
+                return self._coerce_positive_float(val)
+        return None
+
     def _candidate_context_metadata(self, features: dict[str, Any]) -> dict[str, Any] | None:
         context = (
             features.get("context")
@@ -739,6 +754,7 @@ class CatalystScannerService:
                 continue
 
             atr_pct = self._candidate_atr_pct(sc.symbol, features)
+            beta = self._candidate_beta(sc.symbol, features)
             max_atr = getattr(self, "_max_entry_atr_pct", 6.0)
             slot_value_multiplier = 1.0
             if atr_pct is not None and atr_pct > max_atr:
@@ -787,6 +803,7 @@ class CatalystScannerService:
                     "horizon_minutes": features.get("horizon_minutes"),
                     "source": features.get("source", "catalyst_bus"),
                     "atr_pct": atr_pct,
+                    "beta": beta,
                     "rvol": features.get("rvol"),  # relative volume (from volume_spike signal)
                     "slot_value_multiplier": slot_value_multiplier,
                     "price_drift_pct": round(drift_pct, 2),
@@ -925,16 +942,75 @@ class DynamicBands:
     reasoning: str      # human-readable explanation for logs
 
 
+def _coerce_float_or_none(value: Any | None, *, field_name: str) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        logger.debug("ignoring invalid numeric %s value for dynamic bands: %r", field_name, value)
+        return None
+
+
+def _catalyst_band_profile(
+    *,
+    category: str | None,
+    subcategory: str | None,
+    signal_name: str | None,
+) -> tuple[str, float, float]:
+    category_key = (category or "").lower()
+    subcategory_key = (subcategory or "").lower()
+    signal_key = (signal_name or "").lower()
+    if signal_key == "volume_spike_v1":
+        return "volume_spike_v1", 1.15, 1.10
+    if category_key == "earnings" and subcategory_key in {"report", "beat", "guidance_up"}:
+        return f"{category_key}/{subcategory_key or 'generic'}", 1.35, 1.10
+    if category_key == "analyst" and subcategory_key in {"target_raise", "upgrade", "initiates"}:
+        return f"{category_key}/{subcategory_key}", 0.85, 0.90
+    if category_key == "m_and_a":
+        return f"{category_key}/{subcategory_key or '*'}", 1.60, 1.20
+    if category_key == "product" and subcategory_key in {"launch", "partnership"}:
+        return f"{category_key}/{subcategory_key}", 1.10, 1.00
+    if category_key == "filing" and subcategory_key in {"8a", "8k"}:
+        return f"{category_key}/{subcategory_key}", 1.00, 1.00
+    return "baseline", 1.0, 1.0
+
+
+def _beta_band_profile(beta: Any | None) -> tuple[str, float, float]:
+    beta_value = _coerce_float_or_none(beta, field_name="beta")
+    if beta_value is None or beta_value <= 0:
+        return "unknown", 1.0, 1.0
+    if beta_value >= 1.5:
+        return "high_beta", 1.20, 1.20
+    if beta_value < 0.8:
+        return "low_beta", 0.85, 0.85
+    return "normal_beta", 1.0, 1.0
+
+
+def _apply_band_multiplier(
+    target_pct: float,
+    stop_pct: float,
+    *,
+    target_mult: float,
+    stop_mult: float,
+) -> tuple[float, float]:
+    return min(0.05, target_pct * target_mult), min(0.03, stop_pct * stop_mult)
+
+
 def compute_dynamic_bands(
     entry_price: float,
     reference_price: float,
     *,
     atr_pct: float | None = None,
+    beta: float | None = None,
     drift_pct: float = 0.0,
     rvol: float | None = None,
     spread_pct: float = 0.0,
     priority_modifier: float | None = None,
     signal_name: str | None = None,
+    category: str | None = None,
+    subcategory: str | None = None,
+    entry_time: datetime | None = None,
     # Fallback defaults from settings (used when no ATR data available)
     default_target_pct: float = 0.01,
     default_stop_pct: float = 0.01,
@@ -950,16 +1026,20 @@ def compute_dynamic_bands(
     Returns a DynamicBands with target_pct and stop_pct as decimals (0.02 = 2%).
     """
     parts: list[str] = []
+    atr_value = _coerce_float_or_none(atr_pct, field_name="atr_pct")
+    beta_value = _coerce_float_or_none(beta, field_name="beta")
+    rvol_value = _coerce_float_or_none(rvol, field_name="rvol")
+    priority_value = _coerce_float_or_none(priority_modifier, field_name="priority_modifier")
 
     # ---- 1. BASE STOP: ATR-based (if available) ----
     # A trader sets stop loss at 1.5× ATR — gives the stock room to breathe
     # without getting stopped out on normal noise.
-    if atr_pct is not None and atr_pct > 0:
+    if atr_value is not None and atr_value > 0:
         # ATR stop: 1.5× ATR, but floor at 0.5% and cap at 3%
-        atr_stop = atr_pct / 100.0 * 1.5
+        atr_stop = atr_value / 100.0 * 1.5
         atr_stop = max(0.005, min(atr_stop, 0.03))
         stop_pct = atr_stop
-        parts.append(f"stop=1.5×ATR({atr_pct:.1f}%)={stop_pct*100:.2f}%")
+        parts.append(f"stop=1.5×ATR({atr_value:.1f}%)={stop_pct*100:.2f}%")
     else:
         # No ATR — use a moderate default wider than 1%
         stop_pct = max(default_stop_pct, 0.012)
@@ -974,7 +1054,61 @@ def compute_dynamic_bands(
     target_pct = base_target
     parts.append(f"base_target=2×stop={target_pct*100:.2f}%")
 
-    # ---- 3. DRIFT ADJUSTMENT ----
+    # ---- 3. CATALYST-TYPE PROFILE ----
+    # Different catalysts have different empirical behavior. Earnings and
+    # M&A often travel farther; analyst target raises are more prone to fade.
+    catalyst_profile, catalyst_target_mult, catalyst_stop_mult = _catalyst_band_profile(
+        category=category,
+        subcategory=subcategory,
+        signal_name=signal_name,
+    )
+    if catalyst_target_mult != 1.0 or catalyst_stop_mult != 1.0:
+        old_target, old_stop = target_pct, stop_pct
+        target_pct, stop_pct = _apply_band_multiplier(
+            target_pct,
+            stop_pct,
+            target_mult=catalyst_target_mult,
+            stop_mult=catalyst_stop_mult,
+        )
+        parts.append(
+            f"catalyst_profile={catalyst_profile}: target {old_target*100:.2f}%→{target_pct*100:.2f}% "
+            f"stop {old_stop*100:.2f}%→{stop_pct*100:.2f}%"
+        )
+
+    # ---- 4. BETA PROFILE ----
+    # High-beta names need more market-noise room; low-beta names should not
+    # need as much room unless something material is really happening.
+    beta_profile, beta_target_mult, beta_stop_mult = _beta_band_profile(beta_value)
+    if beta_target_mult != 1.0 or beta_stop_mult != 1.0:
+        old_target, old_stop = target_pct, stop_pct
+        target_pct, stop_pct = _apply_band_multiplier(
+            target_pct,
+            stop_pct,
+            target_mult=beta_target_mult,
+            stop_mult=beta_stop_mult,
+        )
+        parts.append(
+            f"beta_profile={beta_profile}({beta_value:.2f}): target {old_target*100:.2f}%→{target_pct*100:.2f}% "
+            f"stop {old_stop*100:.2f}%→{stop_pct*100:.2f}%"
+        )
+
+    # ---- 5. TIME-OF-DAY PROFILE ----
+    # Opening/closing periods carry wider noise; midday is usually tighter.
+    time_profile, time_target_mult, time_stop_mult = market_time_profile(entry_time)
+    if time_target_mult != 1.0 or time_stop_mult != 1.0:
+        old_target, old_stop = target_pct, stop_pct
+        target_pct, stop_pct = _apply_band_multiplier(
+            target_pct,
+            stop_pct,
+            target_mult=time_target_mult,
+            stop_mult=time_stop_mult,
+        )
+        parts.append(
+            f"time_profile={time_profile}: target {old_target*100:.2f}%→{target_pct*100:.2f}% "
+            f"stop {old_stop*100:.2f}%→{stop_pct*100:.2f}%"
+        )
+
+    # ---- 6. DRIFT ADJUSTMENT ----
     # If the stock already moved 1.5% since catalyst, the upside is partially
     # consumed. Reduce target by the drift amount, but don't go below 0.5%.
     # The user said: "if the market has moved > 1%, adjust the band — enter
@@ -991,22 +1125,22 @@ def compute_dynamic_bands(
             stop_pct = max(0.005, stop_pct * 0.9)
             parts.append(f"stop_tightened_for_drift={stop_pct*100:.2f}%")
 
-    # ---- 4. VOLUME CONVICTION (RVOL) ----
+    # ---- 7. VOLUME CONVICTION (RVOL) ----
     # High RVOL = strong conviction, momentum has legs.
     # RVOL > 3 = widen target by 20%, RVOL > 5 = widen by 40%
     # Low RVOL or no data = no adjustment.
-    if rvol is not None and rvol > 2.0:
-        if rvol >= 5.0:
+    if rvol_value is not None and rvol_value > 2.0:
+        if rvol_value >= 5.0:
             vol_boost = 1.4
-        elif rvol >= 3.0:
+        elif rvol_value >= 3.0:
             vol_boost = 1.2
         else:
-            vol_boost = 1.0 + (rvol - 2.0) * 0.1  # 2-3x: gradual 10-20%
+            vol_boost = 1.0 + (rvol_value - 2.0) * 0.1  # 2-3x: gradual 10-20%
         old_target = target_pct
         target_pct = min(0.05, target_pct * vol_boost)
-        parts.append(f"rvol_boost: RVOL={rvol:.1f}x → target {old_target*100:.2f}%→{target_pct*100:.2f}%")
+        parts.append(f"rvol_boost: RVOL={rvol_value:.1f}x → target {old_target*100:.2f}%→{target_pct*100:.2f}%")
 
-    # ---- 5. SPREAD COST ----
+    # ---- 8. SPREAD COST ----
     # Wide spread eats into effective profit. If spread is 0.3% of price,
     # that's 0.3% gone from the target before the trade even starts.
     if spread_pct > 0.001:
@@ -1015,19 +1149,12 @@ def compute_dynamic_bands(
         if target_pct != old_target:
             parts.append(f"spread_cost: {spread_pct*100:.2f}% → target {old_target*100:.2f}%→{target_pct*100:.2f}%")
 
-    # ---- 6. SIGNAL-SPECIFIC ADJUSTMENTS ----
-    # Volume spike entries tend to be momentum plays — slightly wider bands.
-    if signal_name == "volume_spike_v1":
-        target_pct = min(0.05, target_pct * 1.15)
-        stop_pct = min(0.03, stop_pct * 1.1)
-        parts.append(f"vol_spike_signal_adj: target={target_pct*100:.2f}% stop={stop_pct*100:.2f}%")
-
-    # ---- 7. PRIORITY MODIFIER (from Qwen sentiment strength) ----
+    # ---- 9. PRIORITY MODIFIER (from Qwen sentiment strength) ----
     # Strong sentiment (priority_modifier > 0.3) = slightly wider target.
-    if priority_modifier is not None and priority_modifier > 0.3:
-        boost = 1.0 + min(priority_modifier, 1.0) * 0.15
+    if priority_value is not None and priority_value > 0.3:
+        boost = 1.0 + min(priority_value, 1.0) * 0.15
         target_pct = min(0.05, target_pct * boost)
-        parts.append(f"sentiment_boost: mod={priority_modifier:.2f} → target={target_pct*100:.2f}%")
+        parts.append(f"sentiment_boost: mod={priority_value:.2f} → target={target_pct*100:.2f}%")
 
     # ---- FINAL SANITY: ensure target > stop (reward > risk) ----
     if target_pct <= stop_pct:
@@ -1107,7 +1234,18 @@ class LiveAlpacaAllocator:
                 entry_price=reference_price,
                 reference_price=reference_price,
                 atr_pct=_pre_atr,
-                drift_pct=float(_pre_meta.get("price_drift_pct") or 0.0),
+                beta=_pre_meta.get("beta"),
+                drift_pct=_coerce_float_or_none(
+                    _pre_meta.get("price_drift_pct"), field_name="price_drift_pct"
+                ) or 0.0,
+                rvol=_coerce_float_or_none(_pre_meta.get("rvol"), field_name="rvol"),
+                priority_modifier=_coerce_float_or_none(
+                    _pre_meta.get("priority_modifier"), field_name="priority_modifier"
+                ),
+                signal_name=_pre_meta.get("signal_name"),
+                category=_pre_meta.get("category"),
+                subcategory=_pre_meta.get("subcategory"),
+                entry_time=allocation.reserved_at,
                 default_target_pct=self.settings.target_pct,
                 default_stop_pct=self.settings.stop_pct,
             )
@@ -1215,13 +1353,25 @@ class LiveAlpacaAllocator:
             # Pull market data from candidate metadata for band calculation
             _meta = candidate.metadata or {}
             _atr_pct = _meta.get("atr_pct")  # ATR as % of price
-            _drift_pct = float(_meta.get("price_drift_pct") or 0.0)
-            _rvol = (
-                float(_meta.get("rvol") or 0)
-                if _meta.get("rvol") is not None else None
+            _atr_value = _coerce_float_or_none(_atr_pct, field_name="atr_pct")
+            _beta = _coerce_float_or_none(_meta.get("beta"), field_name="beta")
+            _drift_pct = (
+                _coerce_float_or_none(_meta.get("price_drift_pct"), field_name="price_drift_pct")
+                or 0.0
             )
+            _rvol = _coerce_float_or_none(_meta.get("rvol"), field_name="rvol")
             _signal_name = _meta.get("signal_name")
-            _priority_mod = float(_meta.get("priority_modifier") or 0)
+            _priority_mod = (
+                _coerce_float_or_none(_meta.get("priority_modifier"), field_name="priority_modifier")
+                or 0.0
+            )
+            _band_catalyst_profile = _catalyst_band_profile(
+                category=_meta.get("category"),
+                subcategory=_meta.get("subcategory"),
+                signal_name=_signal_name,
+            )[0]
+            _band_beta_profile = _beta_band_profile(_beta)[0]
+            _band_time_profile = market_time_profile(allocation.reserved_at, clock=self.clock)[0]
 
             # Compute spread from entry vs reference (proxy for bid/ask width)
             _spread_pct = 0.0
@@ -1232,20 +1382,26 @@ class LiveAlpacaAllocator:
                 entry_price=entry_price,
                 reference_price=reference_price,
                 atr_pct=_atr_pct,
+                beta=_beta,
                 drift_pct=_drift_pct,
                 rvol=_rvol,
                 spread_pct=_spread_pct,
                 priority_modifier=_priority_mod if _priority_mod else None,
                 signal_name=_signal_name,
+                category=_meta.get("category"),
+                subcategory=_meta.get("subcategory"),
+                entry_time=allocation.reserved_at,
                 default_target_pct=self.settings.target_pct,
                 default_stop_pct=self.settings.stop_pct,
             )
             logger.info(
-                "DYNAMIC BANDS %s: target=%.2f%% stop=%.2f%% | atr=%.1f%% drift=%.1f%% "
-                "rvol=%s spread=%.3f%% | %s",
+                "DYNAMIC BANDS %s: target=%.2f%% stop=%.2f%% | atr=%.1f%% beta=%s "
+                "drift=%.1f%% rvol=%s spread=%.3f%% | %s",
                 allocation.symbol,
                 bands.target_pct * 100, bands.stop_pct * 100,
-                float(_atr_pct or 0), _drift_pct,
+                _atr_value or 0.0,
+                f"{_beta:.2f}" if _beta is not None else "N/A",
+                _drift_pct,
                 f"{_rvol:.1f}x" if _rvol else "N/A",
                 _spread_pct * 100,
                 bands.reasoning,
@@ -1277,9 +1433,15 @@ class LiveAlpacaAllocator:
                     "dynamic_stop_pct": bands.stop_pct,
                     "dynamic_band_reasoning": bands.reasoning,
                     "band_atr_pct": _atr_pct,
+                    "band_beta": _beta,
+                    "band_beta_profile": _band_beta_profile,
                     "band_drift_pct": _drift_pct,
                     "band_rvol": _rvol,
                     "band_spread_pct": round(_spread_pct, 4),
+                    "band_category": _meta.get("category"),
+                    "band_subcategory": _meta.get("subcategory"),
+                    "band_catalyst_profile": _band_catalyst_profile,
+                    "band_time_profile": _band_time_profile,
                     # Catalyst event chain — for forensic analysis
                     "catalyst_event_ts": cat_event_ts_value,
                     "catalyst_headline_hash": cat_headline_hash,
@@ -1808,6 +1970,72 @@ class LiveAlpacaPositionMonitor:
                 if "already" in msg and "filled" in msg:
                     logger.info("LIVE: broker race on exit %s (cancel after fast-fill)", symbol)
                     broker_race_filled = True
+                elif "insufficient qty" in msg or "held_for_orders" in msg:
+                    # Shares are locked by an open order (protective stop or
+                    # other). Parse the related order IDs from the Alpaca error,
+                    # cancel them, then retry the exit once.
+                    logger.warning(
+                        "LIVE: %s shares held by open orders — canceling blocking orders and retrying exit",
+                        symbol,
+                    )
+                    import re as _re
+                    related_ids = _re.findall(
+                        r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}',
+                        str(exc),
+                    )
+                    for oid in related_ids:
+                        try:
+                            await self.broker.cancel_order(oid)
+                            logger.info("LIVE: canceled blocking order %s for %s", oid, symbol)
+                        except Exception as cancel_exc:
+                            logger.warning(
+                                "LIVE: failed to cancel blocking order %s for %s: %s",
+                                oid, symbol, cancel_exc,
+                            )
+                    # Brief pause for Alpaca to release held qty
+                    await asyncio.sleep(0.5)
+                    try:
+                        exit_result = await self.broker.submit_exit_order(
+                            symbol=symbol,
+                            quantity=quantity,
+                            position_id=getattr(position, "id", None),
+                        )
+                        logger.info("LIVE: exit retry succeeded for %s after canceling blocking orders", symbol)
+                    except Exception as retry_exc:
+                        retry_msg = str(retry_exc).lower()
+                        if "already" in retry_msg and "filled" in retry_msg:
+                            # The blocking order (protective stop) already sold the
+                            # shares. Position is gone on Alpaca — close locally.
+                            logger.info(
+                                "LIVE: %s already sold by protective stop — closing locally",
+                                symbol,
+                            )
+                            stop_px = (
+                                (getattr(position, "metadata", {}) or {}).get("protective_stop_price")
+                                or getattr(position, "stop_price", None)
+                                or mid
+                            )
+                            realized = (float(stop_px) - entry_price) * quantity
+                            self.repository.positions.close(
+                                position_id=getattr(position, "id"),
+                                exit_reason="broker_protective_stop_filled",
+                                realized_pnl=realized,
+                                closed_at=self.clock.now_utc(),
+                                metadata={
+                                    "exit_price": float(stop_px),
+                                    "exit_close_path": "detected_on_exit_retry_already_filled",
+                                    "peak_unrealized_pct": new_peak,
+                                    "blocking_orders_canceled": related_ids,
+                                },
+                            )
+                            slot_id = getattr(position, "slot_id", None)
+                            if slot_id is not None:
+                                self.repository.slots.upsert(slot_id, status="FREE", symbol=None)
+                            return 1
+                        logger.exception(
+                            "LIVE: exit retry ALSO failed for %s: %s", symbol, retry_exc,
+                        )
+                        return 0
                 else:
                     logger.exception("LIVE: exit submission failed for %s: %s", symbol, exc)
                     return 0

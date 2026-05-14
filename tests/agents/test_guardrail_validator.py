@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from driftpilot.agents.guardrail_validator import (
+    DAILY_LOSS_LIMIT_PCT,
     MAX_PROFIT_CAP_PCT,
     MAX_SIZE_MULTIPLIER,
     MAX_STOP_LOSS_PCT,
@@ -43,11 +44,11 @@ class TestEntryValidation:
         assert result.allowed is True
         assert result.clamped is False
 
-    def test_clamp_stop_above_1_5_pct(self, validator, healthy_portfolio):
+    def test_clamp_stop_above_max_pct(self, validator, healthy_portfolio):
         result = validator.validate_entry(
             symbol="AAPL",
             target_pct=0.01,
-            stop_pct=0.025,  # Above max
+            stop_pct=MAX_STOP_LOSS_PCT + 0.01,
             size_multiplier=1.0,
             sector="tech",
             portfolio=healthy_portfolio,
@@ -135,7 +136,7 @@ class TestEntryValidation:
         portfolio = PortfolioState(
             free_slots=5,
             sector_counts={},
-            daily_pnl_pct=-0.031,  # Beyond limit
+            daily_pnl_pct=-(DAILY_LOSS_LIMIT_PCT + 0.001),
             total_positions=5,
         )
         result = validator.validate_entry(
@@ -214,9 +215,9 @@ class TestTargetRaiseValidation:
 
 class TestPortfolioLevelChecks:
     def test_force_exit_all_on_daily_limit(self, validator):
-        assert validator.should_force_exit_all(-0.031) is True
-        assert validator.should_force_exit_all(-0.03) is True
-        assert validator.should_force_exit_all(-0.029) is False
+        assert validator.should_force_exit_all(-(DAILY_LOSS_LIMIT_PCT + 0.001)) is True
+        assert validator.should_force_exit_all(-DAILY_LOSS_LIMIT_PCT) is True
+        assert validator.should_force_exit_all(-(DAILY_LOSS_LIMIT_PCT - 0.001)) is False
 
     def test_override_rate_not_exceeded_with_few_decisions(self, validator):
         # With < 5 decisions, rate check is skipped

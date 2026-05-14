@@ -183,6 +183,7 @@ class AlpacaNewsFeed:
                 sentiment=enriched.sentiment,
                 priority_modifier=enriched.priority_modifier,
                 horizon_minutes=enriched.horizon_minutes,
+                context_json=context.to_json() if context is not None else None,
             )
             await self._bus.publish(enriched)
             published += 1

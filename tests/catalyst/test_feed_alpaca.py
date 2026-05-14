@@ -1,4 +1,5 @@
 from __future__ import annotations
+import sqlite3
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -17,8 +18,18 @@ class FakeEnricher(QwenEnricher):
     def __init__(self, result=None):
         self._result = result or EnrichmentResult("neutral", 0.0, None)
 
-    async def enrich(self, headline, category, subcategory):
+    async def enrich(self, headline, category, subcategory, *, context=None):
         return self._result
+
+
+class FakeContext:
+    def to_json(self) -> str:
+        return '{"beta": 1.7, "atr_pct": 2.5}'
+
+
+class FakeContextAssembler:
+    def build_context(self, symbol, headline, ts, category, subcategory):
+        return FakeContext()
 
 
 def _article(symbols, headline, ts=None):
@@ -141,3 +152,31 @@ async def test_qwen_offline_does_not_block_publishing(db_path):
     assert n == 1
     assert received[0].sentiment == "neutral"
     assert received[0].priority_modifier == 0.0
+
+
+@pytest.mark.asyncio
+async def test_poll_persists_context_json(db_path):
+    bus = CatalystEventBus()
+    articles = [_article(["AAPL"], "Apple beats earnings expectations")]
+    feed = AlpacaNewsFeed(
+        api_key="x",
+        api_secret="y",
+        symbols=["AAPL"],
+        classifier=CatalystClassifier(),
+        enricher=FakeEnricher(),
+        bus=bus,
+        db_path=db_path,
+        client=_mock_alpaca_client(articles),
+        context_assembler=FakeContextAssembler(),
+    )
+
+    assert await feed._poll_once() == 1
+
+    conn = sqlite3.connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT context_json FROM catalyst_events WHERE symbol = 'AAPL'"
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row == ('{"beta": 1.7, "atr_pct": 2.5}',)

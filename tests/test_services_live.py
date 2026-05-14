@@ -21,6 +21,7 @@ from driftpilot.services_live import (
     LiveAlpacaAllocator,
     LiveAlpacaPositionMonitor,
     build_live_components,
+    compute_dynamic_bands,
 )
 from driftpilot.settings import DriftPilotSettings
 from driftpilot.storage.repositories import DriftPilotRepository
@@ -95,6 +96,120 @@ def test_quote_provider_handles_api_exception_gracefully():
     fake_client.get_stock_latest_quote = MagicMock(side_effect=RuntimeError("API down"))
     qp = AlpacaRestQuoteProvider(api_key="x", api_secret="y", client=fake_client)
     assert qp.latest_quote("AAPL") is None  # logged, no raise
+
+
+def test_dynamic_bands_widen_for_high_beta_and_tighten_for_low_beta():
+    high_beta = compute_dynamic_bands(
+        100,
+        100,
+        atr_pct=1.0,
+        beta=1.7,
+        default_target_pct=0.01,
+        default_stop_pct=0.01,
+    )
+    low_beta = compute_dynamic_bands(
+        100,
+        100,
+        atr_pct=1.0,
+        beta=0.6,
+        default_target_pct=0.01,
+        default_stop_pct=0.01,
+    )
+    missing_beta = compute_dynamic_bands(
+        100,
+        100,
+        atr_pct=1.0,
+        beta=None,
+        default_target_pct=0.01,
+        default_stop_pct=0.01,
+    )
+
+    assert high_beta.stop_pct > missing_beta.stop_pct
+    assert high_beta.target_pct > missing_beta.target_pct
+    assert low_beta.stop_pct < missing_beta.stop_pct
+    assert low_beta.target_pct < missing_beta.target_pct
+    assert "beta_profile=high_beta" in high_beta.reasoning
+    assert "beta_profile=low_beta" in low_beta.reasoning
+
+
+def test_dynamic_bands_apply_time_of_day_profiles():
+    opening = compute_dynamic_bands(
+        100,
+        100,
+        atr_pct=1.0,
+        entry_time=datetime(2026, 5, 14, 13, 45, tzinfo=timezone.utc),
+    )
+    midday = compute_dynamic_bands(
+        100,
+        100,
+        atr_pct=1.0,
+        entry_time=datetime(2026, 5, 14, 16, 30, tzinfo=timezone.utc),
+    )
+    close = compute_dynamic_bands(
+        100,
+        100,
+        atr_pct=1.0,
+        entry_time=datetime(2026, 5, 14, 19, 45, tzinfo=timezone.utc),
+    )
+    regular = compute_dynamic_bands(
+        100,
+        100,
+        atr_pct=1.0,
+        entry_time=datetime(2026, 5, 14, 18, 30, tzinfo=timezone.utc),
+    )
+
+    assert opening.stop_pct > regular.stop_pct
+    assert close.stop_pct > regular.stop_pct
+    assert midday.stop_pct < regular.stop_pct
+    assert "time_profile=opening_volatility" in opening.reasoning
+    assert "time_profile=midday_quiet" in midday.reasoning
+    assert "time_profile=closing_volatility" in close.reasoning
+
+
+def test_dynamic_bands_apply_catalyst_profiles():
+    earnings = compute_dynamic_bands(
+        100,
+        100,
+        atr_pct=1.0,
+        category="earnings",
+        subcategory="report",
+    )
+    analyst = compute_dynamic_bands(
+        100,
+        100,
+        atr_pct=1.0,
+        category="analyst",
+        subcategory="target_raise",
+    )
+
+    assert earnings.target_pct > analyst.target_pct
+    assert earnings.stop_pct > analyst.stop_pct
+    assert "catalyst_profile=earnings/report" in earnings.reasoning
+    assert "catalyst_profile=analyst/target_raise" in analyst.reasoning
+
+
+def test_dynamic_bands_apply_drift_after_profile_adjustments():
+    no_drift = compute_dynamic_bands(
+        100,
+        100,
+        atr_pct=1.0,
+        beta=1.7,
+        category="earnings",
+        subcategory="report",
+    )
+    drifted = compute_dynamic_bands(
+        101.2,
+        100,
+        atr_pct=1.0,
+        beta=1.7,
+        drift_pct=1.2,
+        category="earnings",
+        subcategory="report",
+    )
+
+    assert drifted.target_pct < no_drift.target_pct
+    assert "drift_adj" in drifted.reasoning
+    assert drifted.target_pct > drifted.stop_pct
 
 
 @pytest.mark.asyncio
@@ -431,6 +546,50 @@ async def test_catalyst_scanner_reads_atr_context_from_signal_db(settings, repo,
 
 
 @pytest.mark.asyncio
+async def test_catalyst_scanner_carries_beta_from_context(settings, repo):
+    """Beta from enrichment context becomes allocator metadata for dynamic bands."""
+    from driftpilot.services_live import CatalystScannerService
+    from driftpilot.signals.base import Candidate
+
+    class _Signal:
+        name = "earnings_report_v1"
+
+        async def scan(self, now=None):
+            return [
+                Candidate(
+                    symbol="AVGO",
+                    score=1.0,
+                    sector="Technology",
+                    allowed=True,
+                    features={
+                        "headline": "AVGO beats Q1 earnings",
+                        "headline_hash": "avgo-beta-context",
+                        "context_json": '{"atr_pct": 2.5, "beta": 1.7}',
+                    },
+                )
+            ]
+
+    fake_qp = MagicMock(spec=AlpacaRestQuoteProvider)
+    fake_qp.latest_quote = MagicMock(return_value=MarketQuote(
+        symbol="AVGO", timestamp=datetime.now(timezone.utc),
+        bid_price=184.95, ask_price=185.05,
+    ))
+
+    scanner = CatalystScannerService(
+        signal=_Signal(),
+        quote_provider=fake_qp,
+        clock=DriftPilotClock(settings.timezone),
+        repository=repo,
+    )
+
+    result = await scanner.scan()
+
+    assert len(result.candidates) == 1
+    assert result.candidates[0].metadata["atr_pct"] == pytest.approx(2.5)
+    assert result.candidates[0].metadata["beta"] == pytest.approx(1.7)
+
+
+@pytest.mark.asyncio
 async def test_live_allocator_records_catalyst_metadata_on_position(settings, repo):
     """Audit contract: the position record must include catalyst event chain
     metadata so the EOD audit script can reconstruct the trade."""
@@ -450,10 +609,11 @@ async def test_live_allocator_records_catalyst_metadata_on_position(settings, re
     ))
 
     allocator = LiveAlpacaAllocator(repo, settings, fake_broker)
+    reserved_at = datetime(2026, 5, 4, 13, 45, tzinfo=timezone.utc)
     fake_alloc_result = AllocationResult(
         allocations=(SlotAllocation(
             symbol="AAPL", slot_id=1, slot_value=1000.0, sector="Tech",
-            rank=1, score=0.15, reserved_at=datetime.now(timezone.utc),
+            rank=1, score=0.15, reserved_at=reserved_at,
         ),),
         rejections=(),
     )
@@ -464,7 +624,7 @@ async def test_live_allocator_records_catalyst_metadata_on_position(settings, re
     catalyst_ts = datetime(2026, 5, 4, 13, 35, 0, tzinfo=timezone.utc)
     candidates = [AllocationCandidate(
         symbol="AAPL", score=0.15, sector="Tech",
-        latest_bar_at=datetime.now(timezone.utc),
+        latest_bar_at=reserved_at,
         metadata={
             "reference_price": 200.0,
             "catalyst_event_ts": catalyst_ts,
@@ -472,6 +632,10 @@ async def test_live_allocator_records_catalyst_metadata_on_position(settings, re
             "headline_hash": "abc12345def67890",
             "sentiment": "positive",
             "event_age_minutes": 12.5,
+            "atr_pct": 2.5,
+            "beta": 1.7,
+            "category": "earnings",
+            "subcategory": "report",
         },
     )]
     await allocator.allocate(candidates)
@@ -488,6 +652,48 @@ async def test_live_allocator_records_catalyst_metadata_on_position(settings, re
     assert md.get("broker_order_id") == "ord-789"
     assert md.get("protective_stop_order_id") == "stop-789"
     assert md.get("protective_stop_price") == 198.10
+    assert md.get("band_beta") == pytest.approx(1.7)
+    assert md.get("band_beta_profile") == "high_beta"
+    assert md.get("band_catalyst_profile") == "earnings/report"
+    assert md.get("band_time_profile") == "opening_volatility"
+
+
+@pytest.mark.asyncio
+async def test_live_allocator_ignores_invalid_beta_metadata(settings, repo):
+    from driftpilot.execution.slot_allocator import (
+        AllocationCandidate, AllocationResult, SlotAllocation,
+    )
+
+    fake_broker = MagicMock(spec=AlpacaBrokerClient)
+    fake_broker.submit_entry_order = AsyncMock(return_value=OrderSubmissionResult(
+        submitted=True, broker_order_id="ord-invalid-beta", symbol="BETA", side="buy",
+        quantity=5, order_type="limit", limit_price=100.0, reason="filled",
+    ))
+
+    allocator = LiveAlpacaAllocator(repo, settings, fake_broker)
+    reserved_at = datetime(2026, 5, 14, 18, 30, tzinfo=timezone.utc)
+    fake_alloc_result = AllocationResult(
+        allocations=(SlotAllocation(
+            symbol="BETA", slot_id=1, slot_value=1000.0, sector="Tech",
+            rank=1, score=1.0, reserved_at=reserved_at,
+        ),),
+        rejections=(),
+    )
+    allocator.allocator = MagicMock()
+    allocator.allocator.allocate = AsyncMock(return_value=fake_alloc_result)
+
+    repo.slots.upsert(1, status="OPEN", symbol="BETA", slot_value=1000, updated_at=datetime.now(timezone.utc))
+    candidates = [AllocationCandidate(
+        symbol="BETA", score=1.0, sector="Tech",
+        latest_bar_at=reserved_at,
+        metadata={"reference_price": 100.0, "atr_pct": 1.2, "beta": "not-a-number"},
+    )]
+
+    await allocator.allocate(candidates)
+
+    pos = repo.positions.list_open()[0]
+    assert pos.metadata["band_beta"] is None
+    assert pos.metadata["band_beta_profile"] == "unknown"
 
 
 @pytest.mark.asyncio
@@ -504,10 +710,11 @@ async def test_live_allocator_applies_slot_value_multiplier(settings, repo):
     ))
 
     allocator = LiveAlpacaAllocator(repo, settings, fake_broker)
+    reserved_at = datetime(2026, 5, 14, 18, 30, tzinfo=timezone.utc)
     fake_alloc_result = AllocationResult(
         allocations=(SlotAllocation(
             symbol="JXN", slot_id=1, slot_value=1000.0, sector="Financials",
-            rank=1, score=1.0, reserved_at=datetime.now(timezone.utc),
+            rank=1, score=1.0, reserved_at=reserved_at,
         ),),
         rejections=(),
     )
@@ -517,7 +724,7 @@ async def test_live_allocator_applies_slot_value_multiplier(settings, repo):
     repo.slots.upsert(1, status="OPEN", symbol="JXN", slot_value=1000, updated_at=datetime.now(timezone.utc))
     candidates = [AllocationCandidate(
         symbol="JXN", score=1.0, sector="Financials",
-        latest_bar_at=datetime.now(timezone.utc),
+        latest_bar_at=reserved_at,
         metadata={"reference_price": 200.0, "slot_value_multiplier": 0.5},
     )]
 
@@ -527,7 +734,7 @@ async def test_live_allocator_applies_slot_value_multiplier(settings, repo):
         symbol="JXN",
         quantity=2,
         slot_id=1,
-        protective_stop_pct=settings.stop_pct,
+        protective_stop_pct=0.012,
     )
     pos = repo.positions.list_open()[0]
     assert pos.quantity == 2
