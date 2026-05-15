@@ -1271,10 +1271,30 @@ class LiveAlpacaAllocator:
                     "signal_score_at_entry": float(getattr(candidate, "score", 0.0)),
                 },
             )
+            # ── Transition slot RESERVED → OPEN with position_id ──
+            # Without this, the slot stays RESERVED with position_id=None
+            # and the stale-reclaim watchdog will free it after 5 minutes,
+            # orphaning the live position.
+            pos_id = getattr(position, "id", None)
+            try:
+                self.repository.slots.upsert(
+                    allocation.slot_id,
+                    status="OPEN",
+                    symbol=allocation.symbol,
+                    position_id=pos_id,
+                    slot_value=effective_slot_value,
+                    updated_at=self.clock.now_utc(),
+                )
+            except Exception:
+                logger.exception(
+                    "LIVE: failed to transition slot %d to OPEN for %s (position %s exists but slot may be reclaimed!)",
+                    allocation.slot_id, allocation.symbol, pos_id,
+                )
+
             logger.info(
-                "LIVE: position opened symbol=%s qty=%d entry=%.2f position_id=%s broker_order_id=%s",
+                "LIVE: position opened symbol=%s qty=%d entry=%.2f position_id=%s broker_order_id=%s slot=%d",
                 allocation.symbol, quantity, entry_price,
-                getattr(position, "id", None), submission.broker_order_id,
+                pos_id, submission.broker_order_id, allocation.slot_id,
             )
 
         return result
