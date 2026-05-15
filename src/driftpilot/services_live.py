@@ -627,6 +627,77 @@ class CatalystScannerService:
         )
         return False
 
+    def _fetch_snapshot_features(
+        self,
+        symbols: list[str],
+        now: datetime,
+    ) -> dict[str, dict[str, float]]:
+        """Batch-fetch Alpaca snapshots and compute RVOL + intraday return.
+
+        Returns {SYMBOL: {"rvol": float, "return_15m_pct": float,
+        "vwap_distance_pct": float, "today_volume": int}} for each symbol
+        where the data was available.  Missing symbols get an empty dict.
+        """
+        if not symbols:
+            return {}
+        result: dict[str, dict[str, float]] = {}
+        try:
+            from alpaca.data.historical.stock import StockHistoricalDataClient
+            from alpaca.data.requests import StockSnapshotRequest
+
+            client = self.quote_provider._get_client()
+            req = StockSnapshotRequest(symbol_or_symbols=symbols)
+            snaps = client.get_stock_snapshot(req)
+            if not isinstance(snaps, dict):
+                return result
+
+            from zoneinfo import ZoneInfo
+            now_et = now.astimezone(ZoneInfo("America/New_York"))
+            market_open = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
+            elapsed_s = max((now_et - market_open).total_seconds(), 60.0)
+            elapsed_frac = min(elapsed_s / 23400.0, 1.0)  # 6.5h trading day
+
+            for sym, snap in snaps.items():
+                try:
+                    daily = getattr(snap, "daily_bar", None)
+                    prev = getattr(snap, "prev_daily_bar", None)
+                    minute = getattr(snap, "minute_bar", None)
+                    if daily is None:
+                        continue
+                    today_vol = float(daily.volume or 0)
+                    close_price = float(daily.close or 0)
+                    open_price = float(daily.open or 0)
+                    vwap = float(daily.vwap or 0)
+
+                    # RVOL: today's volume pace vs prev day's total
+                    avg_vol = float(prev.volume or 0) if prev else 0
+                    rvol = 0.0
+                    if avg_vol > 0 and elapsed_frac > 0:
+                        expected = avg_vol * elapsed_frac
+                        rvol = today_vol / expected if expected > 0 else 0.0
+
+                    # Intraday return (proxy for 15M — best available without bar history)
+                    return_pct = 0.0
+                    if open_price > 0:
+                        return_pct = (close_price - open_price) / open_price
+
+                    # VWAP distance
+                    vwap_dist = 0.0
+                    if vwap > 0 and close_price > 0:
+                        vwap_dist = (close_price - vwap) / vwap
+
+                    result[sym.upper()] = {
+                        "rvol": round(rvol, 2),
+                        "return_15m_pct": round(return_pct, 4),
+                        "vwap_distance_pct": round(vwap_dist, 4),
+                        "today_volume": int(today_vol),
+                    }
+                except Exception:
+                    continue
+        except Exception as exc:
+            logger.warning("snapshot enrichment failed: %s", exc)
+        return result
+
     def _annotate_with_routing(
         self,
         candidates: list[AllocationCandidate],
@@ -752,6 +823,12 @@ class CatalystScannerService:
             logger.exception("catalyst scanner: signal.scan raised: %s", exc)
             return _build_scan_result([], now)
 
+        # ── Batch-fetch Alpaca snapshots for RVOL / return enrichment ──
+        candidate_symbols = [sc.symbol.upper() for sc in sig_candidates]
+        snapshot_features = await asyncio.to_thread(
+            self._fetch_snapshot_features, candidate_symbols, now
+        ) if candidate_symbols else {}
+
         for rank, sc in enumerate(sig_candidates, start=1):
             quote = await asyncio.to_thread(self.quote_provider.latest_quote, sc.symbol)
             if quote is None:
@@ -797,6 +874,14 @@ class CatalystScannerService:
                 "bid_price": quote.bid_price,
                 "ask_price": quote.ask_price,
             }
+            # ── Merge snapshot-derived RVOL / return / VWAP into metadata ──
+            snap_feat = snapshot_features.get(sc.symbol.upper(), {})
+            if snap_feat:
+                metadata["rvol"] = snap_feat.get("rvol", 0.0)
+                metadata["return_15m_pct"] = snap_feat.get("return_15m_pct", 0.0)
+                metadata["vwap_distance_pct"] = snap_feat.get("vwap_distance_pct", 0.0)
+                metadata["today_volume"] = snap_feat.get("today_volume", 0)
+
             atr_pct = context.get("atr_pct", features.get("atr_pct"))
             beta = context.get("beta", features.get("beta"))
             if atr_pct is not None:
@@ -846,9 +931,11 @@ class CatalystScannerService:
             )
             candidates.append(ac)
             logger.info(
-                "CANDIDATE %s rank=%d score=%.4f (pm=%.2f conf=%.2f age=%.0fm spread=%.3f%%) sentiment=%s ref=%.2f | %s",
+                "CANDIDATE %s rank=%d score=%.4f (pm=%.2f conf=%.2f age=%.0fm spread=%.3f%% rvol=%.1fx ret=%.2f%%) sentiment=%s ref=%.2f | %s",
                 ac.symbol, rank, ac.score,
                 priority_mod, confidence, event_age, spread_pct,
+                metadata.get("rvol", 0.0),
+                metadata.get("return_15m_pct", 0.0) * 100,
                 features.get("sentiment") or "NONE",
                 ref_price,
                 (features.get("headline") or "")[:60],
