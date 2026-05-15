@@ -42,6 +42,7 @@
 | 26 | Shadow learning — counterfactual trade tracking | MED | ⬜ Todo |
 | 27 | Update requirements.md with V4 spec | LOW | ⬜ Todo |
 | 28 | RESERVED slot timeout in live operator loop | MED | ✅ Done |
+| 29 | Operator lifecycle supervision split — boot reconcile, warmup, final drain, watchdog hardening | HIGH | ✅ Done |
 
 ---
 
@@ -136,6 +137,14 @@
 - Fix: insert synthetic closed position (`FAILED_RESERVATION`) on reclaim so reentry cooldown (15 min) blocks re-reservation
 - Cooldown check in `_minutes_since_last_exit()` now sees the synthetic close and rejects the candidate
 - Files: `state_machine.py`
+
+### Task 29: Operator lifecycle supervision split
+- State machine now treats broker reconciliation as an authoritative boot gate; broker/repo reconcile failures transition to `ERROR` and block allocation
+- 09:30 ET opening warmup waits for the first fresh SPY bar instead of allocating on missing/stale opening data
+- 15:50-15:59 ET final drain is operator-owned: state machine calls `final_drain_all()` and skips new allocation work
+- Paper and live monitors implement final-drain execution; live path cancels protective stops and submits broker exits
+- `slot_manager.py` is now a deterministic watchdog/supervisor: it recycles stale `RESERVED`, warns on active-slot anomalies, and only runs premarket cleanup with explicit broker-flat confirmation
+- Files: `state_machine.py`, `services.py`, `services_live.py`, `scripts/slot_manager.py`
 
 ---
 
