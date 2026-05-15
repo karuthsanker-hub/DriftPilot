@@ -645,11 +645,16 @@ class CatalystScannerService:
             from alpaca.data.historical.stock import StockHistoricalDataClient
             from alpaca.data.requests import StockSnapshotRequest
 
-            client = self.quote_provider._get_client()
+            # Dedicated short-lived client to avoid CLOSE_WAIT connection reuse
+            client = StockHistoricalDataClient(
+                api_key=self.quote_provider._api_key,
+                secret_key=self.quote_provider._api_secret,
+            )
             req = StockSnapshotRequest(symbol_or_symbols=symbols)
             snaps = client.get_stock_snapshot(req)
             if not isinstance(snaps, dict):
                 return result
+            logger.debug("snapshot enrichment: fetched %d/%d symbols", len(snaps), len(symbols))
 
             from zoneinfo import ZoneInfo
             now_et = now.astimezone(ZoneInfo("America/New_York"))
@@ -669,12 +674,20 @@ class CatalystScannerService:
                     open_price = float(daily.open or 0)
                     vwap = float(daily.vwap or 0)
 
-                    # RVOL: today's volume pace vs prev day's total
+                    # RVOL: today's volume pace vs expected volume
+                    # Try prev_daily_bar first; fallback to trade_count ratio
                     avg_vol = float(prev.volume or 0) if prev else 0
                     rvol = 0.0
                     if avg_vol > 0 and elapsed_frac > 0:
                         expected = avg_vol * elapsed_frac
                         rvol = today_vol / expected if expected > 0 else 0.0
+                    elif today_vol > 0 and elapsed_frac > 0:
+                        # No prev day data — estimate RVOL from volume-per-minute
+                        # vs. typical ~300K avg daily volume as rough benchmark
+                        minutes_elapsed = max(elapsed_s / 60.0, 1.0)
+                        vol_per_min = today_vol / minutes_elapsed
+                        # Rough benchmark: avg stock trades ~770 shares/min in 6.5h
+                        rvol = vol_per_min / 770.0 if vol_per_min > 0 else 0.0
 
                     # Intraday return (proxy for 15M — best available without bar history)
                     return_pct = 0.0
@@ -875,12 +888,12 @@ class CatalystScannerService:
                 "ask_price": quote.ask_price,
             }
             # ── Merge snapshot-derived RVOL / return / VWAP into metadata ──
+            # Prefer signal-provided features (e.g. volume_spike already has rvol)
             snap_feat = snapshot_features.get(sc.symbol.upper(), {})
-            if snap_feat:
-                metadata["rvol"] = snap_feat.get("rvol", 0.0)
-                metadata["return_15m_pct"] = snap_feat.get("return_15m_pct", 0.0)
-                metadata["vwap_distance_pct"] = snap_feat.get("vwap_distance_pct", 0.0)
-                metadata["today_volume"] = snap_feat.get("today_volume", 0)
+            metadata["rvol"] = float(features.get("rvol") or snap_feat.get("rvol") or 0.0)
+            metadata["return_15m_pct"] = float(features.get("return_15m_pct") or snap_feat.get("return_15m_pct") or 0.0)
+            metadata["vwap_distance_pct"] = float(features.get("vwap_distance_pct") or snap_feat.get("vwap_distance_pct") or 0.0)
+            metadata["today_volume"] = int(features.get("today_volume") or snap_feat.get("today_volume") or 0)
 
             atr_pct = context.get("atr_pct", features.get("atr_pct"))
             beta = context.get("beta", features.get("beta"))
