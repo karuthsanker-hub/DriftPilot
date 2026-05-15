@@ -38,12 +38,17 @@ def _has_negative_catalyst(
 
 DEFAULT_CONSECUTIVE_LOSS_LIMIT = 2
 
-FREE_SLOT_STATUSES = {"EMPTY", "RECYCLING"}
+FREE_SLOT_STATUSES = {"EMPTY", "RECYCLING", "AVAILABLE"}
 # OCCUPIED was a legacy status string written by reconcile_broker_open_positions.
-# Keep it in the active set so any stale rows on disk still gate duplicates
-# until they're rewritten as OPEN.
+# "AVAILABLE" was another legacy status that old reconcile code wrote (lowercase
+# "available" normalised to "AVAILABLE" by _slot_status()). Both are kept so
+# any stale rows on disk are treated correctly until rewritten.
 ACTIVE_SLOT_STATUSES = {"RESERVED", "ENTERING", "OPEN", "EXITING", "OCCUPIED"}
-DEFAULT_MAX_SLOTS_PER_SECTOR = 4
+# Sector cap disabled by default — this is a day-trading system riding
+# intraday momentum, not a long-term portfolio balancer.  If 5 tech stocks
+# have signal, we should trade all 5.  Set via ALLOCATOR_MAX_SLOTS_PER_SECTOR
+# env var or constructor arg to re-enable.
+DEFAULT_MAX_SLOTS_PER_SECTOR = 0  # 0 = disabled
 
 
 class SlotRepositoryProtocol(Protocol):
@@ -147,7 +152,21 @@ class SlotAllocator:
             allocations: list[SlotAllocation] = []
             rejections: list[AllocationRejection] = []
 
-            for candidate in _ranked(candidates):
+            ranked_candidates = _ranked(candidates)
+            if ranked_candidates:
+                logger.info(
+                    "[ALLOCATOR] evaluating %d candidates (sorted by score) | "
+                    "free_slots: %d | active_symbols: %d | sector_cap: %s",
+                    len(ranked_candidates), len(free_slots), len(active_symbols),
+                    self.max_slots_per_sector if self.max_slots_per_sector > 0 else "disabled",
+                )
+                for i, c in enumerate(ranked_candidates[:10]):  # log top 10
+                    logger.info(
+                        "[ALLOCATOR]   #%d %s score=%.3f sector=%s rank=%s",
+                        i + 1, c.symbol, c.score, c.sector, c.rank,
+                    )
+
+            for candidate in ranked_candidates:
                 symbol = candidate.symbol.upper()
 
                 if self.catalyst_db_path and _has_negative_catalyst(
@@ -230,7 +249,7 @@ class SlotAllocator:
                     continue
 
                 sector = candidate.sector
-                if sector_counts.get(sector, 0) >= self.max_slots_per_sector:
+                if self.max_slots_per_sector > 0 and sector_counts.get(sector, 0) >= self.max_slots_per_sector:
                     rejections.append(AllocationRejection(symbol, "sector_cap_reached", {"sector": sector}))
                     continue
 
@@ -441,11 +460,17 @@ def _slot_status(slot: SlotRecord) -> str:
 
 
 def _ranked(candidates: list[AllocationCandidate]) -> list[AllocationCandidate]:
+    """Sort candidates by signal quality — highest score wins the slot.
+
+    For intraday momentum, signal strength (score) is the primary sort key.
+    Rank is a secondary tiebreaker only (e.g. two candidates with identical
+    scores).  Symbol is the final tiebreaker for determinism.
+    """
     return sorted(
         candidates,
         key=lambda candidate: (
-            candidate.rank if candidate.rank is not None else len(candidates) + 1,
             -candidate.score,
+            candidate.rank if candidate.rank is not None else len(candidates) + 1,
             candidate.symbol,
         ),
     )

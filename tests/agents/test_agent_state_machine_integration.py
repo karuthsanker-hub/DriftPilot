@@ -13,6 +13,7 @@ from unittest.mock import MagicMock, patch
 
 from driftpilot.clock import FixedClock
 from driftpilot.execution.slot_allocator import AllocationCandidate, AllocationResult
+from driftpilot.services import ExitDecision
 from driftpilot.settings import DriftPilotSettings
 from driftpilot.state_machine import (
     DriftPilotStateMachine,
@@ -275,3 +276,85 @@ class TestAgentObserveOnlyParity:
         orch.tick_pm.assert_not_called()
         orch.tick_slot.assert_not_called()
         orch.tick_scanner.assert_not_called()
+
+
+class TestAgentExitAuthority:
+    def test_agent_hold_cannot_veto_algo_exit(self, tmp_path):
+        """Once the algo says EXIT, agent HOLD opinions must not flip it back."""
+        repo = _repo(tmp_path)
+        repo.slots.upsert(1, status="OPEN", slot_value=1000, updated_at=NOW)
+        position = repo.positions.create_open(
+            symbol="AAPL",
+            quantity=10,
+            entry_price=100.0,
+            target_price=101.0,
+            stop_price=99.0,
+            opened_at=NOW - timedelta(minutes=5),
+            slot_id=1,
+        )
+        orch = _mock_orchestrator()
+        orch.get_override_rate.return_value = 0.0
+        orch._config.max_override_rate = 0.20
+        machine = DriftPilotStateMachine(
+            repo,
+            DriftPilotSettings(),
+            clock=FixedClock(fixed_now=NOW),
+            market_clock=AlwaysOpenClock(),
+            orchestrator=orch,
+        )
+
+        with patch(
+            "driftpilot.agents.state_machine_bridge.tick_slots_from_positions",
+            return_value={1: "hold"},
+        ):
+            decisions = machine._agent_intercept_exits([
+                ExitDecision(
+                    position=position,
+                    exit_reason="PROFIT_TAKE",
+                    reference_price=101.0,
+                )
+            ])
+
+        assert len(decisions) == 1
+        assert decisions[0].exit_reason == "PROFIT_TAKE"
+        assert decisions[0].overridden_by_agent is False
+
+    def test_agent_can_still_request_early_cut_when_algo_holds(self, tmp_path):
+        """V4 safety blocks vetoes, not early cuts from an algo HOLD."""
+        repo = _repo(tmp_path)
+        repo.slots.upsert(1, status="OPEN", slot_value=1000, updated_at=NOW)
+        position = repo.positions.create_open(
+            symbol="AAPL",
+            quantity=10,
+            entry_price=100.0,
+            target_price=101.0,
+            stop_price=99.0,
+            opened_at=NOW - timedelta(minutes=5),
+            slot_id=1,
+        )
+        orch = _mock_orchestrator()
+        orch.get_override_rate.return_value = 0.0
+        orch._config.max_override_rate = 0.20
+        machine = DriftPilotStateMachine(
+            repo,
+            DriftPilotSettings(),
+            clock=FixedClock(fixed_now=NOW),
+            market_clock=AlwaysOpenClock(),
+            orchestrator=orch,
+        )
+
+        with patch(
+            "driftpilot.agents.state_machine_bridge.tick_slots_from_positions",
+            return_value={1: "request_early_cut"},
+        ):
+            decisions = machine._agent_intercept_exits([
+                ExitDecision(
+                    position=position,
+                    exit_reason=None,
+                    reference_price=100.25,
+                )
+            ])
+
+        assert len(decisions) == 1
+        assert decisions[0].exit_reason == "AGENT_CUT"
+        assert decisions[0].overridden_by_agent is True

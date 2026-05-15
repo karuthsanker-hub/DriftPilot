@@ -39,6 +39,14 @@ from driftpilot.signals.earnings_report_v1 import (
     EarningsReportConfig,
     EarningsReportSignal,
 )
+from driftpilot.services import (
+    EodPositionSnapshot,
+    _eod_dilution_step_count,
+    _least_profitable_concentrated_sector_positions,
+    _median,
+    _tightened_eod_stop_price,
+)
+from driftpilot.state_machine import ReconciliationResult
 from driftpilot.storage.repositories import DriftPilotRepository
 
 logger = logging.getLogger(__name__)
@@ -176,7 +184,7 @@ def compute_dynamic_bands(
     tod_mult = TIME_OF_DAY_STOP_MULT.get(time_of_day, 1.0)
     if tod_mult != 1.0:
         stop *= tod_mult
-        reasons.append(f"time-of-day '{time_of_day}' stop x{tod_mult:.2f}")
+    reasons.append(f"time_profile={time_of_day}")
 
     # --- Spread cost deduction ------------------------------------------
     if spread_pct > 0:
@@ -403,33 +411,56 @@ class LiveBrokerReconciler:
         self.repository = repository
         self.settings = settings
 
-    async def reconcile_open_positions(self) -> str:
+    async def reconcile_open_positions(self) -> ReconciliationResult:
         try:
             broker_positions = await self.alpaca.get_open_positions()
         except Exception as exc:
-            logger.warning("alpaca reconcile fetch failed: %s — assuming no open positions", exc)
-            broker_positions = []
+            logger.error("alpaca reconcile fetch failed: %s", exc, exc_info=True)
+            return ReconciliationResult(
+                ok=False,
+                status="broker_unavailable",
+                error=str(exc),
+            )
 
-        # Translate alpaca BrokerPosition → list of dicts the repo expects
-        # (or empty list — mock-equivalent for "no open positions").
+        # Translate alpaca BrokerPosition → list of dicts the repo expects.
+        # Use direct attribute access (no getattr defaults) so type mismatches
+        # crash loudly instead of silently producing $0 prices.
+        translated = []
+        for p in broker_positions:
+            entry = float(p.average_entry_price)
+            if entry <= 0:
+                logger.error(
+                    "reconcile: %s has entry_price=%.4f — skipping",
+                    p.symbol, entry,
+                )
+                continue
+            translated.append({
+                "symbol": str(p.symbol).upper(),
+                "quantity": float(p.quantity),
+                "entry_price": entry,
+            })
         try:
-            return self.repository.positions.reconcile_broker_open_positions(
-                broker_positions=[
-                    {
-                        "symbol": getattr(p, "symbol", "").upper(),
-                        "quantity": float(getattr(p, "quantity", 0)),
-                        "avg_entry_price": float(getattr(p, "avg_entry_price", 0)),
-                    }
-                    for p in broker_positions
-                ],
+            status = self.repository.positions.reconcile_broker_open_positions(
+                broker_positions=translated,
                 slot_value=self.settings.slot_value,
                 target_pct=self.settings.target_pct,
                 stop_pct=self.settings.stop_pct,
                 trade_slots=self.settings.trade_slots,
             )
+            return ReconciliationResult(
+                ok=True,
+                status=status,
+                broker_symbols=tuple(sorted(position["symbol"] for position in translated)),
+                metadata={"broker_position_count": len(translated)},
+            )
         except Exception as exc:
-            logger.warning("repo reconcile failed: %s — continuing with no-op", exc)
-            return "live_reconcile_noop"
+            logger.error("repo reconcile failed: %s", exc, exc_info=True)
+            return ReconciliationResult(
+                ok=False,
+                status="repo_reconcile_failed",
+                broker_symbols=tuple(sorted(position["symbol"] for position in translated)),
+                error=str(exc),
+            )
 
     # Pass-through for any other broker calls the state machine might make
     def __getattr__(self, name):
@@ -738,21 +769,41 @@ class CatalystScannerService:
             sector = sc.sector or self._sector_map.get(sc.symbol.upper()) or "Unknown"
             headline_hash = features.get("headline_hash")
             context = self._load_context_json(sc.symbol, headline_hash, features)
+
+            # ── Compute spread quality ──
+            spread_pct = 0.0
+            if ref_price > 0 and quote.bid_price > 0 and quote.ask_price > 0:
+                spread_pct = (quote.ask_price - quote.bid_price) / ref_price * 100.0
+
+            # ── Extract enrichment data ──
+            priority_mod = float(features.get("priority_modifier") or 0.0)
+            confidence = float(features.get("confidence") or 0.5)
+            event_age = float(features.get("event_age_minutes") or 0.0)
+
             metadata = {
                 "reference_price": ref_price,
                 "catalyst_event_ts": cat_ts_str,
                 "headline": features.get("headline"),
                 "headline_hash": headline_hash,
                 "sentiment": features.get("sentiment"),
-                "priority_modifier": features.get("priority_modifier"),
+                "priority_modifier": priority_mod,
+                "confidence": confidence,
                 "category": features.get("category"),
                 "subcategory": features.get("subcategory"),
-                "event_age_minutes": features.get("event_age_minutes"),
+                "event_age_minutes": event_age,
                 "horizon_minutes": features.get("horizon_minutes"),
                 "source": features.get("source", "catalyst_bus"),
+                "spread_pct": round(spread_pct, 4),
+                "bid_price": quote.bid_price,
+                "ask_price": quote.ask_price,
             }
             atr_pct = context.get("atr_pct", features.get("atr_pct"))
             beta = context.get("beta", features.get("beta"))
+            if atr_pct is not None:
+                try:
+                    metadata["atr_pct"] = float(atr_pct)
+                except (TypeError, ValueError):
+                    pass
             if beta is not None:
                 try:
                     metadata["beta"] = float(beta)
@@ -773,9 +824,21 @@ class CatalystScannerService:
                 metadata=metadata,
             ):
                 continue
+
+            # ── Compute real conviction score ──
+            # Base: priority_modifier (Qwen's magnitude estimate, -0.20 to +0.20)
+            # Weighted by: confidence (0-1), recency decay, spread quality
+            recency_factor = max(0.3, 1.0 - event_age / 120.0)  # decay over 2 hours
+            spread_penalty = max(0.5, 1.0 - spread_pct * 5.0)   # 0.2% spread = 0, wider = penalty
+            conviction_score = round(
+                abs(priority_mod) * max(confidence, 0.3) * recency_factor * spread_penalty,
+                4,
+            )
+            metadata["conviction_score"] = conviction_score
+
             ac = AllocationCandidate(
                 symbol=sc.symbol,
-                score=float(sc.score),
+                score=conviction_score,
                 sector=sector,
                 latest_bar_at=now,
                 rank=rank,
@@ -783,13 +846,26 @@ class CatalystScannerService:
             )
             candidates.append(ac)
             logger.info(
-                "CANDIDATE %s rank=%d score=%+.2f sentiment=%s age=%.1fmin ref=%.2f | %s",
+                "CANDIDATE %s rank=%d score=%.4f (pm=%.2f conf=%.2f age=%.0fm spread=%.3f%%) sentiment=%s ref=%.2f | %s",
                 ac.symbol, rank, ac.score,
+                priority_mod, confidence, event_age, spread_pct,
                 features.get("sentiment") or "NONE",
-                float(features.get("event_age_minutes") or 0),
                 ref_price,
-                (features.get("headline") or "")[:80],
+                (features.get("headline") or "")[:60],
             )
+
+            # ── Record passing candidate in queue for dashboard visibility ──
+            if self.repository is not None:
+                try:
+                    self.repository.candidate_queue.mark_passed(
+                        sc.symbol,
+                        score=conviction_score,
+                        rank=rank,
+                        features=metadata,
+                        updated_at=now,
+                    )
+                except Exception:
+                    pass  # non-fatal
 
         if not candidates:
             logger.info("catalyst scanner: 0 candidates this cycle (no admitted events)")
@@ -889,7 +965,9 @@ class LiveAlpacaAllocator:
         self.broker = broker
         self.clock = clock or DriftPilotClock(settings.timezone)
         self.allocator = SlotAllocator(
-            repository, settings, clock=self.clock, catalyst_db_path=catalyst_db_path
+            repository, settings, clock=self.clock,
+            catalyst_db_path=catalyst_db_path,
+            max_slots_per_sector=settings.max_slots_per_sector,
         )
 
     async def allocate(self, candidates: list[AllocationCandidate]) -> AllocationResult:
@@ -931,16 +1009,36 @@ class LiveAlpacaAllocator:
                 band_catalyst_profile = (
                     f"{candidate.metadata.get('category')}/{candidate.metadata.get('subcategory')}"
                 )
+            # Derive time-of-day bucket from entry time for ATR-based bands
+            _band_tod = "morning"
+            try:
+                from zoneinfo import ZoneInfo
+                _et = allocation.reserved_at.astimezone(ZoneInfo("America/New_York"))
+                _et_time = _et.time()
+                if _et_time < datetime.strptime("10:00", "%H:%M").time():
+                    _band_tod = "open"
+                elif _et_time < datetime.strptime("12:00", "%H:%M").time():
+                    _band_tod = "morning"
+                elif _et_time < datetime.strptime("13:30", "%H:%M").time():
+                    _band_tod = "midday"
+                elif _et_time < datetime.strptime("15:30", "%H:%M").time():
+                    _band_tod = "afternoon"
+                else:
+                    _band_tod = "close"
+            except Exception:
+                pass
+
+            # Map category → catalyst key for CATALYST_WIDEN lookup
+            _band_catalyst = candidate.metadata.get("category")  # "earnings", "analyst", "fda", etc.
+
             bands = compute_dynamic_bands(
-                reference_price,
-                reference_price,
                 atr_pct=candidate.metadata.get("atr_pct"),
+                drift_pct=float(candidate.metadata.get("drift_pct", 0.0)),
+                rvol=float(candidate.metadata.get("rvol", 1.0)),
                 beta=band_beta,
-                default_target_pct=self.settings.target_pct,
-                default_stop_pct=max(self.settings.stop_pct, DEFAULT_ATR_PCT),
-                entry_time=allocation.reserved_at,
-                category=candidate.metadata.get("category"),
-                subcategory=candidate.metadata.get("subcategory"),
+                catalyst=_band_catalyst,
+                time_of_day=_band_tod,
+                spread_pct=float(candidate.metadata.get("spread_pct", 0.0)),
             )
             band_time_profile = "regular"
             for token in bands.reasoning.split("; "):
@@ -1132,6 +1230,133 @@ class LiveAlpacaPositionMonitor:
             metadata={"source": "live_alpaca_paper"},
         )
 
+    async def apply_eod_dilution(self):
+        """Tighten EOD risk controls during the 15:15 ET fade window."""
+        from driftpilot.state_machine import PositionMonitorResult
+
+        now = self.clock.now_utc()
+        positions = self.repository.positions.list_open()
+        if not positions:
+            return PositionMonitorResult(
+                open_positions=0,
+                metadata={
+                    "source": "eod_dilution",
+                    "checked_at": now.isoformat(),
+                    "active": False,
+                    "reason": "no_open_positions",
+                },
+            )
+
+        step_count = _eod_dilution_step_count(self.clock.to_et(now))
+        if step_count <= 0:
+            return PositionMonitorResult(
+                open_positions=len(positions),
+                metadata={
+                    "source": "eod_dilution",
+                    "checked_at": now.isoformat(),
+                    "active": False,
+                    "reason": "before_1515_et",
+                },
+            )
+
+        snapshots: list[EodPositionSnapshot] = []
+        for position in positions:
+            symbol = (position.symbol or "").upper()
+            quote = None
+            try:
+                quote = await asyncio.wait_for(
+                    asyncio.to_thread(self.quote_provider.latest_quote, symbol),
+                    timeout=5.0,
+                )
+            except asyncio.TimeoutError:
+                logger.warning("[EOD] dilution quote fetch for %s timed out", symbol)
+            if quote is None:
+                metadata = dict(position.metadata or {})
+                current_price = float(
+                    metadata.get("bid_price")
+                    or metadata.get("current_price")
+                    or metadata.get("reference_price")
+                    or position.entry_price
+                )
+            else:
+                current_price = quote.bid_price if quote.bid_price > 0 else (
+                    quote.bid_price + quote.ask_price
+                ) / 2.0
+            unrealized_pct = (
+                ((current_price - float(position.entry_price)) / float(position.entry_price)) * 100.0
+                if float(position.entry_price) > 0
+                else 0.0
+            )
+            sector = str((position.metadata or {}).get("sector") or "Unknown")
+            snapshots.append(EodPositionSnapshot(position, current_price, unrealized_pct, sector))
+
+        median_unrealized_pct = _median([snapshot.unrealized_pct for snapshot in snapshots])
+        tightened = 0
+        for snapshot in snapshots:
+            new_stop = _tightened_eod_stop_price(
+                current_price=snapshot.current_price,
+                current_stop=float(snapshot.position.stop_price),
+                step_count=step_count,
+                lock_to_bid=snapshot.unrealized_pct > median_unrealized_pct,
+            )
+            if new_stop <= float(snapshot.position.stop_price):
+                continue
+            metadata = {
+                "eod_dilution_active": True,
+                "eod_dilution_step_count": step_count,
+                "eod_dilution_stop_price": new_stop,
+                "eod_dilution_reference_price": snapshot.current_price,
+                "eod_dilution_unrealized_pct": snapshot.unrealized_pct,
+                "eod_dilution_median_unrealized_pct": median_unrealized_pct,
+            }
+            self.repository.positions.update_stop_price(
+                snapshot.position.id,
+                stop_price=new_stop,
+                metadata=metadata,
+            )
+            if snapshot.position.slot_id is not None:
+                slot = self.repository.slots.get(snapshot.position.slot_id)
+                slot_metadata = {**(slot.metadata if slot else {}), **metadata}
+                self.repository.slots.upsert(
+                    snapshot.position.slot_id,
+                    status="OPEN",
+                    symbol=snapshot.position.symbol,
+                    position_id=snapshot.position.id,
+                    slot_value=self.settings.slot_value,
+                    metadata=slot_metadata,
+                    updated_at=now,
+                )
+            tightened += 1
+
+        sector_exits = 0
+        for snapshot in _least_profitable_concentrated_sector_positions(snapshots):
+            try:
+                closed = await self._force_exit_position(
+                    snapshot.position,
+                    reference_price=snapshot.current_price,
+                    exit_reason="EOD_SECTOR_DILUTION",
+                )
+            except Exception as exc:
+                logger.warning("[EOD] sector dilution exit failed for %s: %s", snapshot.position.symbol, exc)
+                closed = 0
+            sector_exits += closed
+
+        return PositionMonitorResult(
+            open_positions=len(self.repository.positions.list_open()),
+            exit_orders=sector_exits,
+            recycled_slots=sector_exits,
+            halted_reason=None,
+            metadata={
+                "source": "eod_dilution",
+                "checked_at": now.isoformat(),
+                "active": True,
+                "step_count": step_count,
+                "tightened": tightened,
+                "median_unrealized_pct": median_unrealized_pct,
+                "sector_exits": sector_exits,
+            },
+        )
+
     async def _reconcile_alpaca_to_local(self) -> int:
         """Insert local position records for any Alpaca positions missing
         from our DB. Uses slot data + catalyst metadata where available.
@@ -1187,11 +1412,11 @@ class LiveAlpacaPositionMonitor:
                     },
                 )
                 if position.slot_id is not None:
-                    self.repository.slots.upsert(
+                    self.repository.slots.free_slot(
                         position.slot_id,
-                        status="EMPTY",
-                        symbol=None,
                         slot_value=self.settings.slot_value,
+                        reason="protective_stop_filled",
+                        last_symbol=sym,
                         updated_at=self.clock.now_utc(),
                     )
                 added += 1
@@ -1225,12 +1450,7 @@ class LiveAlpacaPositionMonitor:
                 continue
 
             # Pull catalyst metadata from slot's stored candidate
-            slot_md = {}
-            slot_md_raw = getattr(slot, "metadata_json", None) or "{}"
-            try:
-                slot_md = json.loads(slot_md_raw)
-            except (TypeError, json.JSONDecodeError):
-                pass
+            slot_md = dict(getattr(slot, "metadata", {}) or {})
             cand = slot_md.get("candidate", {})
             entry_price = float(ap.average_entry_price)
             opened_at = slot_md.get("reserved_at") or datetime.now(timezone.utc).isoformat()
@@ -1280,6 +1500,48 @@ class LiveAlpacaPositionMonitor:
             return self._signal
         return get_signal(self.settings.active_signal)
 
+    async def _force_exit_position(self, position, *, reference_price: float, exit_reason: str) -> int:
+        symbol = (position.symbol or "").upper()
+        quantity = float(getattr(position, "quantity", 0.0))
+        if quantity <= 0:
+            return 0
+        metadata = dict(position.metadata or {})
+        stop_oid = metadata.get("protective_stop_order_id")
+        if stop_oid:
+            try:
+                await self.broker.cancel_order(stop_oid)
+            except Exception as exc:
+                logger.warning("[EOD] protective stop cancel failed for %s/%s: %s", symbol, stop_oid, exc)
+        result = await self.broker.submit_exit_order(
+            symbol=symbol,
+            quantity=quantity,
+            position_id=position.id,
+        )
+        if not result or not result.submitted:
+            return 0
+        exit_price = float(result.limit_price or reference_price)
+        realized = (exit_price - float(position.entry_price)) * quantity
+        self.repository.positions.close(
+            position.id,
+            exit_reason=exit_reason,
+            realized_pnl=realized,
+            closed_at=self.clock.now_utc(),
+            metadata={
+                "exit_price": exit_price,
+                "broker_exit_order_id": result.broker_order_id,
+                "exit_close_path": exit_reason.lower(),
+            },
+        )
+        if position.slot_id is not None:
+            self.repository.slots.free_slot(
+                position.slot_id,
+                slot_value=self.settings.slot_value,
+                reason=exit_reason,
+                last_symbol=symbol,
+                updated_at=self.clock.now_utc(),
+            )
+        return 1
+
     async def _process_one_position(self, position, signal, now) -> int:
         """Evaluate and (if needed) submit an exit for a single position.
         Returns 1 if an exit was completed, 0 otherwise. Exceptions are
@@ -1300,8 +1562,13 @@ class LiveAlpacaPositionMonitor:
                 return 0
 
             mid = (quote.bid_price + quote.ask_price) / 2.0
+            # Use bid price for unrealized P&L — exit fills at bid (minus
+            # offset), so mid overstates by half the spread.  This prevents
+            # PROFIT_TAKE from firing on positions that would actually fill
+            # below target.
+            exit_ref = quote.bid_price if quote.bid_price > 0 else mid
             entry_price = float(getattr(position, "entry_price", 0.0))
-            unrealized_pct = ((mid - entry_price) / entry_price * 100.0) if entry_price > 0 else 0.0
+            unrealized_pct = ((exit_ref - entry_price) / entry_price * 100.0) if entry_price > 0 else 0.0
 
             # Set current_price + peak_unrealized_pct on the position so the
             # signal's evaluate_exit can compute trailing stop correctly.
@@ -1314,12 +1581,15 @@ class LiveAlpacaPositionMonitor:
             new_peak = max(prev_peak, unrealized_pct)
             if position_id is not None:
                 self._peak_by_position_id[position_id] = new_peak
-            position_metadata["current_price"] = mid
+            position_metadata["current_price"] = exit_ref
+            position_metadata["mid_price"] = mid  # keep mid for reference
+            position_metadata["bid_price"] = quote.bid_price
+            position_metadata["ask_price"] = quote.ask_price
             position_metadata["peak_unrealized_pct"] = new_peak
             try:
                 object.__setattr__(position, "metadata", position_metadata)
                 if hasattr(position, "current_price"):
-                    object.__setattr__(position, "current_price", mid)
+                    object.__setattr__(position, "current_price", exit_ref)
             except Exception:
                 pass
 
@@ -1410,13 +1680,30 @@ class LiveAlpacaPositionMonitor:
                 slot_id = getattr(position, "slot_id", None)
                 if slot_id is not None:
                     try:
-                        self.repository.slots.upsert(
-                            slot_id, status="EMPTY", symbol=None,
+                        self.repository.slots.free_slot(
+                            slot_id,
                             slot_value=self.settings.slot_value,
+                            reason=exit_reason,
+                            last_symbol=symbol,
                             updated_at=self.clock.now_utc(),
                         )
                     except Exception as slot_exc:
                         logger.warning("LIVE: slot %s free failed: %s", slot_id, slot_exc)
+                # Reset price-drift baseline so the symbol isn't blocked
+                # from re-entry by stale drift from the morning observation.
+                try:
+                    exit_price = float(position_metadata.get("current_price", mid))
+                    n_reset = self.repository.price_drift_baselines.reset_all_baselines_for_symbol(
+                        symbol, exit_price, at=self.clock.now_utc(),
+                    )
+                    if n_reset:
+                        logger.info(
+                            "LIVE: reset %d drift baselines for %s at $%.2f after exit",
+                            n_reset, symbol, exit_price,
+                        )
+                except Exception as drift_exc:
+                    logger.warning("LIVE: drift baseline reset failed for %s: %s", symbol, drift_exc)
+
                 # Clean up in-memory peak tracker
                 self._peak_by_position_id.pop(getattr(position, "id", None), None)
                 logger.info(
@@ -1453,6 +1740,143 @@ class LiveAlpacaPositionMonitor:
         )
         exit_count = sum(r for r in results if isinstance(r, int))
         return exit_count
+
+    async def final_drain_all(self):
+        """Final 15:50 ET drain: submit broker exits for every open position."""
+        from driftpilot.state_machine import PositionMonitorResult
+
+        positions = self.repository.positions.list_open()
+        if not positions:
+            return PositionMonitorResult(
+                open_positions=0,
+                metadata={
+                    "source": "final_drain",
+                    "reason": "no_open_positions",
+                    "checked_at": self.clock.now_utc().isoformat(),
+                },
+            )
+
+        closed = 0
+        for position in positions:
+            metadata = dict(position.metadata or {})
+            reference_price = float(
+                metadata.get("bid_price")
+                or metadata.get("current_price")
+                or metadata.get("reference_price")
+                or position.entry_price
+            )
+            try:
+                closed += await self._force_exit_position(
+                    position,
+                    reference_price=reference_price,
+                    exit_reason="FINAL_DRAIN",
+                )
+            except Exception as exc:
+                logger.warning("[FINAL_DRAIN] exit failed for %s: %s", position.symbol, exc)
+
+        return PositionMonitorResult(
+            open_positions=len(self.repository.positions.list_open()),
+            exit_orders=closed,
+            recycled_slots=closed,
+            halted_reason=None,
+            metadata={
+                "source": "final_drain",
+                "reason": "after_1550_et",
+                "checked_at": self.clock.now_utc().isoformat(),
+            },
+        )
+
+    async def eod_liquidate_all(self) -> int:
+        """End-of-day: close every open position at market and free its slot.
+
+        Called once when the market-close transition fires. For an intraday
+        system, no position should survive overnight.  Submits real broker
+        exit orders so the Alpaca side is flat before the operator shuts down.
+        Returns the count of positions successfully closed.
+        """
+        positions = self.repository.positions.list_open()
+        if not positions:
+            logger.info("[EOD] no open positions — nothing to liquidate")
+            return 0
+
+        logger.info("[EOD] liquidating %d open positions", len(positions))
+        closed = 0
+        now = self.clock.now_utc()
+
+        for position in positions:
+            symbol = (position.symbol or "").upper()
+            quantity = float(position.quantity)
+            if quantity <= 0:
+                continue
+
+            # Best-effort broker exit — use market order semantics
+            exit_price: float | None = None
+            broker_oid: str | None = None
+            try:
+                # Cancel any protective stop first
+                stop_oid = (position.metadata or {}).get("protective_stop_order_id")
+                if stop_oid:
+                    try:
+                        await self.broker.cancel_order(stop_oid)
+                    except Exception:
+                        pass  # already cancelled or filled
+
+                exit_result = await self.broker.submit_exit_order(
+                    symbol=symbol,
+                    quantity=quantity,
+                    position_id=position.id,
+                )
+                if exit_result and exit_result.submitted:
+                    exit_price = exit_result.limit_price
+                    broker_oid = exit_result.broker_order_id
+            except Exception as exc:
+                logger.warning("[EOD] broker exit failed for %s: %s — using last known price", symbol, exc)
+
+            # Fallback: use quote mid if broker didn't return a price
+            if exit_price is None:
+                try:
+                    quote = await self.quote_provider.get_quote(symbol)
+                    if quote and quote.bid_price and quote.ask_price:
+                        exit_price = (quote.bid_price + quote.ask_price) / 2.0
+                except Exception:
+                    pass
+            if exit_price is None:
+                exit_price = float(position.entry_price)  # worst case: flat
+
+            entry_price = float(position.entry_price)
+            realized = (exit_price - entry_price) * quantity
+
+            try:
+                self.repository.positions.close(
+                    position.id,
+                    exit_reason="eod_liquidation",
+                    realized_pnl=realized,
+                    closed_at=now,
+                    metadata={
+                        "exit_price": exit_price,
+                        "broker_exit_order_id": broker_oid,
+                        "exit_close_path": "eod_liquidation",
+                    },
+                )
+                if position.slot_id is not None:
+                    self.repository.slots.free_slot(
+                        position.slot_id,
+                        slot_value=self.settings.slot_value,
+                        reason="eod_liquidation",
+                        last_symbol=symbol,
+                        updated_at=now,
+                    )
+                closed += 1
+                logger.info(
+                    "[EOD] closed %s qty=%.0f entry=$%.2f exit=$%.2f realized=$%.2f slot=%s",
+                    symbol, quantity, entry_price, exit_price, realized,
+                    position.slot_id,
+                )
+            except Exception as exc:
+                logger.error("[EOD] failed to close %s locally: %s", symbol, exc, exc_info=True)
+
+        logger.info("[EOD] liquidation complete: %d/%d positions closed", closed, len(positions))
+        return closed
 
 
 def build_live_components(

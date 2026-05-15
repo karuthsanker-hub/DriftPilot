@@ -155,8 +155,8 @@ class TestRealPromptConfigs:
         assert "{symbol}" in config.user_template
         assert "{daily_pnl_pct}" in config.user_template
 
-    def test_slot_exit_override_defaults_to_hold(self):
+    def test_slot_exit_override_defaults_to_follow_algo(self):
         loader = PromptLoader("config/prompts")
         config = loader.get("slot_exit_override")
-        assert config.fallback_action == "hold"
+        assert config.fallback_action == "follow_algo"
         assert config.model == "qwen"

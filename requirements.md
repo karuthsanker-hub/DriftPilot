@@ -281,3 +281,39 @@ A new catalyst signal that fails these does not ship. No exceptions.
 - Don't build [B] Meso, [D] Alpha, or industry-specific routing without spike data first.
 - Don't invent a "RED regime" — Macro feeds the existing `RegimeDetector → NEWS_SHOCK`.
 - Don't apply percent-based "+20% priority" boosts. Rank only.
+
+---
+
+# DriftPilot v4 — Operator Spec Addendum
+
+## 5. Sizing Model
+
+- **Fixed Slots:** 10 × $1,000
+- Volatility sizing via `size_multiplier` (0.5x–1.5x) applied to slot_value, not slot count
+- `size_multiplier` set by PM agent based on ATR/beta profile
+
+## 6. Safety Logic
+
+- **Deterministic & Non-Negotiable:** `TIME`, `STOP_LOSS`, `PROFIT_TAKE`, `TRAILING_STOP`, `FAILSAFE_TIME_STOP` are mechanical exits — agents CANNOT veto them
+- Agents can ONLY: **"Early Cut"** (request exit before stop) or **"Veto"** non-mechanical/discretionary exits
+- Override rate capped at 20% of daily decisions (`AGENT_MAX_OVERRIDE_RATE=0.20`)
+
+## 7. End-of-Day (EOD) Dilution & Inventory Management
+
+- **Time-Decay Stop Tightening:** Starting at 15:15 ET, tighten all active slot stop-losses by 10% every 5 minutes until market close
+- **Inventory Concentration Cut:** If sector exposure exceeds 3 slots at EOD, auto-liquidate the least profitable position in that sector
+- **Counterfactual Reflection:** Denied trades from the final 60 minutes backfilled to counterfactual DB to detect "Missing the EOD Run-up" pattern
+- **Hard backstop:** `eod_liquidate_all()` at 16:00 ET closes anything surviving dilution
+
+## 8. Configuration Constants
+
+- `MAX_HOLD_MINUTES = 45` (all signals, no exceptions)
+- `DAILY_LOSS_LIMIT_PCT = 0.03` (3% of account equity)
+- `OPERATOR_TRADE_SLOTS = 10`
+- `OPERATOR_SLOT_VALUE = 1000.0`
+
+## 9. Learning Infrastructure
+
+- **Active Shadow Learning** via counterfactual tracking
+- Every denied trade (allocator rejection + agent veto) recorded with outcome
+- Future: pgvector embeddings for pattern matching across denial reasons

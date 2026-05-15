@@ -114,6 +114,19 @@ def tick_pm_from_repo(
         except Exception:
             minutes_left = 120  # fallback
 
+        # Read actual override counts from agent states (written by agents
+        # each tick).  Falling back to 0 is safe — it just means the
+        # override-rate guardrail won't fire until the first agent tick.
+        override_count = 0
+        total_decisions = 0
+        try:
+            agent_states = orchestrator.get_agent_states()
+            for _name, state in agent_states.items():
+                override_count += int(state.get("override_count_today", 0))
+                total_decisions += int(state.get("total_decisions_today", 0))
+        except Exception:
+            pass  # best-effort; zeros are a safe default
+
         snapshot = PortfolioSnapshot(
             open_slots=open_count,
             total_slots=total_slots,
@@ -123,8 +136,8 @@ def tick_pm_from_repo(
             consecutive_losses=consec_losses,
             minutes_left_in_session=minutes_left,
             last_trade_result=last_result,
-            override_count_today=0,  # populated by orchestrator internally
-            total_decisions_today=0,
+            override_count_today=override_count,
+            total_decisions_today=total_decisions,
         )
 
         logger.info(

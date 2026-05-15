@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
-"""Slot Manager — autonomous health monitor for the DriftPilot operator.
+"""Slot Manager — watchdog/supervisor for DriftPilot slot inventory.
 
 Runs as a background daemon alongside the operator. Every POLL_INTERVAL
 seconds it:
   1. Collects system state (slots, positions, logs, process health)
-  2. Sends a structured health report to Qwen for analysis
-  3. Executes Qwen's recommended corrective actions
+  2. Runs deterministic slot inventory health checks
+  3. Executes only narrow, deterministic corrective actions
 
 Safe actions the manager can take:
   - Recycle stuck RESERVED slots → EMPTY
   - Log warnings about anomalies
-  - Restart the operator process if it's dead
+  - Premarket slot cleanup only with explicit broker-flat confirmation
 
 Actions it will NEVER take:
-  - Modify OPEN slots or positions
+  - Modify OPEN/ENTERING/EXITING slots during normal watchdog checks
   - Submit or cancel orders
   - Change config or signal settings
 
@@ -26,36 +26,208 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import os
 import signal
 import sqlite3
-import subprocess
 import sys
 import time
-from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass
+from datetime import datetime, time as datetime_time, timedelta, timezone
 from pathlib import Path
 
-import httpx
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+SRC_ROOT = PROJECT_ROOT / "src"
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
+
+from driftpilot.clock import DriftPilotClock, datetime_from_storage, datetime_to_storage
 
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DB_PATH = PROJECT_ROOT / "data" / "driftpilot" / "operator_state.sqlite3"
 CATALYST_DB = PROJECT_ROOT / "data" / "driftpilot" / "catalyst_events.sqlite3"
 LOG_DIR = PROJECT_ROOT / "logs"
 PID_FILE = LOG_DIR / "operator.pid"
 MANAGER_LOG = LOG_DIR / "slot_manager.log"
 
-QWEN_URL = os.environ.get("QWEN_URL", "http://192.168.1.166:8000/v1")
-QWEN_MODEL = os.environ.get("QWEN_MODEL", "Qwen/Qwen3-8B")
-QWEN_TIMEOUT = 10  # seconds — manager isn't latency-critical
 POLL_INTERVAL = 60  # seconds between health checks
 RESERVED_STALE_MINUTES = 5  # recycle RESERVED slots older than this
+ACTIVE_SLOT_STATUSES = frozenset({"OPEN", "ENTERING", "EXITING"})
 
 logger = logging.getLogger("slot_manager")
+
+
+@dataclass(frozen=True, slots=True)
+class HealthIssue:
+    """Deterministic health issue emitted by watchdog checks."""
+
+    code: str
+    severity: str
+    message: str
+    slot_id: int | None = None
+    position_id: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PremarketCleanDecision:
+    """Pure decision result for the guarded premarket cleanup action."""
+
+    allowed: bool
+    reason: str
+
+
+# ---------------------------------------------------------------------------
+# Pure health helpers
+# ---------------------------------------------------------------------------
+
+def _coerce_positive_int(value: object) -> int | None:
+    """Return a positive int, or None for null/invalid identifiers."""
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def find_slot_inventory_issues(
+    slots: list[dict],
+    open_positions: list[dict],
+) -> list[HealthIssue]:
+    """Detect impossible slot/position inventory without mutating anything."""
+    issues: list[HealthIssue] = []
+    open_positions_by_id = {
+        int(position["id"]): position
+        for position in open_positions
+        if _coerce_positive_int(position.get("id")) is not None
+    }
+    active_slots_by_position_id: dict[int, dict] = {}
+
+    for slot in slots:
+        status = str(slot.get("status") or "").upper()
+        if status not in ACTIVE_SLOT_STATUSES:
+            continue
+
+        slot_id = _coerce_positive_int(slot.get("slot_id"))
+        position_id = _coerce_positive_int(slot.get("position_id"))
+        if position_id is None:
+            issues.append(
+                HealthIssue(
+                    code="active_slot_invalid_position_id",
+                    severity="warning",
+                    message=(
+                        f"{status} slot {slot_id or '?'} has null/invalid position_id"
+                    ),
+                    slot_id=slot_id,
+                )
+            )
+            continue
+
+        position = open_positions_by_id.get(position_id)
+        if position is None:
+            issues.append(
+                HealthIssue(
+                    code="active_slot_missing_open_position",
+                    severity="warning",
+                    message=(
+                        f"{status} slot {slot_id or '?'} references position "
+                        f"{position_id}, but that position is not locally open"
+                    ),
+                    slot_id=slot_id,
+                    position_id=position_id,
+                )
+            )
+        elif slot.get("symbol") and position.get("symbol") and slot["symbol"] != position["symbol"]:
+            issues.append(
+                HealthIssue(
+                    code="active_slot_symbol_mismatch",
+                    severity="warning",
+                    message=(
+                        f"{status} slot {slot_id or '?'} symbol {slot['symbol']} "
+                        f"does not match open position {position_id} symbol "
+                        f"{position['symbol']}"
+                    ),
+                    slot_id=slot_id,
+                    position_id=position_id,
+                )
+            )
+        active_slots_by_position_id[position_id] = slot
+
+    for position_id, position in open_positions_by_id.items():
+        if position_id not in active_slots_by_position_id:
+            issues.append(
+                HealthIssue(
+                    code="open_position_without_active_slot",
+                    severity="warning",
+                    message=(
+                        f"open position {position_id} ({position.get('symbol')}) "
+                        "has no OPEN/ENTERING/EXITING slot"
+                    ),
+                    position_id=position_id,
+                )
+            )
+
+    return issues
+
+
+def find_stale_reserved_slots(
+    slots: list[dict],
+    *,
+    now: datetime,
+    stale_minutes: int = RESERVED_STALE_MINUTES,
+) -> list[dict]:
+    """Return RESERVED slots older than stale_minutes, with deterministic ages."""
+    stale_reserved: list[dict] = []
+    now = DriftPilotClock().to_et(now).astimezone(timezone.utc)
+    for slot in slots:
+        if slot.get("status") != "RESERVED":
+            continue
+        try:
+            updated = datetime_from_storage(slot["updated_at"])
+            age_min = (now - updated.astimezone(timezone.utc)).total_seconds() / 60
+        except (KeyError, TypeError, ValueError):
+            age_min = float("inf")
+        if age_min > stale_minutes:
+            stale_reserved.append(
+                {
+                    "slot_id": slot["slot_id"],
+                    "symbol": slot.get("symbol"),
+                    "age_minutes": -1 if age_min == float("inf") else round(age_min, 1),
+                }
+            )
+    return stale_reserved
+
+
+def decide_premarket_clean(
+    *,
+    now: datetime,
+    operator_alive: bool,
+    local_open_position_count: int,
+    broker_flat_confirmed: bool | None,
+    clock: DriftPilotClock | None = None,
+) -> PremarketCleanDecision:
+    """Allow premarket cleanup only when every safety predicate is explicit."""
+    clock = clock or DriftPilotClock()
+    now_et = clock.to_et(now)
+    market_open = datetime_time(9, 30)
+    if now_et.time() >= market_open:
+        return PremarketCleanDecision(False, "refused: not before 09:30 ET")
+    if operator_alive:
+        return PremarketCleanDecision(False, "refused: operator is alive")
+    if local_open_position_count != 0:
+        return PremarketCleanDecision(False, "refused: local open positions exist")
+    if broker_flat_confirmed is not True:
+        return PremarketCleanDecision(
+            False,
+            "refused: broker-flat confirmation was not explicitly true",
+        )
+    return PremarketCleanDecision(
+        True,
+        "allowed: premarket, operator dead, local flat, broker flat",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -70,7 +242,8 @@ def get_slot_states() -> list[dict]:
     conn.row_factory = sqlite3.Row
     try:
         rows = conn.execute(
-            "SELECT slot_id, status, symbol, updated_at FROM slots ORDER BY slot_id"
+            "SELECT slot_id, status, symbol, position_id, reserved_order_id, "
+            "slot_value, updated_at, metadata_json FROM slots ORDER BY slot_id"
         ).fetchall()
         return [dict(r) for r in rows]
     finally:
@@ -85,7 +258,7 @@ def get_open_positions() -> list[dict]:
     conn.row_factory = sqlite3.Row
     try:
         rows = conn.execute(
-            "SELECT id, symbol, status, opened_at, closed_at "
+            "SELECT id, symbol, slot_id, status, quantity, opened_at, closed_at "
             "FROM positions WHERE status = 'open' ORDER BY opened_at"
         ).fetchall()
         return [dict(r) for r in rows]
@@ -204,7 +377,10 @@ def get_catalyst_stats() -> dict:
         if newest and newest[0]:
             try:
                 newest_dt = datetime.fromisoformat(newest[0].replace("Z", "+00:00"))
-                newest_age_min = round((datetime.now(timezone.utc) - newest_dt).total_seconds() / 60, 1)
+                newest_age_min = round(
+                    (datetime.now(timezone.utc) - newest_dt).total_seconds() / 60,
+                    1,
+                )
             except Exception:
                 pass
         return {
@@ -260,7 +436,8 @@ def get_trade_rejection_summary() -> dict:
 
 def build_health_report() -> dict:
     """Collect all system state into a single health report."""
-    now = datetime.now(timezone.utc)
+    clock = DriftPilotClock()
+    now = clock.now_utc()
     slots = get_slot_states()
     positions = get_open_positions()
     pos_stats = get_today_position_stats()
@@ -271,28 +448,11 @@ def build_health_report() -> dict:
 
     # Classify slots
     slot_summary = {"OPEN": 0, "EMPTY": 0, "RESERVED": 0, "other": 0}
-    stale_reserved = []
     for s in slots:
         status = s.get("status", "unknown")
         slot_summary[status] = slot_summary.get(status, 0) + 1
-        if status == "RESERVED":
-            try:
-                updated = datetime.fromisoformat(s["updated_at"])
-                if updated.tzinfo is None:
-                    updated = updated.replace(tzinfo=timezone.utc)
-                age_min = (now - updated).total_seconds() / 60
-                if age_min > RESERVED_STALE_MINUTES:
-                    stale_reserved.append({
-                        "slot_id": s["slot_id"],
-                        "symbol": s.get("symbol"),
-                        "age_minutes": round(age_min, 1),
-                    })
-            except (ValueError, TypeError):
-                stale_reserved.append({
-                    "slot_id": s["slot_id"],
-                    "symbol": s.get("symbol"),
-                    "age_minutes": -1,
-                })
+    stale_reserved = find_stale_reserved_slots(slots, now=now)
+    inventory_issues = find_slot_inventory_issues(slots, positions)
 
     return {
         "timestamp": now.isoformat(),
@@ -306,10 +466,25 @@ def build_health_report() -> dict:
             "total": len(slots),
             "summary": slot_summary,
             "details": [
-                {"id": s["slot_id"], "status": s["status"], "symbol": s.get("symbol")}
+                {
+                    "id": s["slot_id"],
+                    "status": s["status"],
+                    "symbol": s.get("symbol"),
+                    "position_id": s.get("position_id"),
+                }
                 for s in slots
             ],
             "stale_reserved": stale_reserved,
+            "inventory_issues": [
+                {
+                    "code": issue.code,
+                    "severity": issue.severity,
+                    "message": issue.message,
+                    "slot_id": issue.slot_id,
+                    "position_id": issue.position_id,
+                }
+                for issue in inventory_issues
+            ],
         },
         "positions": {
             "open_count": len(positions),
@@ -322,155 +497,19 @@ def build_health_report() -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Qwen analysis
+# Action helpers
 # ---------------------------------------------------------------------------
-
-SYSTEM_PROMPT = """\
-You are the Slot Manager for DriftPilot, an automated trading system.
-You monitor system health and recommend corrective actions.
-
-You receive a JSON health report every 60 seconds. Analyze it and respond
-with a JSON action plan.
-
-THINGS YOU SHOULD CHECK:
-1. Stuck RESERVED slots: slots stuck in RESERVED for >5 minutes need recycling
-2. Operator process health: is it alive? Is the log fresh?
-3. Slot utilization: are EMPTY slots not being filled when candidates exist?
-4. Error patterns: recurring errors that indicate a systemic problem
-5. Position balance: are positions opening and closing normally?
-6. Catalyst pool health: are active_4h_tradeable events dropping? pool_warning=STALE means
-   the newest positive event is >3 hours old — the engine will starve soon
-7. Symbol exhaustion: symbols_at_daily_cap shows symbols that hit the max_trades_per_symbol
-   cap. If many symbols are exhausted AND EMPTY slots exist, log a warning about shrinking pool
-8. P&L: if realized_pnl_today is approaching -$500 (5% daily loss limit on $10k), warn early
-9. Trade velocity: if closed_trades_today > 40, warn — approaching the 50/day cap
-
-ACTIONS YOU CAN RECOMMEND:
-- recycle_slot: {slot_id: N} — reset a stuck RESERVED slot to EMPTY
-- restart_operator: {} — kill and restart the operator (use sparingly!)
-- log_warning: {message: "..."} — log a warning for the human operator
-- no_action: {} — everything looks healthy
-
-RULES:
-- NEVER recommend modifying OPEN slots or active positions
-- NEVER recommend recycling a RESERVED slot younger than 5 minutes
-- Only recommend restart_operator if the process is dead OR log is stale >5 min
-- Be conservative: when in doubt, recommend log_warning over active intervention
-- If everything looks healthy, respond with no_action
-
-Respond JSON only. Format:
-{
-  "assessment": "one-line health summary",
-  "issues": ["list of issues found"],
-  "actions": [{"type": "action_type", "params": {...}, "reason": "why"}]
-}
-"""
-
-
-def ask_qwen(health_report: dict) -> dict | None:
-    """Send the health report to Qwen and get action recommendations."""
-    url = f"{QWEN_URL.rstrip('/')}/chat/completions"
-    user_content = json.dumps(health_report, indent=2, default=str)
-
-    body = {
-        "model": QWEN_MODEL,
-        "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_content + "\n/no_think"},
-        ],
-        "max_tokens": 512,
-        "temperature": 0.0,
-    }
-
-    try:
-        with httpx.Client(timeout=QWEN_TIMEOUT) as client:
-            resp = client.post(url, json=body)
-            resp.raise_for_status()
-    except httpx.TimeoutException:
-        logger.warning("Qwen timeout — skipping AI analysis this cycle")
-        return None
-    except httpx.HTTPError as exc:
-        logger.warning("Qwen HTTP error: %s — skipping AI analysis", exc)
-        return None
-
-    raw = resp.json()["choices"][0]["message"]["content"]
-
-    # Strip markdown fences and think blocks
-    text = raw.strip()
-    if text.startswith("```"):
-        text = text[text.index("\n") + 1 :]
-    if text.endswith("```"):
-        text = text[:-3].rstrip()
-    if "<think>" in text:
-        end = text.find("</think>")
-        if end != -1:
-            text = text[end + 8 :].strip()
-
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        logger.warning("Qwen response not valid JSON: %s", raw[:200])
-        return None
-
-
-# ---------------------------------------------------------------------------
-# Action executor
-# ---------------------------------------------------------------------------
-
-def execute_actions(actions: list[dict], health: dict) -> int:
-    """Execute Qwen's recommended actions. Returns count of actions taken."""
-    executed = 0
-    for action in actions:
-        action_type = action.get("type", "unknown")
-        params = action.get("params", {})
-        reason = action.get("reason", "")
-
-        if action_type == "recycle_slot":
-            slot_id = params.get("slot_id")
-            if slot_id is None:
-                logger.warning("recycle_slot missing slot_id, skipping")
-                continue
-            # Safety: verify it's actually stuck RESERVED
-            stale_ids = {s["slot_id"] for s in health["slots"]["stale_reserved"]}
-            if slot_id not in stale_ids:
-                logger.warning(
-                    "recycle_slot(%d) rejected — not in stale_reserved list", slot_id
-                )
-                continue
-            _recycle_slot(slot_id, reason)
-            executed += 1
-
-        elif action_type == "restart_operator":
-            if health["operator"]["alive"] and not health["operator"]["log_stale"]:
-                logger.warning(
-                    "restart_operator rejected — operator is alive and logging"
-                )
-                continue
-            _restart_operator(reason)
-            executed += 1
-
-        elif action_type == "log_warning":
-            msg = params.get("message", reason)
-            logger.warning("[QWEN-ALERT] %s", msg)
-            executed += 1
-
-        elif action_type == "no_action":
-            pass  # healthy, nothing to do
-
-        else:
-            logger.warning("Unknown action type: %s", action_type)
-
-    return executed
 
 
 def _recycle_slot(slot_id: int, reason: str) -> None:
     """Reset a stuck RESERVED slot to EMPTY."""
-    now_iso = datetime.now(timezone.utc).isoformat()
+    now_iso = datetime_to_storage(DriftPilotClock().now_utc())
     conn = sqlite3.connect(str(DB_PATH))
     try:
         cur = conn.execute(
-            "UPDATE slots SET status='EMPTY', symbol=NULL, metadata_json='{}', "
-            "updated_at=? WHERE slot_id=? AND status='RESERVED'",
+            "UPDATE slots SET status='EMPTY', symbol=NULL, position_id=NULL, "
+            "reserved_order_id=NULL, metadata_json='{}', updated_at=? "
+            "WHERE slot_id=? AND status='RESERVED'",
             (now_iso, slot_id),
         )
         conn.commit()
@@ -484,32 +523,29 @@ def _recycle_slot(slot_id: int, reason: str) -> None:
         conn.close()
 
 
-def _restart_operator(reason: str) -> None:
-    """Kill stale operator and relaunch via daily_operator.sh."""
-    logger.warning("🔄 restarting operator: %s", reason)
-
-    # Kill old process
-    old_pid = get_operator_pid()
-    if old_pid:
-        try:
-            os.kill(old_pid, signal.SIGTERM)
-            time.sleep(3)
-        except ProcessLookupError:
-            pass
-
-    # Relaunch
-    script = PROJECT_ROOT / "scripts" / "daily_operator.sh"
-    if not script.exists():
-        logger.error("Cannot restart — daily_operator.sh not found")
-        return
-
-    subprocess.Popen(
-        ["bash", str(script)],
-        cwd=str(PROJECT_ROOT),
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    logger.info("operator restart initiated via daily_operator.sh")
+def _premarket_clean_slots(reason: str) -> int:
+    """Clear only non-active premarket inventory after external flat confirmation."""
+    now_iso = datetime_to_storage(DriftPilotClock().now_utc())
+    conn = sqlite3.connect(str(DB_PATH))
+    try:
+        cur = conn.execute(
+            "UPDATE slots SET status='EMPTY', symbol=NULL, position_id=NULL, "
+            "reserved_order_id=NULL, metadata_json='{}', updated_at=? "
+            "WHERE status IN ('RESERVED')",
+            (now_iso,),
+        )
+        conn.commit()
+        if cur.rowcount:
+            logger.warning(
+                "premarket clean reset %d RESERVED slot(s) to EMPTY: %s",
+                cur.rowcount,
+                reason,
+            )
+        else:
+            logger.info("premarket clean found no RESERVED slots to reset")
+        return cur.rowcount
+    finally:
+        conn.close()
 
 
 # ---------------------------------------------------------------------------
@@ -531,7 +567,12 @@ def run_safety_checks(health: dict) -> int:
         _recycle_slot(slot_id, f"stale {age:.0f}min (safety check)")
         actions_taken += 1
 
-    # 2. Alert if operator is dead
+    # 2. Warn on active-slot anomalies. These are never auto-mutated here.
+    for issue in health["slots"].get("inventory_issues", []):
+        logger.warning("slot inventory anomaly [%s]: %s", issue["code"], issue["message"])
+        actions_taken += 1
+
+    # 3. Alert if operator is dead
     if not health["operator"]["alive"]:
         logger.error(
             "🚨 operator process is DEAD (PID file: %s)",
@@ -539,7 +580,7 @@ def run_safety_checks(health: dict) -> int:
         )
         actions_taken += 1
 
-    # 3. Alert if log is stale (>3 min without output)
+    # 4. Alert if log is stale (>3 min without output)
     if health["operator"]["alive"] and health["operator"]["log_stale"]:
         logger.warning(
             "⚠️  operator log stale (%.0fs since last write) — may be hung",
@@ -548,6 +589,30 @@ def run_safety_checks(health: dict) -> int:
         actions_taken += 1
 
     return actions_taken
+
+
+def run_premarket_clean(*, broker_flat_confirmed: bool | None) -> bool:
+    """Run the guarded premarket cleanup action if all predicates allow it."""
+    health = build_health_report()
+    decision = decide_premarket_clean(
+        now=datetime_from_storage(health["timestamp"]),
+        operator_alive=bool(health["operator"]["alive"]),
+        local_open_position_count=int(health["positions"]["open_count"]),
+        broker_flat_confirmed=broker_flat_confirmed,
+    )
+    if not decision.allowed:
+        logger.error("premarket clean %s", decision.reason)
+        return False
+    cleaned = _premarket_clean_slots(decision.reason)
+    logger.info("premarket clean completed (%d slot(s) reset)", cleaned)
+    return True
+
+
+def _parse_explicit_bool(value: str | None) -> bool | None:
+    """Parse CLI confirmation while preserving missing as None."""
+    if value is None:
+        return None
+    return value.lower() == "true"
 
 
 # ---------------------------------------------------------------------------
@@ -583,22 +648,7 @@ def run_once() -> dict:
     # Always run deterministic safety checks first
     safety_actions = run_safety_checks(health)
 
-    # Then ask Qwen for deeper analysis
-    qwen_response = ask_qwen(health)
-    qwen_actions = 0
-    if qwen_response:
-        assessment = qwen_response.get("assessment", "")
-        issues = qwen_response.get("issues", [])
-        actions = qwen_response.get("actions", [])
-
-        if assessment:
-            logger.info("🤖 Qwen assessment: %s", assessment)
-        for issue in issues:
-            logger.info("🤖 Qwen issue: %s", issue)
-        if actions:
-            qwen_actions = execute_actions(actions, health)
-
-    if safety_actions == 0 and qwen_actions == 0:
+    if safety_actions == 0:
         logger.debug("✅ all clear — no corrective actions needed")
 
     return health
@@ -608,6 +658,16 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="DriftPilot Slot Manager")
     parser.add_argument("--daemon", action="store_true", help="Run as background daemon")
     parser.add_argument("--once", action="store_true", help="Single check then exit")
+    parser.add_argument(
+        "--premarket-clean",
+        action="store_true",
+        help="Reset stale premarket RESERVED slots only when all safety gates pass",
+    )
+    parser.add_argument(
+        "--broker-flat-confirmed",
+        choices=["true", "false"],
+        help="Explicit broker-flat confirmation required by --premarket-clean",
+    )
     parser.add_argument(
         "--interval", type=int, default=POLL_INTERVAL,
         help=f"Seconds between checks (default: {POLL_INTERVAL})",
@@ -642,9 +702,15 @@ def main() -> None:
     )
 
     logger.info(
-        "Slot Manager starting (interval=%ds, qwen=%s, db=%s)",
-        args.interval, QWEN_URL, DB_PATH,
+        "Slot Manager starting (interval=%ds, db=%s)",
+        args.interval, DB_PATH,
     )
+
+    if args.premarket_clean:
+        run_premarket_clean(
+            broker_flat_confirmed=_parse_explicit_bool(args.broker_flat_confirmed)
+        )
+        return
 
     if args.once:
         run_once()

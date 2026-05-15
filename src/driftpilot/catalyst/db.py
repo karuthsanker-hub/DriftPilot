@@ -5,6 +5,14 @@ from datetime import datetime, timezone
 
 from .event import CatalystEvent
 
+
+def _connect(db_path: str) -> sqlite3.Connection:
+    """Open a SQLite connection with WAL mode and busy timeout."""
+    conn = sqlite3.connect(db_path)
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA busy_timeout = 5000")
+    return conn
+
 CATALYST_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS catalyst_events (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -31,7 +39,7 @@ CREATE INDEX IF NOT EXISTS idx_catalyst_active ON catalyst_events(event_ts, cate
 
 
 def init_catalyst_schema(db_path: str) -> None:
-    conn = sqlite3.connect(db_path)
+    conn = _connect(db_path)
     try:
         conn.executescript(CATALYST_SCHEMA_SQL)
         _ensure_optional_columns(conn)
@@ -70,7 +78,7 @@ def update_enrichment(
     enriched copy but the DB doesn't), which breaks bootstrap-on-restart,
     the news ticker's sentiment tags, and the negative-catalyst gate.
     """
-    conn = sqlite3.connect(db_path)
+    conn = _connect(db_path)
     try:
         _ensure_optional_columns(conn)
         cur = conn.execute(
@@ -96,7 +104,7 @@ def update_enrichment(
 
 def insert_event(db_path: str, event: CatalystEvent) -> int:
     """Returns 1 if inserted, 0 if duplicate (UNIQUE constraint hit)."""
-    conn = sqlite3.connect(db_path)
+    conn = _connect(db_path)
     try:
         try:
             cur = conn.execute(

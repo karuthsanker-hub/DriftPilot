@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 
@@ -56,6 +57,18 @@ def test_settings_falls_back_for_invalid_daily_loss_limit(tmp_path, monkeypatch)
     settings = load_settings(env_path)
 
     assert settings.daily_loss_limit_pct == 0.03
+
+
+def test_repo_env_uses_three_percent_daily_loss_limit() -> None:
+    env_path = Path(".env")
+    values = {}
+    for line in env_path.read_text().splitlines():
+        if "=" not in line or line.startswith("#"):
+            continue
+        key, value = line.split("=", 1)
+        values[key] = value
+
+    assert values["DAILY_LOSS_LIMIT_PCT"] == "0.03"
 
 
 def test_schema_creates_all_phase_one_tables_cleanly() -> None:
@@ -163,8 +176,13 @@ def test_timezone_aware_datetimes_round_trip_without_naive_corruption(tmp_path) 
 
 
 def test_naive_datetimes_are_rejected() -> None:
+    # Writing naive datetimes is still strictly rejected — we never want
+    # new code to produce naive timestamps.
     with pytest.raises(ValueError, match="timezone-aware"):
         datetime_to_storage(datetime(2026, 4, 30, 9, 31))
 
-    with pytest.raises(ValueError, match="timezone-aware"):
-        datetime_from_storage("2026-04-30T09:31:00")
+    # Reading naive timestamps from the DB is tolerated (legacy data).
+    # They are assumed to be UTC rather than crashing the allocator.
+    from datetime import timezone
+    result = datetime_from_storage("2026-04-30T09:31:00")
+    assert result.tzinfo == timezone.utc

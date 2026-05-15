@@ -253,6 +253,8 @@ class ContextAssembler:
         end = event_ts.isoformat()
         try:
             conn = sqlite3.connect(self._db_path)
+            conn.execute("PRAGMA journal_mode = WAL")
+            conn.execute("PRAGMA busy_timeout = 5000")
             try:
                 cur = conn.execute(
                     "SELECT COUNT(*) FROM catalyst_events "

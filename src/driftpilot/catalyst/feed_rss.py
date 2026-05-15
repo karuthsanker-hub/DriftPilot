@@ -93,13 +93,16 @@ class RssNewsFeed:
                 continue
 
             entries = getattr(feed, "entries", []) or []
-            for entry in entries:
-                try:
-                    n = await self._handle_entry(entry, source=url)
-                    published += n
-                except Exception as exc:
-                    logger.warning("rss entry failed (%s): %s — continuing", type(exc).__name__, exc)
-                    continue
+            if entries:
+                results = await asyncio.gather(
+                    *(self._handle_entry(e, source=url) for e in entries),
+                    return_exceptions=True,
+                )
+                for r in results:
+                    if isinstance(r, int):
+                        published += r
+                    elif isinstance(r, Exception):
+                        logger.warning("rss entry failed: %s", r)
         return published
 
     async def _handle_entry(self, entry, source: str) -> int:

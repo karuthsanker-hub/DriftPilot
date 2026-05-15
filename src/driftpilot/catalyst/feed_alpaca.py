@@ -104,9 +104,17 @@ class AlpacaNewsFeed:
                 elif hasattr(result, "news"):
                     articles = result.news
 
-                for article in articles:
-                    n = await self._handle_article(article)
-                    published += n
+                # Enrich articles concurrently (Qwen calls are the bottleneck)
+                if articles:
+                    results = await asyncio.gather(
+                        *(self._handle_article(a) for a in articles),
+                        return_exceptions=True,
+                    )
+                    for r in results:
+                        if isinstance(r, int):
+                            published += r
+                        elif isinstance(r, Exception):
+                            logger.warning("article enrichment failed: %s", r)
 
                 page_token = getattr(result, "next_page_token", None)
                 if not page_token:

@@ -78,6 +78,7 @@ class DriftPilotSettings:
     max_trades_per_symbol_per_day: int = 3
     consecutive_loss_limit: int = 2
     daily_loss_limit_pct: float = 0.03
+    max_slots_per_sector: int = 0  # 0 = disabled (day trading); set >0 for sector diversification
     equity_floor: float = 26_000.0
     live_equity_buffer: float = 1_000.0
     backtest_expectancy_passed: bool = False
@@ -95,9 +96,9 @@ class DriftPilotSettings:
     catalyst_db_path: str = "data/driftpilot/catalyst_events.sqlite3"
     catalyst_qwen_url: str = "http://192.168.1.166:8000/v1"
     catalyst_qwen_model: str = "Qwen/Qwen3-8B"
-    catalyst_qwen_timeout_ms: int = 3000
+    catalyst_qwen_timeout_ms: int = 8000
     catalyst_rss_enabled: bool = True
-    catalyst_alpaca_poll_seconds: int = 30
+    catalyst_alpaca_poll_seconds: int = 10
     catalyst_universe_lookback_minutes: int = 240
     # Agent layer
     agent_enabled: bool = False
@@ -145,6 +146,7 @@ def load_settings(
         max_trades_per_symbol_per_day=_get_int(values, "MAX_TRADES_PER_SYMBOL_PER_DAY", 3),
         consecutive_loss_limit=_get_int(values, "CONSECUTIVE_LOSS_LIMIT", 2),
         daily_loss_limit_pct=_get_positive_float(values, "DAILY_LOSS_LIMIT_PCT", 0.03),
+        max_slots_per_sector=_get_int(values, "ALLOCATOR_MAX_SLOTS_PER_SECTOR", 0),
         equity_floor=_get_float(values, "EQUITY_FLOOR", 26_000.0),
         live_equity_buffer=_get_float(values, "LIVE_EQUITY_BUFFER", 1_000.0),
         backtest_expectancy_passed=_get_bool(values, "BACKTEST_EXPECTANCY_PASSED", False),

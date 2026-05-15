@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -66,6 +67,15 @@ class PositionMonitorResult:
     exit_orders: int = 0
     recycled_slots: int = 0
     halted_reason: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class ReconciliationResult:
+    ok: bool
+    status: str
+    broker_symbols: tuple[str, ...] = ()
+    error: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -144,6 +154,7 @@ class DriftPilotStateMachine:
         # universe scan. See `apply_universe_filter()` below for the hook used
         # by tests and runtime wiring.
         self._booted = False
+        self._eod_liquidated = False  # ensures EOD liquidation runs exactly once
         self._error_count = 0
         self._catalyst_subscription_id: str | None = None
         # TODO(operator-runtime): if `catalyst_event_bus` is None at construction
@@ -238,6 +249,24 @@ class DriftPilotStateMachine:
 
             session = self.market_clock.session()
             if not session.is_open:
+                # ── EOD liquidation: close all open positions before shutdown ──
+                # An intraday system must not carry positions overnight.
+                # Runs exactly once per session (guarded by _eod_liquidated flag).
+                if not self._eod_liquidated and self.position_monitor is not None:
+                    eod_fn = getattr(self.position_monitor, "eod_liquidate_all", None)
+                    if eod_fn is not None:
+                        try:
+                            closed = await eod_fn()
+                            logger.info("[EOD] liquidated %d positions at market close", closed)
+                            await self._transition(
+                                OperatorState.EXITING,
+                                "eod_liquidation",
+                                {"positions_closed": closed},
+                            )
+                        except Exception as exc:
+                            logger.error("[EOD] liquidation failed: %s", exc, exc_info=True)
+                    self._eod_liquidated = True
+
                 await self._transition(
                     OperatorState.MARKET_CLOSED,
                     session.reason,
@@ -289,9 +318,48 @@ class DriftPilotStateMachine:
                         "slots_recycled",
                         monitor_result.metadata,
                     )
+                eod_dilution_fn = getattr(self.position_monitor, "apply_eod_dilution", None)
+                if eod_dilution_fn is not None:
+                    dilution_result = await eod_dilution_fn()
+                    dilution_metadata = dilution_result.metadata or {}
+                    if dilution_metadata.get("active"):
+                        await self._transition(
+                            OperatorState.IN_POSITION,
+                            "eod_dilution_applied",
+                            dilution_metadata,
+                        )
+                    if dilution_result.exit_orders:
+                        await self._transition(
+                            OperatorState.EXITING,
+                            "eod_dilution_exits_submitted",
+                            dilution_metadata,
+                        )
+                final_drain_fn = getattr(self.position_monitor, "final_drain_all", None)
+                if final_drain_fn is not None and self._is_final_drain_window():
+                    drain_result = await final_drain_fn()
+                    drain_metadata = drain_result.metadata or {}
+                    await self._transition(
+                        OperatorState.EXITING if drain_result.exit_orders else OperatorState.IN_POSITION,
+                        "final_drain",
+                        drain_metadata,
+                    )
+                    return OperatorState.EXITING if drain_result.exit_orders else OperatorState.IN_POSITION
+
+            self._reclaim_stale_reserved_slots()
 
             await self._transition(OperatorState.REGIME_CHECK, "market_open")
             scan_result = await self._scan()
+            if self._is_opening_warmup() and not self._scan_has_fresh_spy(scan_result):
+                await self._transition(
+                    OperatorState.REGIME_CHECK,
+                    "waiting_for_first_consolidated_bar",
+                    {
+                        "spy_bar_at": datetime_to_storage(scan_result.spy_bar_at)
+                        if scan_result.spy_bar_at is not None
+                        else None,
+                    },
+                )
+                return OperatorState.REGIME_CHECK
             self._require_fresh_spy(scan_result)
 
             # ── Agent tick: scanner entry approval ──
@@ -350,48 +418,173 @@ class DriftPilotStateMachine:
         self._initialize_slots()
         if self.broker is not None:
             result = await self.broker.reconcile_open_positions()
+            reconciliation = self._coerce_reconciliation_result(result)
+            if not reconciliation.ok:
+                raise RuntimeError(
+                    f"broker reconciliation failed: {reconciliation.error or reconciliation.status}"
+                )
             await self._transition(
                 OperatorState.BOOT,
                 "broker_reconciled",
-                {"result": str(result)},
+                {
+                    "result": reconciliation.status,
+                    "broker_symbols": list(reconciliation.broker_symbols),
+                    **reconciliation.metadata,
+                },
             )
+
+    def _coerce_reconciliation_result(self, result: Any) -> ReconciliationResult:
+        if isinstance(result, ReconciliationResult):
+            return result
+        return ReconciliationResult(ok=True, status=str(result), metadata={"legacy_result": str(result)})
 
     def _initialize_slots(self) -> None:
         now = self.clock.now_utc()
         existing = {slot.slot_id: slot for slot in self.repository.slots.list_all()}
-        for slot_id in range(1, self.settings.trade_slots + 1):
-            if slot_id not in existing:
-                self.repository.slots.upsert(
-                    slot_id,
-                    status="EMPTY",
-                    slot_value=self.settings.slot_value,
-                    updated_at=now,
-                )
 
-        # Clean stale RESERVED slots from previous operator runs.
-        # A slot stays RESERVED only while the allocator holds the lock
-        # and the broker fills the order — normally <60s. If it's still
-        # RESERVED after 10 minutes, the previous operator died mid-fill.
-        from datetime import timedelta
+        from driftpilot.execution.slot_allocator import ACTIVE_SLOT_STATUSES
 
         stale_cutoff = now - timedelta(minutes=10)
-        recycled = 0
-        for slot in existing.values():
-            if slot.status == "RESERVED" and slot.updated_at < stale_cutoff:
-                self.repository.slots.upsert(
-                    slot.slot_id,
-                    status="EMPTY",
-                    symbol=None,
-                    slot_value=slot.slot_value,
-                    metadata={},
+        refreshed = 0
+        cleaned = 0
+
+        for slot_id in range(1, self.settings.trade_slots + 1):
+            slot = existing.get(slot_id)
+
+            if slot is None:
+                # Slot doesn't exist yet — create it fresh.
+                self.repository.slots.free_slot(
+                    slot_id,
+                    slot_value=self.settings.slot_value,
+                    reason="boot_new_slot",
                     updated_at=now,
                 )
-                recycled += 1
-        if recycled:
-            logger.info(
-                "[BOOT] recycled %d stale RESERVED slots (older than 10min)",
-                recycled,
+                refreshed += 1
+                continue
+
+            status_upper = slot.status.upper()
+
+            # Active slots (OPEN, ENTERING, EXITING) keep their state —
+            # they represent real positions with money at risk.
+            # Exception: stale RESERVED (>10 min) means the previous
+            # operator died mid-allocation — reclaim.
+            if status_upper in ACTIVE_SLOT_STATUSES:
+                if status_upper == "RESERVED" and slot.updated_at < stale_cutoff:
+                    self.repository.slots.free_slot(
+                        slot_id,
+                        slot_value=slot.slot_value,
+                        reason=f"boot_cleanup_stale_RESERVED",
+                        last_symbol=slot.symbol,
+                        updated_at=now,
+                    )
+                    cleaned += 1
+                # else: genuine active slot, leave it alone
+                continue
+
+            # Everything else (EMPTY, legacy "available", "OCCUPIED", unknown)
+            # gets a clean EMPTY with a fresh aware timestamp. This fixes
+            # stale/naive timestamps from older code versions.
+            self.repository.slots.free_slot(
+                slot_id,
+                slot_value=self.settings.slot_value,
+                reason=f"boot_refresh_was_{slot.status}",
+                last_symbol=slot.symbol,
+                updated_at=now,
             )
+            refreshed += 1
+
+        # Clean up any extra slots beyond current trade_slots setting.
+        for slot_id, slot in existing.items():
+            if slot_id > self.settings.trade_slots:
+                self.repository.slots.free_slot(
+                    slot_id,
+                    slot_value=slot.slot_value,
+                    reason="boot_excess_slot",
+                    last_symbol=slot.symbol,
+                    updated_at=now,
+                )
+                cleaned += 1
+
+        logger.info(
+            "[BOOT] slots: %d refreshed, %d cleaned, %d total active",
+            refreshed, cleaned, self.settings.trade_slots,
+        )
+
+    def _reclaim_stale_reserved_slots(self) -> None:
+        """Free RESERVED slots with no position older than 5 minutes.
+
+        Also inserts a synthetic closed position so the reentry cooldown
+        prevents the allocator from immediately re-reserving the same
+        symbol (which would cause a thrashing loop).
+        """
+        now = self.clock.now_utc()
+        stale_cutoff = now - timedelta(minutes=5)
+        for slot in self.repository.slots.list_all():
+            if (
+                slot.status.upper() == "RESERVED"
+                and slot.position_id is None
+                and slot.updated_at < stale_cutoff
+            ):
+                age_min = (now - slot.updated_at).total_seconds() / 60
+                logger.warning(
+                    "[SLOT] reclaiming stale RESERVED slot=%d symbol=%s age=%.1fmin",
+                    slot.slot_id, slot.symbol or "none", age_min,
+                )
+                # Insert a synthetic closed position so the reentry cooldown
+                # (15 min default) blocks the allocator from immediately
+                # re-reserving this symbol on the next scan cycle.
+                if slot.symbol:
+                    try:
+                        self.repository.connection.execute(
+                            """INSERT INTO positions
+                               (symbol, slot_id, status, quantity, entry_price,
+                                target_price, stop_price, opened_at, closed_at,
+                                exit_reason, realized_pnl, metadata_json)
+                               VALUES (?, ?, 'closed', 0, 0, 0, 0, ?, ?,
+                                       'FAILED_RESERVATION', 0.0, ?)""",
+                            (
+                                slot.symbol,
+                                slot.slot_id,
+                                datetime_to_storage(slot.updated_at),
+                                datetime_to_storage(now),
+                                json.dumps({"reclaimed": True, "age_min": round(age_min, 1)}),
+                            ),
+                        )
+                        self.repository.connection.commit()
+                        logger.info(
+                            "[SLOT] synthetic close for cooldown: symbol=%s slot=%d",
+                            slot.symbol, slot.slot_id,
+                        )
+                    except Exception:
+                        logger.debug(
+                            "[SLOT] failed to create synthetic position for cooldown (non-fatal) slot=%d symbol=%s",
+                            slot.slot_id, slot.symbol,
+                        )
+                self.repository.slots.free_slot(
+                    slot.slot_id,
+                    slot_value=slot.slot_value,
+                    reason="live_reclaim_stale_RESERVED",
+                    last_symbol=slot.symbol,
+                    updated_at=now,
+                )
+
+    def _is_opening_warmup(self) -> bool:
+        et_now = self.clock.to_et(self.clock.now_utc())
+        minutes = et_now.hour * 60 + et_now.minute
+        return minutes == (9 * 60 + 30)
+
+    def _is_final_drain_window(self) -> bool:
+        et_now = self.clock.to_et(self.clock.now_utc())
+        minutes = et_now.hour * 60 + et_now.minute
+        return (15 * 60 + 50) <= minutes < (16 * 60)
+
+    def _scan_has_fresh_spy(self, scan_result: ScanResult) -> bool:
+        if scan_result.spy_bar_at is None:
+            return False
+        age_seconds = (
+            self.clock.now_utc() - scan_result.spy_bar_at.astimezone(self.clock.now_utc().tzinfo)
+        ).total_seconds()
+        return age_seconds <= self.settings.spy_stale_seconds
 
     # ── Agent bridge helpers (observe-only, Wave 1) ────────────────
     def _tick_agents_pm(self) -> None:
@@ -472,7 +665,7 @@ class DriftPilotStateMachine:
                 slot_id = d.position.slot_id
                 agent_action = agent_results.get(slot_id) if slot_id is not None else None
 
-                if agent_action is None:
+                if agent_action is None or agent_action == "follow_algo":
                     new_decisions.append(d)
                     continue
 
@@ -495,25 +688,11 @@ class DriftPilotStateMachine:
                         "agent override: slot %d %s HOLD→EXIT (early cut)",
                         slot_id, d.position.symbol,
                     )
-                # Agent wants to hold but algo says EXIT — agent vetoes
+                # Agent wants to hold but algo says EXIT. Algo exits are
+                # authoritative; agents may request early cuts only when the
+                # algo is already holding.
                 elif agent_action == "hold" and d.exit_reason is not None:
-                    # Only non-mechanical exits can be vetoed (not TIME/STOP)
-                    if d.exit_reason not in ("TIME", "STOP"):
-                        new_decisions.append(
-                            ExitDecision(
-                                position=d.position,
-                                exit_reason=None,  # vetoed → HOLD
-                                reference_price=d.reference_price,
-                                overridden_by_agent=True,
-                                agent_action=agent_action,
-                            )
-                        )
-                        logger.info(
-                            "agent override: slot %d %s EXIT→HOLD (agent veto)",
-                            slot_id, d.position.symbol,
-                        )
-                    else:
-                        new_decisions.append(d)  # mechanical exits can't be vetoed
+                    new_decisions.append(d)
                 else:
                     new_decisions.append(d)
 

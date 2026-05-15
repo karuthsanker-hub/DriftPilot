@@ -5,15 +5,22 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Iterable
 
 from driftpilot.clock import DriftPilotClock, datetime_to_storage
 from driftpilot.execution.paper_fills import PaperFillEngine
 from driftpilot.execution.slot_allocator import AllocationCandidate, AllocationResult, SlotAllocator
 from driftpilot.settings import DriftPilotSettings
-from driftpilot.state_machine import PositionMonitorResult, ScanResult
+from driftpilot.state_machine import PositionMonitorResult, ReconciliationResult, ScanResult
 from driftpilot.storage.repositories import DriftPilotRepository, PositionRecord
 
 logger = logging.getLogger(__name__)
+
+EOD_DILUTION_START_MINUTE_ET = 15 * 60 + 15
+EOD_DILUTION_INTERVAL_MINUTES = 5
+EOD_DILUTION_STEP_PCT = 0.10
+EOD_DILUTION_MAX_TIGHTEN_PCT = 0.90
+EOD_SECTOR_CONCENTRATION_LIMIT = 4
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,16 +45,17 @@ class MockBrokerReconciler:
         self.repository = repository
         self.settings = settings
 
-    async def reconcile_open_positions(self) -> str:
+    async def reconcile_open_positions(self) -> ReconciliationResult:
         if self.settings.mode == "paper" and self.repository.positions.list_open():
-            return "mock_paper_local_state_preserved"
-        return self.repository.positions.reconcile_broker_open_positions(
+            return ReconciliationResult(ok=True, status="mock_paper_local_state_preserved")
+        status = self.repository.positions.reconcile_broker_open_positions(
             broker_positions=[],
             slot_value=self.settings.slot_value,
             target_pct=self.settings.target_pct,
             stop_pct=self.settings.stop_pct,
             trade_slots=self.settings.trade_slots,
         )
+        return ReconciliationResult(ok=True, status=status)
 
 
 class SyntheticScannerService:
@@ -140,6 +148,7 @@ class PaperExecutionAllocator:
             clock=self.clock,
             catalyst_db_path=catalyst_db_path,
             consecutive_loss_limit=settings.consecutive_loss_limit,
+            max_slots_per_sector=settings.max_slots_per_sector,
         )
         self.fills = PaperFillEngine(repository, settings, clock=self.clock)
 
@@ -302,13 +311,11 @@ class PaperPositionMonitor:
                 metadata={"exit_price": applied.fill.price, "exit_slippage": applied.fill.slippage},
             )
             if position.slot_id is not None:
-                self.repository.slots.upsert(
+                self.repository.slots.free_slot(
                     position.slot_id,
-                    status="EMPTY",
-                    symbol=None,
-                    position_id=None,
                     slot_value=self.settings.slot_value,
-                    metadata={"empty_reason": "Awaiting candidate", "last_exit_reason": exit_reason},
+                    reason=exit_reason,
+                    last_symbol=position.symbol,
                     updated_at=now,
                 )
                 self.repository.record_recycle_event(
@@ -337,6 +344,83 @@ class PaperPositionMonitor:
         decisions = self.decide()
         return await self.execute(decisions)
 
+    async def apply_eod_dilution(self) -> PositionMonitorResult:
+        now = self.clock.now_utc()
+        positions = self.repository.positions.list_open()
+        if not positions:
+            return PositionMonitorResult(
+                open_positions=0,
+                metadata={
+                    "source": "eod_dilution",
+                    "checked_at": datetime_to_storage(now),
+                    "active": False,
+                    "reason": "no_open_positions",
+                },
+            )
+
+        step_count = _eod_dilution_step_count(self.clock.to_et(now))
+        if step_count <= 0:
+            return PositionMonitorResult(
+                open_positions=len(positions),
+                metadata={
+                    "source": "eod_dilution",
+                    "checked_at": datetime_to_storage(now),
+                    "active": False,
+                    "reason": "before_1515_et",
+                },
+            )
+
+        snapshots = [_position_eod_snapshot(position) for position in positions]
+        median_unrealized_pct = _median([snapshot.unrealized_pct for snapshot in snapshots])
+        tightened = 0
+        for snapshot in snapshots:
+            new_stop = _tightened_eod_stop_price(
+                current_price=snapshot.current_price,
+                current_stop=snapshot.position.stop_price,
+                step_count=step_count,
+                lock_to_bid=snapshot.unrealized_pct > median_unrealized_pct,
+            )
+            if new_stop <= snapshot.position.stop_price:
+                continue
+            self.repository.positions.update_stop_price(
+                snapshot.position.id,
+                stop_price=new_stop,
+                metadata={
+                    "eod_dilution_active": True,
+                    "eod_dilution_step_count": step_count,
+                    "eod_dilution_stop_price": new_stop,
+                    "eod_dilution_reference_price": snapshot.current_price,
+                    "eod_dilution_unrealized_pct": snapshot.unrealized_pct,
+                    "eod_dilution_median_unrealized_pct": median_unrealized_pct,
+                },
+            )
+            tightened += 1
+
+        sector_exit_decisions = [
+            ExitDecision(
+                position=snapshot.position,
+                exit_reason="EOD_SECTOR_DILUTION",
+                reference_price=snapshot.current_price,
+            )
+            for snapshot in _least_profitable_concentrated_sector_positions(snapshots)
+        ]
+        sector_result = await self.execute(sector_exit_decisions) if sector_exit_decisions else PositionMonitorResult()
+        return PositionMonitorResult(
+            open_positions=len(self.repository.positions.list_open()),
+            exit_orders=sector_result.exit_orders,
+            recycled_slots=sector_result.recycled_slots,
+            halted_reason=sector_result.halted_reason,
+            metadata={
+                "source": "eod_dilution",
+                "checked_at": datetime_to_storage(now),
+                "active": True,
+                "step_count": step_count,
+                "tightened": tightened,
+                "median_unrealized_pct": median_unrealized_pct,
+                "sector_exits": sector_result.exit_orders,
+            },
+        )
+
     def _exit_signal(self, position: PositionRecord, now: datetime) -> tuple[str | None, float]:
         age_minutes = (now - position.opened_at).total_seconds() / 60
         metadata = position.metadata or {}
@@ -361,6 +445,65 @@ class PaperPositionMonitor:
             slot_value=self.settings.slot_value,
             metadata=metadata,
             updated_at=now,
+        )
+
+    async def eod_liquidate_all(self) -> int:
+        """End-of-day: close every open position at last known price and free slots.
+
+        Paper mode equivalent — no broker orders, just local DB updates.
+        """
+        positions = self.repository.positions.list_open()
+        if not positions:
+            return 0
+        now = self.clock.now_utc()
+        closed = 0
+        for position in positions:
+            metadata = position.metadata or {}
+            exit_price = float(metadata.get("current_price", position.entry_price))
+            realized = (exit_price - position.entry_price) * position.quantity
+            self.repository.positions.close(
+                position.id,
+                exit_reason="eod_liquidation",
+                realized_pnl=realized,
+                closed_at=now,
+                metadata={"exit_price": exit_price, "exit_close_path": "eod_liquidation"},
+            )
+            if position.slot_id is not None:
+                self.repository.slots.free_slot(
+                    position.slot_id,
+                    slot_value=self.settings.slot_value,
+                    reason="eod_liquidation",
+                    last_symbol=position.symbol,
+                    updated_at=now,
+                )
+            closed += 1
+            logger.info(
+                "[EOD] paper close %s entry=$%.2f exit=$%.2f realized=$%.2f slot=%s",
+                position.symbol, position.entry_price, exit_price, realized, position.slot_id,
+            )
+        logger.info("[EOD] liquidation complete: %d positions closed", closed)
+        return closed
+
+    async def final_drain_all(self) -> PositionMonitorResult:
+        decisions = [
+            ExitDecision(
+                position=position,
+                exit_reason="FINAL_DRAIN",
+                reference_price=float((position.metadata or {}).get("current_price", position.entry_price)),
+            )
+            for position in self.repository.positions.list_open()
+        ]
+        result = await self.execute(decisions)
+        return PositionMonitorResult(
+            open_positions=result.open_positions,
+            exit_orders=result.exit_orders,
+            recycled_slots=result.recycled_slots,
+            halted_reason=result.halted_reason,
+            metadata={
+                **(result.metadata or {}),
+                "source": "final_drain",
+                "reason": "after_1550_et",
+            },
         )
 
 
@@ -392,3 +535,76 @@ def _rotating_window(items: list[UniverseMember], *, start: int, size: int) -> l
     if not items:
         return []
     return [items[(start + offset) % len(items)] for offset in range(size)]
+
+
+@dataclass(frozen=True, slots=True)
+class EodPositionSnapshot:
+    position: PositionRecord
+    current_price: float
+    unrealized_pct: float
+    sector: str
+
+
+def _eod_dilution_step_count(now_et: datetime) -> int:
+    minutes = now_et.hour * 60 + now_et.minute
+    if minutes < EOD_DILUTION_START_MINUTE_ET:
+        return 0
+    return ((minutes - EOD_DILUTION_START_MINUTE_ET) // EOD_DILUTION_INTERVAL_MINUTES) + 1
+
+
+def _tightened_eod_stop_price(
+    *,
+    current_price: float,
+    current_stop: float,
+    step_count: int,
+    lock_to_bid: bool,
+) -> float:
+    if current_price <= 0 or step_count <= 0:
+        return current_stop
+    if lock_to_bid:
+        return round(max(current_stop, current_price), 4)
+    if current_price <= current_stop:
+        return current_stop
+    tighten_pct = min(step_count * EOD_DILUTION_STEP_PCT, EOD_DILUTION_MAX_TIGHTEN_PCT)
+    remaining_distance = (current_price - current_stop) * (1.0 - tighten_pct)
+    return round(max(current_stop, current_price - remaining_distance), 4)
+
+
+def _position_eod_snapshot(position: PositionRecord) -> EodPositionSnapshot:
+    metadata = position.metadata or {}
+    current_price = float(
+        metadata.get("bid_price")
+        or metadata.get("current_price")
+        or metadata.get("reference_price")
+        or position.entry_price
+    )
+    unrealized_pct = (
+        ((current_price - position.entry_price) / position.entry_price) * 100.0
+        if position.entry_price > 0
+        else 0.0
+    )
+    sector = str(metadata.get("sector") or "Unknown")
+    return EodPositionSnapshot(position, current_price, unrealized_pct, sector)
+
+
+def _median(values: Iterable[float]) -> float:
+    ordered = sorted(values)
+    if not ordered:
+        return 0.0
+    midpoint = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[midpoint]
+    return (ordered[midpoint - 1] + ordered[midpoint]) / 2.0
+
+
+def _least_profitable_concentrated_sector_positions(
+    snapshots: list[EodPositionSnapshot],
+) -> list[EodPositionSnapshot]:
+    by_sector: dict[str, list[EodPositionSnapshot]] = {}
+    for snapshot in snapshots:
+        by_sector.setdefault(snapshot.sector, []).append(snapshot)
+    selected: list[EodPositionSnapshot] = []
+    for sector_snapshots in by_sector.values():
+        if len(sector_snapshots) >= EOD_SECTOR_CONCENTRATION_LIMIT:
+            selected.append(min(sector_snapshots, key=lambda snapshot: snapshot.unrealized_pct))
+    return selected

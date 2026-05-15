@@ -213,8 +213,7 @@ class TestTimeOfDay:
 
     def test_reasoning_mentions_time_of_day(self):
         bands = compute_dynamic_bands(atr_pct=0.02, time_of_day="open")
-        assert "time-of-day" in bands.reasoning
-        assert "open" in bands.reasoning
+        assert "time_profile=open" in bands.reasoning
 
 
 # -------------------------------------------------------------------
@@ -306,7 +305,7 @@ class TestCombined:
         assert "RVOL boost" in bands.reasoning
         assert "high-beta" in bands.reasoning
         assert "catalyst" in bands.reasoning
-        assert "time-of-day" in bands.reasoning
+        assert "time_profile=" in bands.reasoning
         assert "spread cost" in bands.reasoning
         # Both values are positive
         assert bands.target_pct > 0

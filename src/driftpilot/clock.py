@@ -19,7 +19,12 @@ def datetime_to_storage(value: datetime) -> str:
 
 def datetime_from_storage(value: str) -> datetime:
     parsed = datetime.fromisoformat(value)
-    return require_aware(parsed)
+    # Tolerate naive timestamps that may exist in older DBs.
+    # Treat them as UTC rather than crashing the entire allocator.
+    if parsed.tzinfo is None:
+        from datetime import timezone
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
 
 
 @dataclass(frozen=True, slots=True)

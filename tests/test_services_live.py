@@ -14,12 +14,13 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from driftpilot.broker.alpaca_client import AlpacaBrokerClient, OrderSubmissionResult
-from driftpilot.clock import DriftPilotClock
+from driftpilot.clock import DriftPilotClock, FixedClock
 from driftpilot.market_data.alpaca_stream import MarketQuote
 from driftpilot.market_data.rest_quotes import AlpacaRestQuoteProvider
 from driftpilot.services_live import (
     LiveAlpacaAllocator,
     LiveAlpacaPositionMonitor,
+    LiveBrokerReconciler,
     build_live_components,
     compute_dynamic_bands,
 )
@@ -54,6 +55,34 @@ def test_build_live_components_returns_trio(settings, repo):
     assert isinstance(monitor, LiveAlpacaPositionMonitor)
     assert allocator.broker is broker
     assert monitor.broker is broker
+
+
+@pytest.mark.asyncio
+async def test_live_broker_reconciler_reports_broker_failure(settings, repo):
+    fake_broker = MagicMock(spec=AlpacaBrokerClient)
+    fake_broker.get_open_positions = AsyncMock(side_effect=RuntimeError("alpaca down"))
+    reconciler = LiveBrokerReconciler(fake_broker, repo, settings)
+
+    result = await reconciler.reconcile_open_positions()
+
+    assert result.ok is False
+    assert result.status == "broker_unavailable"
+    assert "alpaca down" in str(result.error)
+
+
+@pytest.mark.asyncio
+async def test_live_broker_reconciler_reports_symbols_when_flattening_local_state(settings, repo):
+    fake_broker = MagicMock(spec=AlpacaBrokerClient)
+    fake_broker.get_open_positions = AsyncMock(return_value=[
+        SimpleNamespace(symbol="AAPL", quantity=3, average_entry_price=200.0),
+    ])
+    reconciler = LiveBrokerReconciler(fake_broker, repo, settings)
+
+    result = await reconciler.reconcile_open_positions()
+
+    assert result.ok is True
+    assert result.broker_symbols == ("AAPL",)
+    assert result.metadata["broker_position_count"] == 1
 
 
 def test_quote_provider_caches_within_ttl():
@@ -885,7 +914,7 @@ async def test_live_allocator_records_catalyst_metadata_on_position(settings, re
     assert md.get("band_beta") == pytest.approx(1.7)
     assert md.get("band_beta_profile") == "high_beta"
     assert md.get("band_catalyst_profile") == "earnings/report"
-    assert md.get("band_time_profile") == "opening_volatility"
+    assert md.get("band_time_profile") == "open"
 
 
 @pytest.mark.asyncio
@@ -964,7 +993,7 @@ async def test_live_allocator_applies_slot_value_multiplier(settings, repo):
         symbol="JXN",
         quantity=2,
         slot_id=1,
-        protective_stop_pct=0.012,
+        protective_stop_pct=0.009,  # ATR-based: DEFAULT_ATR_PCT(0.012) * ATR_STOP_SCALE(0.75)
     )
     pos = repo.positions.list_open()[0]
     assert pos.quantity == 2
@@ -1080,3 +1109,158 @@ async def test_live_monitor_reconciles_filled_protective_stop(settings, repo):
     slot = repo.slots.get(1)
     assert slot is not None
     assert slot.status == "EMPTY"
+
+
+@pytest.mark.asyncio
+async def test_live_monitor_eod_dilution_tightens_stop_metadata(settings, repo):
+    fake_broker = MagicMock(spec=AlpacaBrokerClient)
+    fake_broker.get_open_positions = AsyncMock(return_value=[])
+
+    fake_qp = MagicMock(spec=AlpacaRestQuoteProvider)
+    fake_qp.latest_quote = MagicMock(side_effect=lambda symbol: MarketQuote(
+        symbol=symbol,
+        timestamp=datetime(2026, 5, 12, 19, 20, tzinfo=timezone.utc),
+        bid_price={"AAA": 102.0, "BBB": 101.0, "CCC": 99.0}[symbol],
+        ask_price={"AAA": 102.1, "BBB": 101.1, "CCC": 99.1}[symbol],
+    ))
+
+    clock = FixedClock(settings.timezone, datetime(2026, 5, 12, 19, 20, tzinfo=timezone.utc))
+    monitor = LiveAlpacaPositionMonitor(repo, settings, fake_broker, fake_qp, clock=clock)
+    for slot_id, symbol in [(1, "AAA"), (2, "BBB"), (3, "CCC")]:
+        repo.slots.upsert(
+            slot_id,
+            status="OPEN",
+            symbol=symbol,
+            slot_value=1000,
+            updated_at=datetime(2026, 5, 12, 19, 20, tzinfo=timezone.utc),
+        )
+        repo.positions.create_open(
+            symbol=symbol,
+            quantity=5,
+            entry_price=100.0,
+            target_price=102.0,
+            stop_price=98.0,
+            slot_id=slot_id,
+            opened_at=datetime(2026, 5, 12, 18, 30, tzinfo=timezone.utc),
+            metadata={"sector": "Tech"},
+        )
+
+    result = await monitor.apply_eod_dilution()
+
+    assert result.metadata["active"] is True
+    positions = {position.symbol: position for position in repo.positions.list_open()}
+    assert positions["AAA"].stop_price == 102.0
+    assert positions["BBB"].stop_price == 98.6
+    assert positions["CCC"].metadata["eod_dilution_active"] is True
+    fake_broker.submit_exit_order.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_live_monitor_eod_sector_dilution_exits_least_profitable(settings, repo):
+    fake_broker = MagicMock(spec=AlpacaBrokerClient)
+    fake_broker.get_open_positions = AsyncMock(return_value=[])
+    fake_broker.cancel_order = AsyncMock()
+    fake_broker.submit_exit_order = AsyncMock(return_value=OrderSubmissionResult(
+        submitted=True,
+        broker_order_id="sector-exit",
+        symbol="DDD",
+        side="sell",
+        quantity=5,
+        order_type="limit",
+        limit_price=98.5,
+        reason="eod_sector_dilution",
+    ))
+
+    fake_qp = MagicMock(spec=AlpacaRestQuoteProvider)
+    prices = {"AAA": 102.0, "BBB": 101.0, "CCC": 100.5, "DDD": 98.5}
+    fake_qp.latest_quote = MagicMock(side_effect=lambda symbol: MarketQuote(
+        symbol=symbol,
+        timestamp=datetime(2026, 5, 12, 19, 20, tzinfo=timezone.utc),
+        bid_price=prices[symbol],
+        ask_price=prices[symbol] + 0.1,
+    ))
+
+    clock = FixedClock(settings.timezone, datetime(2026, 5, 12, 19, 20, tzinfo=timezone.utc))
+    monitor = LiveAlpacaPositionMonitor(repo, settings, fake_broker, fake_qp, clock=clock)
+    for slot_id, symbol in enumerate(["AAA", "BBB", "CCC", "DDD"], start=1):
+        repo.slots.upsert(
+            slot_id,
+            status="OPEN",
+            symbol=symbol,
+            slot_value=1000,
+            updated_at=datetime(2026, 5, 12, 19, 20, tzinfo=timezone.utc),
+        )
+        repo.positions.create_open(
+            symbol=symbol,
+            quantity=5,
+            entry_price=100.0,
+            target_price=102.0,
+            stop_price=98.0,
+            slot_id=slot_id,
+            opened_at=datetime(2026, 5, 12, 18, 30, tzinfo=timezone.utc),
+            metadata={"sector": "Tech", "protective_stop_order_id": "stop-ddd" if symbol == "DDD" else None},
+        )
+
+    result = await monitor.apply_eod_dilution()
+
+    assert result.exit_orders == 1
+    fake_broker.submit_exit_order.assert_awaited_once()
+    assert {position.symbol for position in repo.positions.list_open()} == {"AAA", "BBB", "CCC"}
+
+
+@pytest.mark.asyncio
+async def test_live_monitor_final_drain_exits_all_positions(settings, repo):
+    fake_broker = MagicMock(spec=AlpacaBrokerClient)
+    fake_broker.cancel_order = AsyncMock()
+    fake_broker.submit_exit_order = AsyncMock(return_value=OrderSubmissionResult(
+        submitted=True,
+        broker_order_id="final-drain-exit",
+        symbol="AAPL",
+        side="sell",
+        quantity=5,
+        order_type="limit",
+        limit_price=205.0,
+        reason="final_drain",
+    ))
+
+    fake_qp = MagicMock(spec=AlpacaRestQuoteProvider)
+    clock = FixedClock(settings.timezone, datetime(2026, 5, 12, 19, 50, tzinfo=timezone.utc))
+    monitor = LiveAlpacaPositionMonitor(repo, settings, fake_broker, fake_qp, clock=clock)
+    repo.slots.upsert(
+        1,
+        status="OPEN",
+        symbol="AAPL",
+        slot_value=1000,
+        updated_at=datetime(2026, 5, 12, 19, 50, tzinfo=timezone.utc),
+    )
+    repo.positions.create_open(
+        symbol="AAPL",
+        quantity=5,
+        entry_price=200.0,
+        target_price=202.0,
+        stop_price=198.0,
+        slot_id=1,
+        opened_at=datetime(2026, 5, 12, 18, 30, tzinfo=timezone.utc),
+        metadata={
+            "current_price": 204.0,
+            "protective_stop_order_id": "stop-aapl",
+        },
+    )
+
+    result = await monitor.final_drain_all()
+
+    assert result.exit_orders == 1
+    assert result.metadata["source"] == "final_drain"
+    fake_broker.cancel_order.assert_awaited_once_with("stop-aapl")
+    fake_broker.submit_exit_order.assert_awaited_once_with(
+        symbol="AAPL",
+        quantity=5.0,
+        position_id=1,
+    )
+    assert repo.positions.list_open() == []
+    closed = repo.connection.execute(
+        "SELECT symbol, exit_reason, metadata_json FROM positions WHERE status = 'closed'"
+    ).fetchone()
+    assert closed["symbol"] == "AAPL"
+    assert closed["exit_reason"] == "FINAL_DRAIN"
+    assert "final_drain" in closed["metadata_json"]

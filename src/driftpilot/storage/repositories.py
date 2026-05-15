@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -8,6 +9,8 @@ from pathlib import Path
 from typing import Any
 
 from driftpilot.clock import DriftPilotClock, datetime_from_storage, datetime_to_storage
+
+logger = logging.getLogger(__name__)
 
 
 SCHEMA_PATH = Path(__file__).with_name("schema.sql")
@@ -20,6 +23,8 @@ def connect(path: str | Path) -> sqlite3.Connection:
     connection = sqlite3.connect(db_path)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
+    connection.execute("PRAGMA journal_mode = WAL")
+    connection.execute("PRAGMA busy_timeout = 5000")  # wait up to 5s on lock
     return connection
 
 
@@ -452,6 +457,48 @@ class SlotRepository:
             return None
         return self._from_row(row)
 
+    def free_slot(
+        self,
+        slot_id: int,
+        *,
+        slot_value: float,
+        reason: str = "",
+        last_symbol: str | None = None,
+        updated_at: datetime | None = None,
+    ) -> SlotRecord:
+        """Canonical way to return a slot to the free pool.
+
+        Every code path that frees a slot MUST call this method instead of
+        calling upsert() directly.  This guarantees:
+        - status is always "EMPTY" (the only status the allocator recognises
+          as free)
+        - symbol, position_id, reserved_order_id are always NULL
+        - metadata is always a clean dict (no stale data from previous trades)
+        - updated_at is always fresh (today's timestamp)
+        - a log line is emitted for every slot transition
+        """
+        timestamp = updated_at or self.clock.now_utc()
+        metadata: dict[str, Any] = {}
+        if reason:
+            metadata["empty_reason"] = reason
+        if last_symbol:
+            metadata["last_symbol"] = last_symbol
+            metadata["freed_at"] = datetime_to_storage(timestamp)
+        logger.info(
+            "[SLOT] slot=%d FREED → EMPTY reason=%s last_symbol=%s",
+            slot_id, reason or "boot_cleanup", last_symbol or "none",
+        )
+        return self.upsert(
+            slot_id,
+            status="EMPTY",
+            slot_value=slot_value,
+            symbol=None,
+            position_id=None,
+            reserved_order_id=None,
+            metadata=metadata,
+            updated_at=timestamp,
+        )
+
     def list_all(self) -> list[SlotRecord]:
         rows = self.connection.execute(
             """
@@ -606,6 +653,32 @@ class PositionRepository:
             raise RuntimeError("updated position disappeared")
         return updated
 
+    def update_stop_price(
+        self,
+        position_id: int,
+        *,
+        stop_price: float,
+        metadata: dict[str, Any] | None = None,
+    ) -> PositionRecord:
+        existing = self.get(position_id)
+        if existing is None:
+            raise ValueError(f"position {position_id} does not exist")
+        merged_metadata = {**(existing.metadata or {}), **(metadata or {})}
+        self.connection.execute(
+            """
+            UPDATE positions
+            SET stop_price = ?,
+                metadata_json = ?
+            WHERE id = ?
+            """,
+            (stop_price, _json_dumps(merged_metadata), position_id),
+        )
+        self.connection.commit()
+        updated = self.get(position_id)
+        if updated is None:
+            raise RuntimeError("updated position disappeared")
+        return updated
+
     def reconcile_broker_open_positions(
         self,
         *,
@@ -649,15 +722,21 @@ class PositionRepository:
                 ),
             )
             if position.slot_id is not None:
+                # Use EMPTY (not "available") — EMPTY is the ONLY status
+                # the allocator recognises as a free slot.
                 self._upsert_slot(
                     position.slot_id,
-                    status="available",
+                    status="EMPTY",
                     slot_value=slot_value,
+                    symbol=None,
+                    position_id=None,
+                    reserved_order_id=None,
                     updated_at=timestamp,
-                    metadata={
-                        "reconciled": "broker_missing_at_boot",
-                        "previous_symbol": position.symbol,
-                    },
+                    metadata={},
+                )
+                logger.info(
+                    "[RECONCILE] slot=%d FREED → EMPTY (broker_missing: %s)",
+                    position.slot_id, position.symbol,
                 )
 
         for symbol, broker_position in broker_by_symbol.items():
@@ -736,8 +815,39 @@ class PositionRepository:
                 updated_at=timestamp,
                 metadata={"reconciled": "broker_open_at_boot"},
             )
+            logger.info(
+                "[RECONCILE] slot=%d OPEN symbol=%s position=%d entry=$%.2f",
+                slot_id, symbol, position.id, entry_price,
+            )
+
+        # ── DAILY CLEANUP: reset ALL unused slots to pristine EMPTY ──
+        # Without this, slots freed by reconcile (or left over from
+        # previous days) keep stale metadata, old timestamps, and ghost
+        # symbol names — which pollutes the dashboard every morning.
+        # We walk slots 1..trade_slots; any slot NOT actively holding a
+        # broker position gets wiped to EMPTY (the ONLY status the
+        # allocator recognises as free).
+        cleaned = 0
+        for sid in range(1, trade_slots + 1):
+            if sid not in used_slots:
+                self._upsert_slot(
+                    sid,
+                    status="EMPTY",
+                    slot_value=slot_value,
+                    symbol=None,
+                    position_id=None,
+                    reserved_order_id=None,
+                    updated_at=timestamp,
+                    metadata={},
+                )
+                cleaned += 1
 
         self.connection.commit()
+        logger.info(
+            "[RECONCILE] done: %d broker positions → used_slots=%s, %d slots cleaned to EMPTY, result=%s",
+            len(broker_positions), sorted(used_slots), cleaned,
+            "mismatch_corrected" if broker_symbols != local_symbols else "matched",
+        )
         return "mismatch_corrected" if broker_symbols != local_symbols else "matched"
 
     def get(self, position_id: int) -> PositionRecord | None:
@@ -767,11 +877,13 @@ class PositionRepository:
             and existing.slot_id not in used_slots
         ):
             return existing.slot_id
+        # Query for EMPTY (canonical free status) and also legacy "available"
+        # in case any stale rows exist from before the fix.
         rows = self.connection.execute(
             """
             SELECT slot_id
             FROM slots
-            WHERE status = 'available'
+            WHERE status IN ('EMPTY', 'available', 'RECYCLING')
             ORDER BY slot_id
             """
         ).fetchall()
@@ -1170,53 +1282,69 @@ class CandidateQueueRepository:
         symbol: str,
         *,
         reason: str,
+        score: float = 0.0,
         features: dict[str, Any] | None = None,
         updated_at: datetime | None = None,
     ) -> None:
         timestamp = updated_at or self.clock.now_utc()
         normalized = symbol.upper()
+        # Derive score from features if not explicitly passed
+        if score == 0.0 and features:
+            score = float(features.get("priority_modifier") or 0.0)
         existing = self.connection.execute(
-            """
-            SELECT id
-            FROM candidate_queue
-            WHERE symbol = ?
-            ORDER BY updated_at DESC, id DESC
-            LIMIT 1
-            """,
+            "SELECT id FROM candidate_queue WHERE symbol = ? ORDER BY updated_at DESC, id DESC LIMIT 1",
             (normalized,),
         ).fetchone()
         if existing is None:
             self.connection.execute(
-                """
-                INSERT INTO candidate_queue (
-                    symbol, score, rank, status, blocked_reason, features_json, created_at, updated_at
-                )
-                VALUES (?, 0, 0, 'blocked', ?, ?, ?, ?)
-                """,
-                (
-                    normalized,
-                    reason,
-                    _json_dumps(features),
-                    datetime_to_storage(timestamp),
-                    datetime_to_storage(timestamp),
-                ),
+                """INSERT INTO candidate_queue
+                   (symbol, score, rank, status, blocked_reason, features_json, created_at, updated_at)
+                   VALUES (?, ?, 0, 'blocked', ?, ?, ?, ?)""",
+                (normalized, score, reason, _json_dumps(features),
+                 datetime_to_storage(timestamp), datetime_to_storage(timestamp)),
             )
         else:
             self.connection.execute(
-                """
-                UPDATE candidate_queue
-                SET status = 'blocked',
-                    blocked_reason = ?,
-                    features_json = ?,
-                    updated_at = ?
-                WHERE id = ?
-                """,
-                (
-                    reason,
-                    _json_dumps(features),
-                    datetime_to_storage(timestamp),
-                    existing["id"],
-                ),
+                """UPDATE candidate_queue
+                   SET score = ?, status = 'blocked', blocked_reason = ?, features_json = ?, updated_at = ?
+                   WHERE id = ?""",
+                (score, reason, _json_dumps(features),
+                 datetime_to_storage(timestamp), existing["id"]),
+            )
+        self.connection.commit()
+
+    def mark_passed(
+        self,
+        symbol: str,
+        *,
+        score: float,
+        rank: int,
+        features: dict[str, Any] | None = None,
+        updated_at: datetime | None = None,
+    ) -> None:
+        """Record a candidate that passed scanner filters (score > 0, not blocked)."""
+        timestamp = updated_at or self.clock.now_utc()
+        normalized = symbol.upper()
+        existing = self.connection.execute(
+            "SELECT id FROM candidate_queue WHERE symbol = ? ORDER BY updated_at DESC, id DESC LIMIT 1",
+            (normalized,),
+        ).fetchone()
+        if existing is None:
+            self.connection.execute(
+                """INSERT INTO candidate_queue
+                   (symbol, score, rank, status, blocked_reason, features_json, created_at, updated_at)
+                   VALUES (?, ?, ?, 'passed', NULL, ?, ?, ?)""",
+                (normalized, score, rank, _json_dumps(features),
+                 datetime_to_storage(timestamp), datetime_to_storage(timestamp)),
+            )
+        else:
+            self.connection.execute(
+                """UPDATE candidate_queue
+                   SET score = ?, rank = ?, status = 'passed', blocked_reason = NULL,
+                       features_json = ?, updated_at = ?
+                   WHERE id = ?""",
+                (score, rank, _json_dumps(features),
+                 datetime_to_storage(timestamp), existing["id"]),
             )
         self.connection.commit()
 
@@ -1358,6 +1486,59 @@ class PriceDriftBaselineRepository:
             (limit,),
         ).fetchall()
         return [self._from_row(row) for row in rows]
+
+    def reset_baseline(self, symbol: str, event_key: str, new_price: float, *, at: datetime | None = None) -> None:
+        """Reset a symbol's drift baseline to a new price.
+
+        Called after a position exits so re-entry isn't blocked by drift
+        from the original morning observation.  The baseline's
+        first_seen_price is updated to ``new_price`` and drift_pct resets
+        to 0, so subsequent scans evaluate drift from the *current* level.
+        """
+        timestamp = at or self.clock.now_utc()
+        self.connection.execute(
+            """
+            UPDATE price_drift_baselines
+            SET first_seen_price = ?,
+                first_seen_at = ?,
+                last_seen_price = ?,
+                last_seen_at = ?,
+                drift_pct = 0
+            WHERE symbol = ? AND event_key = ?
+            """,
+            (
+                new_price,
+                datetime_to_storage(timestamp),
+                new_price,
+                datetime_to_storage(timestamp),
+                symbol.upper(),
+                event_key,
+            ),
+        )
+        self.connection.commit()
+
+    def reset_all_baselines_for_symbol(self, symbol: str, new_price: float, *, at: datetime | None = None) -> int:
+        """Reset ALL drift baselines for a symbol (any event_key).
+
+        Useful after position exit — clears drift for every catalyst
+        event associated with this symbol.
+        """
+        timestamp = at or self.clock.now_utc()
+        ts_str = datetime_to_storage(timestamp)
+        cursor = self.connection.execute(
+            """
+            UPDATE price_drift_baselines
+            SET first_seen_price = ?,
+                first_seen_at = ?,
+                last_seen_price = ?,
+                last_seen_at = ?,
+                drift_pct = 0
+            WHERE symbol = ?
+            """,
+            (new_price, ts_str, new_price, ts_str, symbol.upper()),
+        )
+        self.connection.commit()
+        return cursor.rowcount if cursor.rowcount is not None else 0
 
     def prune_before(self, cutoff: datetime) -> int:
         cursor = self.connection.execute(
