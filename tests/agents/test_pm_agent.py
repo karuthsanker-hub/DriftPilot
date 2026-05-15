@@ -137,6 +137,21 @@ class RecordingLLM:
         )
 
 
+class TestBrainClientWiring:
+    def test_pm_agent_does_not_create_brain_client_by_default(self, bus):
+        pm = PMAgent(
+            bus,
+            RecordingLLM(),
+            PromptLoader("config/prompts"),
+            GuardrailValidator(),
+        )
+
+        result = pm._query_brain("AAPL", "entry_decision", {"context_text": "x"})
+
+        assert pm._brain is None
+        assert result.is_fallback is True
+
+
 class TestEntryApproval:
     def test_approve_valid_entry(self, pm, bus, healthy_portfolio):
         _send_entry_request(bus)

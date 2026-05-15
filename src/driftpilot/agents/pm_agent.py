@@ -85,7 +85,7 @@ class PMAgent:
         self._prompts = prompt_loader
         self._guardrails = guardrails
         self._max_override_rate = max_override_rate
-        self._brain = brain_client if brain_client is not None else BrainClient()
+        self._brain = brain_client
         self._brain_experience_by_symbol: dict[str, str] = {}
 
     def tick(self, portfolio: PortfolioSnapshot) -> PMTickResult:
@@ -500,6 +500,8 @@ class PMAgent:
             "symbol": symbol,
             "decision_type": decision_type,
         }
+        if self._brain is None:
+            return BrainQueryResult(is_fallback=True)
         try:
             return self._brain.query(query_context)
         except Exception as exc:
@@ -612,6 +614,8 @@ class PMAgent:
         metadata: dict[str, Any],
     ) -> str | None:
         """Store the pending entry decision for later outcome backfill."""
+        if self._brain is None:
+            return None
         try:
             return self._brain.store(
                 context=context,
@@ -643,6 +647,9 @@ class PMAgent:
         experience_id = self._experience_id_from_exit_payload(payload)
         if experience_id is None and symbol:
             experience_id = self._brain_experience_by_symbol.pop(symbol, None)
+
+        if self._brain is None:
+            return
 
         try:
             if experience_id:

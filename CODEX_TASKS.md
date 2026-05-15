@@ -43,6 +43,7 @@
 | 27 | Update requirements.md with V4 spec | LOW | ⬜ Todo |
 | 28 | RESERVED slot timeout in live operator loop | MED | ✅ Done |
 | 29 | Operator lifecycle supervision split — boot reconcile, warmup, final drain, watchdog hardening | HIGH | ✅ Done |
+| 30 | PM agent hazard quarantine — no default brain client, disabled means true no-op | HIGH | ✅ Done |
 
 ---
 
@@ -145,6 +146,13 @@
 - Paper and live monitors implement final-drain execution; live path cancels protective stops and submits broker exits
 - `slot_manager.py` is now a deterministic watchdog/supervisor: it recycles stale `RESERVED`, warns on active-slot anomalies, and only runs premarket cleanup with explicit broker-flat confirmation
 - Files: `state_machine.py`, `services.py`, `services_live.py`, `scripts/slot_manager.py`
+
+### Task 30: PM agent hazard quarantine
+- PM/slot/scanner agent bridge calls now require `AGENT_ENABLED=true` in addition to a running orchestrator
+- `_agent_intercept_exits()` is a true no-op under the production default, even if an orchestrator object exists
+- `PMAgent` no longer constructs `BrainClient()` by default; brain access is dependency-injection only and falls back inertly when omitted
+- PM Analyst remains available through its independent throttled path
+- Files: `state_machine.py`, `agents/pm_agent.py`
 
 ---
 

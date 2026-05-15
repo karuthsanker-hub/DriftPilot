@@ -79,6 +79,12 @@ def _mock_orchestrator(running=True):
     return orch
 
 
+def _agent_settings(**overrides) -> DriftPilotSettings:
+    values = {"trade_slots": 2, "slot_value": 1000, "agent_enabled": True}
+    values.update(overrides)
+    return DriftPilotSettings(**values)
+
+
 # ── Test: agents fire during run_once with candidates ────────────────────
 
 class TestAgentBridgeFiringDuringRunOnce:
@@ -91,7 +97,7 @@ class TestAgentBridgeFiringDuringRunOnce:
 
         machine = DriftPilotStateMachine(
             repo,
-            DriftPilotSettings(trade_slots=2, slot_value=1000),
+            _agent_settings(),
             clock=FixedClock(fixed_now=NOW),
             market_clock=AlwaysOpenClock(),
             scanner=scanner,
@@ -100,15 +106,23 @@ class TestAgentBridgeFiringDuringRunOnce:
             orchestrator=orch,
         )
 
-        state = asyncio.run(machine.run_once())
+        with (
+            patch(
+                "driftpilot.agents.state_machine_bridge.tick_pm_from_repo",
+                return_value=1,
+            ) as tick_pm,
+            patch(
+                "driftpilot.agents.state_machine_bridge.tick_scanner_from_candidates",
+                return_value=0,
+            ) as tick_scanner,
+        ):
+            state = asyncio.run(machine.run_once())
 
         assert state == OperatorState.IN_POSITION
         assert allocator.calls == 1
-        # PM tick should have been called
-        orch.tick_pm.assert_called_once()
-        # Scanner tick should have been called (we had candidates)
-        orch.tick_scanner.assert_called_once()
-        cands = orch.tick_scanner.call_args[0][0]
+        tick_pm.assert_called_once()
+        tick_scanner.assert_called_once()
+        cands = tick_scanner.call_args[0][1]
         assert len(cands) == 1
         assert cands[0].symbol == "TSLA"
 
@@ -119,7 +133,7 @@ class TestAgentBridgeFiringDuringRunOnce:
 
         machine = DriftPilotStateMachine(
             repo,
-            DriftPilotSettings(trade_slots=2, slot_value=1000),
+            _agent_settings(),
             clock=FixedClock(fixed_now=NOW),
             market_clock=AlwaysOpenClock(),
             scanner=FakeScanner(candidates=[]),
@@ -127,10 +141,14 @@ class TestAgentBridgeFiringDuringRunOnce:
             orchestrator=orch,
         )
 
-        state = asyncio.run(machine.run_once())
+        with patch(
+            "driftpilot.agents.state_machine_bridge.tick_pm_from_repo",
+            return_value=1,
+        ) as tick_pm:
+            state = asyncio.run(machine.run_once())
 
         assert state == OperatorState.IN_POSITION
-        orch.tick_pm.assert_called_once()
+        tick_pm.assert_called_once()
         orch.tick_scanner.assert_not_called()
 
     def test_no_slot_tick_when_no_monitor(self, tmp_path):
@@ -140,17 +158,46 @@ class TestAgentBridgeFiringDuringRunOnce:
 
         machine = DriftPilotStateMachine(
             repo,
-            DriftPilotSettings(trade_slots=2, slot_value=1000),
+            _agent_settings(),
             clock=FixedClock(fixed_now=NOW),
             market_clock=AlwaysOpenClock(),
             scanner=FakeScanner(),
             orchestrator=orch,
         )
 
-        state = asyncio.run(machine.run_once())
+        with patch(
+            "driftpilot.agents.state_machine_bridge.tick_pm_from_repo",
+            return_value=1,
+        ) as tick_pm:
+            state = asyncio.run(machine.run_once())
         assert state == OperatorState.IN_POSITION
-        orch.tick_pm.assert_called_once()
+        tick_pm.assert_called_once()
         orch.tick_slot.assert_not_called()
+
+    def test_running_orchestrator_is_ignored_when_agents_disabled(self, tmp_path):
+        """A running orchestrator object cannot activate PM/slot/scanner ticks by itself."""
+        repo = _repo(tmp_path)
+        orch = _mock_orchestrator()
+        allocator = FakeAllocator()
+
+        machine = DriftPilotStateMachine(
+            repo,
+            DriftPilotSettings(trade_slots=2, slot_value=1000, agent_enabled=False),
+            clock=FixedClock(fixed_now=NOW),
+            market_clock=AlwaysOpenClock(),
+            scanner=FakeScanner(candidates=[_candidate()]),
+            allocator=allocator,
+            position_monitor=NoopMonitor(),
+            orchestrator=orch,
+        )
+
+        state = asyncio.run(machine.run_once())
+
+        assert state == OperatorState.IN_POSITION
+        assert allocator.calls == 1
+        orch.tick_pm.assert_not_called()
+        orch.tick_slot.assert_not_called()
+        orch.tick_scanner.assert_not_called()
 
 
 # ── Test: agent failures don't crash the state machine ───────────────────
@@ -167,7 +214,7 @@ class TestAgentErrorIsolation:
         ):
             machine = DriftPilotStateMachine(
                 repo,
-                DriftPilotSettings(trade_slots=2, slot_value=1000),
+                _agent_settings(),
                 clock=FixedClock(fixed_now=NOW),
                 market_clock=AlwaysOpenClock(),
                 scanner=FakeScanner(),
@@ -194,7 +241,7 @@ class TestAgentErrorIsolation:
         ):
             machine = DriftPilotStateMachine(
                 repo,
-                DriftPilotSettings(trade_slots=2, slot_value=1000),
+                _agent_settings(),
                 clock=FixedClock(fixed_now=NOW),
                 market_clock=AlwaysOpenClock(),
                 scanner=FakeScanner(candidates=[_candidate()]),
@@ -211,7 +258,7 @@ class TestAgentErrorIsolation:
 class TestAgentObserveOnlyParity:
     def test_same_final_state_with_and_without_orchestrator(self, tmp_path):
         """The mechanical outcome should be identical whether agents observe or not."""
-        settings = DriftPilotSettings(trade_slots=2, slot_value=1000)
+        settings = _agent_settings()
         candidates = [_candidate()]
 
         # Run WITHOUT orchestrator
@@ -265,7 +312,7 @@ class TestAgentObserveOnlyParity:
 
         machine = DriftPilotStateMachine(
             repo,
-            DriftPilotSettings(),
+            _agent_settings(),
             clock=FixedClock(fixed_now=NOW),
             market_clock=closed_clock,
             orchestrator=orch,
@@ -297,7 +344,7 @@ class TestAgentExitAuthority:
         orch._config.max_override_rate = 0.20
         machine = DriftPilotStateMachine(
             repo,
-            DriftPilotSettings(),
+            _agent_settings(),
             clock=FixedClock(fixed_now=NOW),
             market_clock=AlwaysOpenClock(),
             orchestrator=orch,
@@ -337,7 +384,7 @@ class TestAgentExitAuthority:
         orch._config.max_override_rate = 0.20
         machine = DriftPilotStateMachine(
             repo,
-            DriftPilotSettings(),
+            _agent_settings(),
             clock=FixedClock(fixed_now=NOW),
             market_clock=AlwaysOpenClock(),
             orchestrator=orch,
@@ -358,3 +405,41 @@ class TestAgentExitAuthority:
         assert len(decisions) == 1
         assert decisions[0].exit_reason == "AGENT_CUT"
         assert decisions[0].overridden_by_agent is True
+
+    def test_agent_intercept_is_noop_when_agents_disabled(self, tmp_path):
+        """Exit interception must be a true no-op under the production default."""
+        repo = _repo(tmp_path)
+        repo.slots.upsert(1, status="OPEN", slot_value=1000, updated_at=NOW)
+        position = repo.positions.create_open(
+            symbol="AAPL",
+            quantity=10,
+            entry_price=100.0,
+            target_price=101.0,
+            stop_price=99.0,
+            opened_at=NOW - timedelta(minutes=5),
+            slot_id=1,
+        )
+        orch = _mock_orchestrator()
+        machine = DriftPilotStateMachine(
+            repo,
+            DriftPilotSettings(agent_enabled=False),
+            clock=FixedClock(fixed_now=NOW),
+            market_clock=AlwaysOpenClock(),
+            orchestrator=orch,
+        )
+        original = [
+            ExitDecision(
+                position=position,
+                exit_reason=None,
+                reference_price=100.25,
+            )
+        ]
+
+        with patch(
+            "driftpilot.agents.state_machine_bridge.tick_slots_from_positions",
+            return_value={1: "request_early_cut"},
+        ) as tick_slots:
+            decisions = machine._agent_intercept_exits(original)
+
+        assert decisions == original
+        tick_slots.assert_not_called()
