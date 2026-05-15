@@ -338,8 +338,16 @@ class MultiSignal:
         for signal in self._signals:
             try:
                 params = inspect.signature(signal.scan).parameters
-                result = signal.scan(now=now) if "now" in params else signal.scan()
-                candidates = await result if inspect.isawaitable(result) else result
+                call_fn = (lambda s=signal: s.scan(now=now)) if "now" in params else signal.scan
+                result = call_fn()
+                if inspect.isawaitable(result):
+                    candidates = await asyncio.wait_for(result, timeout=30.0)
+                else:
+                    # Synchronous scan — run in thread to avoid blocking event loop
+                    candidates = result
+            except asyncio.TimeoutError:
+                logger.warning("MultiSignal: %s.scan timed out after 30s — skipping", getattr(signal, "name", "?"))
+                continue
             except Exception as exc:
                 logger.exception("MultiSignal: %s.scan raised: %s", signal.name, exc)
                 continue
@@ -838,12 +846,24 @@ class CatalystScannerService:
 
         # ── Batch-fetch Alpaca snapshots for RVOL / return enrichment ──
         candidate_symbols = [sc.symbol.upper() for sc in sig_candidates]
-        snapshot_features = await asyncio.to_thread(
-            self._fetch_snapshot_features, candidate_symbols, now
-        ) if candidate_symbols else {}
+        try:
+            snapshot_features = await asyncio.wait_for(
+                asyncio.to_thread(self._fetch_snapshot_features, candidate_symbols, now),
+                timeout=10.0,
+            ) if candidate_symbols else {}
+        except asyncio.TimeoutError:
+            logger.warning("catalyst scanner: snapshot enrichment timed out — proceeding without RVOL")
+            snapshot_features = {}
 
         for rank, sc in enumerate(sig_candidates, start=1):
-            quote = await asyncio.to_thread(self.quote_provider.latest_quote, sc.symbol)
+            try:
+                quote = await asyncio.wait_for(
+                    asyncio.to_thread(self.quote_provider.latest_quote, sc.symbol),
+                    timeout=3.0,
+                )
+            except asyncio.TimeoutError:
+                logger.warning("catalyst scanner: quote timeout for %s — skipping", sc.symbol)
+                continue
             if quote is None:
                 logger.info(
                     "catalyst scanner: no live quote for %s — skipping (broker would reject)",
