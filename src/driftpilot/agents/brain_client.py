@@ -18,7 +18,7 @@ import httpx
 logger = logging.getLogger("driftpilot.brain_client")
 
 DEFAULT_BRAIN_URL = "http://192.168.1.166:8100"
-DEFAULT_TIMEOUT = 5.0  # seconds — brain queries must be fast
+DEFAULT_TIMEOUT = 2.0  # seconds — brain queries must be fast (was 5s, caused event loop blocking)
 
 
 @dataclass
@@ -43,10 +43,18 @@ class BrainClient:
         self.brain_url = brain_url or os.getenv("BRAIN_URL", DEFAULT_BRAIN_URL)
         self.timeout = timeout
         self.enabled = enabled if enabled is not None else os.getenv("BRAIN_ENABLED", "true").lower() == "true"
-        self._client = httpx.Client(base_url=self.brain_url, timeout=self.timeout)
+        self._client = httpx.Client(
+            base_url=self.brain_url,
+            timeout=httpx.Timeout(self.timeout, connect=1.0),
+            limits=httpx.Limits(max_connections=2, max_keepalive_connections=1),
+        )
         self._healthy = True
         self._consecutive_failures = 0
-        self._max_failures_before_backoff = 3
+        self._max_failures_before_backoff = 1  # trip fast — one failure = skip until next cycle
+
+    def reset_circuit_breaker(self) -> None:
+        """Reset the circuit breaker for a new operator cycle."""
+        self._consecutive_failures = 0
 
     def is_available(self) -> bool:
         """Check if brain server is reachable."""

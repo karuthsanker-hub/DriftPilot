@@ -284,7 +284,10 @@ class DriftPilotStateMachine:
 
             if self.position_monitor is not None:
                 # Use decide/execute split when orchestrator is active
-                if self.orchestrator is not None and self.orchestrator.running and hasattr(self.position_monitor, "decide"):
+                if (
+                    self._agent_pipeline_enabled()
+                    and hasattr(self.position_monitor, "decide")
+                ):
                     logger.info("[AGENT] decide/execute path ACTIVE — agents will intercept exit decisions")
                     decisions = self.position_monitor.decide()
                     logger.info(
@@ -587,9 +590,17 @@ class DriftPilotStateMachine:
         return age_seconds <= self.settings.spy_stale_seconds
 
     # ── Agent bridge helpers (observe-only, Wave 1) ────────────────
+    def _agent_pipeline_enabled(self) -> bool:
+        """Return True only when PM/slot/scanner agents are explicitly enabled."""
+        return (
+            bool(self.settings.agent_enabled)
+            and self.orchestrator is not None
+            and bool(getattr(self.orchestrator, "running", False))
+        )
+
     def _tick_agents_pm(self) -> None:
         """Portfolio-level oversight tick. No-op if orchestrator is None."""
-        if self.orchestrator is None:
+        if not self._agent_pipeline_enabled():
             return
         try:
             from driftpilot.agents.state_machine_bridge import tick_pm_from_repo
@@ -626,7 +637,7 @@ class DriftPilotStateMachine:
 
         Returns the (possibly modified) decision list.
         """
-        if self.orchestrator is None or not self.orchestrator.running:
+        if not self._agent_pipeline_enabled():
             return decisions
 
         try:
@@ -703,7 +714,7 @@ class DriftPilotStateMachine:
 
     def _tick_agents_scanner(self, scan_result: ScanResult) -> None:
         """Scanner entry-approval tick. Lets agents weigh in on candidates."""
-        if self.orchestrator is None:
+        if not self._agent_pipeline_enabled():
             return
         if not scan_result.candidates:
             return
